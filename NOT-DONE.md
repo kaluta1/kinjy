@@ -1060,3 +1060,4 @@ What came from where: replies, the composer's emoji/sticker panel, the redesign 
   The thread's "new messages" divider skips system lines too.
   `e2e_unread_count.py` 17/17 (11 were failing since 13/10),
   `e2e_welcome_unread.py` 8/8.
+- Deployed on kinjy.com 16/10 18:38 (messaging, web; backups `pre-unread-20261016-1752`).
