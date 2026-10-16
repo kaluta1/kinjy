@@ -1045,3 +1045,6 @@ What came from where: replies, the composer's emoji/sticker panel, the redesign 
   against the old migration), and `e2e_messaging_age.py` rewritten for the
   group case - its old photo was never a real attachment, so it proved
   nothing. 22/22.
+- Deployed on kinjy.com 16/10 16:58 (messaging, web; backups
+  `pre-teen-media-20261016-1657`). Checked from outside and in the running
+  containers; not clicked through in production with a real teen account.
