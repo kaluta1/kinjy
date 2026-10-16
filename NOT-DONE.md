@@ -1048,3 +1048,15 @@ What came from where: replies, the composer's emoji/sticker panel, the redesign 
 - Deployed on kinjy.com 16/10 16:58 (messaging, web; backups
   `pre-teen-media-20261016-1657`). Checked from outside and in the running
   containers; not clicked through in production with a real teen account.
+
+## A new member's hundreds of unread messages (16/10)
+
+- ~~A new account opened Messages on hundreds of unread messages.~~ Two causes
+  in the one query the badge and the list share: the welcome group's history
+  from before the member arrived counted, and so did the room's own lines -
+  "X joined Kinjy" is written once per registration, sender empty, which is
+  "not me". Now neither counts: unread starts at your arrival, and system
+  lines are never unread. A real message in the welcome group still counts.
+  The thread's "new messages" divider skips system lines too.
+  `e2e_unread_count.py` 17/17 (11 were failing since 13/10),
+  `e2e_welcome_unread.py` 8/8.

@@ -1462,7 +1462,10 @@ export default function Messages() {
     if (!mark) return null
     const since = new Date(mark).getTime()
     return (
-      messages.find((m) => m.sender_id !== user?.id && new Date(m.created_at).getTime() > since)
+      // The room's own lines are not unread (the badge does not count them either).
+      messages.find(
+        (m) => m.sender_id !== user?.id && m.kind !== 'system' && new Date(m.created_at).getTime() > since,
+      )
         ?.id ?? null
     )
   })()

@@ -1692,6 +1692,15 @@ def _unread_by_conversation(db: OrmSession, user_id: str, ids) -> dict[str, int]
         .where(
             models.Message.conversation_id.in_(ids),
             models.Message.sender_id != user_id,
+            # The room's own lines ("X joined Kinjy", "Y renamed the group")
+            # are bookkeeping, not somebody talking to you. The welcome group
+            # writes one per registration, so counting them lit every badge
+            # with hundreds.
+            models.Message.kind != "system",
+            # Nothing said before you arrived is unread *for you*: a member
+            # who joins a busy room starts at zero, not at its whole history.
+            models.Message.created_at
+            >= func.coalesce(models.Participant.joined_at, models.Message.created_at),
             or_(
                 models.Participant.last_read_at.is_(None),
                 models.Message.created_at > models.Participant.last_read_at,
