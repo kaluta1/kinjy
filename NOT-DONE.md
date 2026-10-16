@@ -975,4 +975,7 @@ What came from where: replies, the composer's emoji/sticker panel, the redesign 
   year**: on 1 January pins above three stay, but no new one can be added
   until the new year's fee is paid.
 - Verified locally: `e2e_pins_follow.py` (37 checks) and the neighbouring
-  suites. **Not deployed.**
+  suites. Deployed on kinjy.com 16/10 15:42 (community, payment, user, web;
+  backups `pre-pins-follow-20261016-1540`). Checked from outside only: the
+  routes answer, `pinned_at` exists, `/internal/kyc` is not reachable from
+  the internet. Not clicked through in production with a real account.
