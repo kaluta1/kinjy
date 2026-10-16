@@ -546,6 +546,20 @@
   .prose-article h2 {
     @apply mt-4 mb-2 font-display text-xl font-semibold;
   }
+  /* Pictures and clips placed in an article's text, and embedded videos. */
+  .prose-article figure.article-figure {
+    @apply my-3 overflow-hidden rounded-card-sm bg-black/20;
+  }
+  .prose-article figure.article-figure img,
+  .prose-article figure.article-figure video {
+    @apply mx-auto block max-h-[70vh] w-full object-contain;
+  }
+  .prose-article figure.article-figure iframe {
+    @apply block aspect-video w-full border-0;
+  }
+  .prose-article .article-figure-note {
+    @apply m-0 px-3 py-2 text-sm text-text-low;
+  }
   .prose-article h3 {
     @apply mt-3 mb-1.5 font-display text-lg font-semibold;
   }

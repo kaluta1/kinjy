@@ -53,6 +53,12 @@ export function useMentionSuggest(
   value: string,
   setValue: (next: string) => void,
   elRef: React.RefObject<HTMLInputElement | HTMLTextAreaElement | null>,
+  /**
+   * Where the names come from. The whole platform by default; a chat passes
+   * the people in the room, because a mention of somebody outside it reaches
+   * nobody.
+   */
+  search?: (query: string) => Promise<Person[]>,
 ) {
   const [items, setItems] = useState<Person[]>([])
   const [index, setIndex] = useState(0)
@@ -95,13 +101,12 @@ export function useMentionSuggest(
     // otherwise be a search.
     const ticket = ++latest.current
     const timer = window.setTimeout(() => {
-      void kaluta.people
-        .search(query, LIMIT)
-        .then((page) => {
+      void (search ? search(query) : kaluta.people.search(query, LIMIT).then((page) => page.items))
+        .then((found) => {
           // Answers arrive out of order; the one for "ko" must not replace the
           // one for "kofi".
           if (ticket !== latest.current) return
-          setItems(page.items)
+          setItems(found.slice(0, LIMIT))
           setIndex(0)
         })
         .catch(() => {
@@ -109,7 +114,7 @@ export function useMentionSuggest(
         })
     }, 160)
     return () => window.clearTimeout(timer)
-  }, [query])
+  }, [query, search])
 
   const open = query !== null && items.length > 0
 

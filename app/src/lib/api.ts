@@ -392,6 +392,8 @@ export interface ProfileEligibility {
 export interface PostMedia {
   /** Null when data saver withheld it — the bytes were never sent. */
   url: string | null
+  /** Where an article places this file in its text. */
+  media_id?: string
   kind: string
   alt_text: string | null
   deferred?: boolean

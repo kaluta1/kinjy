@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Link } from 'react-router'
 import {
@@ -26,7 +26,7 @@ import { ApiError, kaluta, type Post, type UploadedMedia } from '@/lib/api'
 import RichTextEditor from './RichTextEditor'
 import { MentionList, useMentionSuggest } from './MentionSuggest'
 import { onChange } from '@/lib/live'
-import { htmlToText } from '@/lib/richtext'
+import { articleMediaIds, htmlToText } from '@/lib/richtext'
 import { LANGUAGES } from '@/i18n'
 import { cn } from '@/lib/utils'
 
@@ -176,11 +176,23 @@ export default function Composer({
   // address cannot be the preview: an upload nobody has attached to a post yet is
   // served only against a ticket, so it would show as a broken image until posted.
   const [media, setMedia] = useState<Array<UploadedMedia & { previewUrl?: string }>>([])
+  // Pictures and clips placed inside an article's text. Attached to the post
+  // like any other media - checked, classified, signed - and placed by id.
+  const [inlineMedia, setInlineMedia] = useState<Array<UploadedMedia & { previewUrl: string }>>([])
   const [uploading, setUploading] = useState(false)
   const [visibility, setVisibility] = useState<string>(community ? 'community' : 'public')
   const [circleId, setCircleId] = useState('')
   const [extras, setExtras] = useState<string[]>([])
   const [provenance, setProvenance] = useState<string>('original')
+  const uploadInline = useCallback(
+    async (file: File) => {
+      const [asset, size] = await Promise.all([kaluta.media.upload(file, provenance), measure(file)])
+      const previewUrl = URL.createObjectURL(file)
+      setInlineMedia((current) => [...current, { ...asset, ...size, previewUrl }])
+      return { id: asset.id, url: previewUrl, kind: asset.kind }
+    },
+    [provenance],
+  )
   // The author's own declaration. Nothing infers this — a wrong guess either
   // censors an adult or shows a child what they should not see.
   const [mature, setMature] = useState(false)
@@ -270,6 +282,8 @@ export default function Composer({
     setHeadline('')
     for (const item of media) if (item.previewUrl) URL.revokeObjectURL(item.previewUrl)
     setMedia([])
+    for (const item of inlineMedia) URL.revokeObjectURL(item.previewUrl)
+    setInlineMedia([])
     setTopics('')
     setCity('')
     setKind('text')
@@ -325,7 +339,17 @@ export default function Composer({
           .map((t) => t.trim().toLowerCase())
           .filter(Boolean),
         city: city.trim() || undefined,
-        media: media.map((m) => ({
+        // The article's own pictures and clips go first, in the order they
+        // appear, and only those still in the text: one deleted while writing
+        // is not attached.
+        media: [
+          ...(kind === 'article'
+            ? articleMediaIds(body)
+                .map((id) => inlineMedia.find((m) => m.id === id))
+                .filter((m): m is UploadedMedia & { previewUrl: string } => Boolean(m))
+            : []),
+          ...media,
+        ].map((m) => ({
           media_id: m.id,
           url: m.url,
           kind: m.kind,
@@ -524,7 +548,7 @@ export default function Composer({
 
             {kind === 'article' ? (
               <div className="mt-3">
-                <RichTextEditor value={body} onChange={setBody} />
+                <RichTextEditor value={body} onChange={setBody} onUploadMedia={uploadInline} />
               </div>
             ) : (
               <div className="relative">

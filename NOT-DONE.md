@@ -1061,3 +1061,35 @@ What came from where: replies, the composer's emoji/sticker panel, the redesign 
   `e2e_unread_count.py` 17/17 (11 were failing since 13/10),
   `e2e_welcome_unread.py` 8/8.
 - Deployed on kinjy.com 16/10 18:38 (messaging, web; backups `pre-unread-20261016-1752`).
+
+## Group panel dialog, chat mentions, media inside articles (16/10)
+
+- **Share, privacy and pin** moved out of the group panel into its own dialog
+  (rendered on `document.body`, so the panel's overflow cannot clip it). The
+  panel keeps a one-line summary: public/private, pinned, and how many people
+  wait to join, so an admin still notices the queue.
+- ~~No @mentions in chat.~~ Typing `@` and two letters offers the people in
+  the room (the other person in a direct conversation, the members of a
+  group, a platform search in the welcome group, where everybody is a member).
+  `@handle` in a bubble links to the profile. The person named is notified -
+  bell, live and push, never quoting the message - **only if they are in the
+  conversation**, and even in the welcome group, where ordinary traffic
+  notifies nobody. End-to-end encrypted messages carry no plaintext, so their
+  mentions notify nobody. `e2e_chat_mentions.py` 10/10.
+- ~~Articles could not carry pictures or video in their text.~~ The editor
+  inserts a picture or a clip where the caret is (toolbar, paste, drag and
+  drop), and embeds YouTube or Vimeo from a pasted address or the toolbar. A
+  placeholder holds the spot while the file uploads, so typing on does not
+  move it. **Inline files are real attachments of the post**: ownership
+  checked, classified (a post with a picture still waits for a human), signed
+  per reader. The text stores only `<figure data-media-id data-kind>`; the
+  signed address is filled in at display, and a marker naming a file that is
+  not on the post shows nothing. Embeds are stored as provider + id and
+  rebuilt into a youtube-nocookie / player.vimeo.com iframe; a pasted
+  `<iframe>` is never kept. Inline media are left out of the grid under the
+  post, so nothing appears twice.
+- **Not done:** no caption or alt text on an inline picture yet; no way to
+  move a figure once placed other than cutting and re-inserting it; editing a
+  published article's media is not possible (post edit is text-only, as
+  before). Uploads dropped from the text before publishing stay as orphan
+  files in media-service.

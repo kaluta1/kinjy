@@ -3,7 +3,7 @@ import { useTranslation } from 'react-i18next'
 import { Check, Columns2, Eye, EyeOff, Flag, HelpCircle, Languages, Link2, Lock, MapPin, MessageCircle, Pencil, Repeat2, Share2, SlidersHorizontal, Trash2 } from 'lucide-react'
 import { ApiError, kaluta, type Post, type WhyFactor } from '@/lib/api'
 import { useTopic } from '@/hooks/useRealtime'
-import { htmlToText, looksLikeHtml, readableText, sanitizeHtml } from '@/lib/richtext'
+import { articleMediaIds, htmlToText, hydrateArticle, looksLikeHtml, readableText, sanitizeHtml } from '@/lib/richtext'
 import { useAuth } from '@/hooks/useAuth'
 import { isLink, LINK_RE, splitTrailing, TAG_OR_MENTION } from '@/lib/linkify'
 import { copyLink, postUrl, SHARE_TARGETS } from '@/lib/share'
@@ -522,6 +522,14 @@ export default function PostCard({
   const body = translation && !sideBySide ? translation.text : sourceBody
   /** Text without the tags — for translation, and for the side-by-side column. */
   const plainBody = looksLikeHtml(sourceBody) ? htmlToText(sourceBody) : sourceBody
+  // An article's pictures and clips sit in its text, by id. They are drawn
+  // there from this post's own signed media, and left out of the grid below
+  // so nothing appears twice.
+  const inlineIds = isRichArticle ? new Set(articleMediaIds(sourceBody)) : new Set<string>()
+  const gridMedia = inlineIds.size ? media.filter((m) => !m.media_id || !inlineIds.has(m.media_id)) : media
+  const articleHtml = isRichArticle
+    ? hydrateArticle(sanitizeHtml(body), (id) => media.find((m) => m.media_id === id) ?? null)
+    : ''
   // The first link in the body is the one worth unfurling; a post full of
   // links is a list, and five cards under it is not a post any more. Declared
   // after plainBody, which it reads - a const used above its declaration is a
@@ -647,7 +655,7 @@ export default function PostCard({
         <Expandable collapsedHeight={BODY_COLLAPSED} className="mt-3" deps={[body]}>
           <div
             className="prose-article text-[0.95rem] text-text-hi"
-            dangerouslySetInnerHTML={{ __html: sanitizeHtml(body) }}
+            dangerouslySetInnerHTML={{ __html: articleHtml }}
           />
         </Expandable>
       ) : (
@@ -720,12 +728,14 @@ export default function PostCard({
 
       {/* Attached media. The layout follows the count - see MediaGrid: a
           single picture is never cropped, a grid is. */}
-      {media.length > 0 && (
+      {gridMedia.length > 0 && (
         <MediaGrid
-          media={media}
+          media={gridMedia}
           onOpen={(at) => {
             setWantsComments(false)
-            setPreview(at)
+            // The grid may leave out the article's inline media; the viewer
+            // shows them all, so its index is the one in the full list.
+            setPreview(Math.max(0, media.indexOf(gridMedia[at])))
           }}
           onLoadDeferred={loadMedia}
           loadingDeferred={loadingMedia}

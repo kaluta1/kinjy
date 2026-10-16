@@ -42,6 +42,7 @@ import AlertsToggle from '@/components/app/AlertsToggle'
 import { playMessageChime, primeSound } from '@/lib/chime'
 import MessageInput from '@/components/ui-kit/MessageInput'
 import { formatChatText } from '@/lib/chatFormat'
+import { MentionList, useMentionSuggest } from '@/components/social/MentionSuggest'
 import {
   ReplyBanner,
   ReplyButton,
@@ -506,6 +507,24 @@ export default function Messages() {
   const [replyTo, setReplyTo] = useState<ChatMessage | null>(null)
   const [highlightId, setHighlightId] = useState<string | null>(null)
   const inputRef = useRef<HTMLTextAreaElement>(null)
+  // People in the open conversation, for @mentions. A room's own members:
+  // naming somebody outside it notifies nobody. The welcome group is everybody,
+  // so it searches the platform instead of listing it.
+  const [roomPeople, setRoomPeople] = useState<Array<PersonBrief & { user_id: string }>>([])
+  const searchRoom = useCallback(
+    async (query: string) => {
+      const q = query.toLowerCase()
+      if (roomPeople.length === 0) return (await kaluta.people.search(query, 6)).items
+      return roomPeople.filter(
+        (p) =>
+          p.user_id !== user?.id &&
+          ((p.handle ?? '').toLowerCase().startsWith(q) ||
+            (p.display_name ?? '').toLowerCase().split(/\s+/).some((w) => w.startsWith(q))),
+      )
+    },
+    [roomPeople, user?.id],
+  )
+  const mention = useMentionSuggest(draft, (next) => onDraftChange(next), inputRef, searchRoom)
   // The open message menu, anchored to its bubble by id. By id rather than by
   // a captured rect: the panel is fixed to the viewport, so a rect measured at
   // the moment of the click leaves it behind as soon as the thread scrolls.
@@ -1361,6 +1380,29 @@ export default function Messages() {
 
   // --- derived view state ---------------------------------------------------------
   const active = conversations.data?.items.find((c) => c.id === activeId)
+  // Who can be @mentioned here: the other person in a direct conversation,
+  // the members of a group (first 200, which is every group but the welcome
+  // one), and nobody listed for the welcome group, which searches instead.
+  useEffect(() => {
+    if (!active) return setRoomPeople([])
+    if (active.kind !== 'group') {
+      setRoomPeople(
+        Object.entries(active.profiles ?? {}).map(([uid, p]) => ({ ...p, user_id: uid })),
+      )
+      return
+    }
+    if (active.is_welcome) return setRoomPeople([])
+    let live = true
+    kaluta.messages
+      .participants(active.id)
+      .then((page) => {
+        if (live) setRoomPeople(page.items.map((m) => ({ ...m, handle: m.handle ?? '' })))
+      })
+      .catch(() => live && setRoomPeople([]))
+    return () => {
+      live = false
+    }
+  }, [active?.id, active?.kind, active?.is_welcome])
   const activeOthers = active ? active.participants.filter((p) => p !== user?.id) : []
 
   const readAt = useCallback(
@@ -2465,7 +2507,7 @@ export default function Messages() {
               {replyTo && (
                 <ReplyBanner name={nameOf(replyTo)} message={replyTo} onCancel={() => setReplyTo(null)} />
               )}
-              <form onSubmit={send} className={cn('flex items-center gap-1.5 px-3 py-3 sm:px-5', FEATURES.assistant && 'pe-14 lg:pe-12')}>
+              <form onSubmit={send} className={cn('relative flex items-center gap-1.5 px-3 py-3 sm:px-5', FEATURES.assistant && 'pe-14 lg:pe-12')}>
                 {recordingSince !== null ? (
                   <>
                     <button
@@ -2491,6 +2533,14 @@ export default function Messages() {
                   </>
                 ) : (
                   <>
+                    {mention.open && (
+                      <MentionList
+                        items={mention.items}
+                        index={mention.index}
+                        onPick={mention.pick}
+                        onHover={mention.setIndex}
+                      />
+                    )}
                     <AttachmentMenu onFiles={stage} />
                     <EmojiStickerButton packs={stickerPacks.data?.packs ?? null} onEmoji={insertEmoji} onSticker={sendSticker} />
                     {/* A textarea, not an input: a message can have more
@@ -2506,11 +2556,19 @@ export default function Messages() {
                       onChange={(e) => onDraftChange(e.target.value)}
                       onSubmit={() => void send()}
                       onKeyDown={(e) => {
+                        // The name list owns arrows, Enter and Escape while open:
+                        // picking a name is not sending the message.
+                        if (mention.onKeyDown(e)) {
+                          e.preventDefault()
+                          return
+                        }
                         if (e.key === 'Escape' && replyTo) {
                           e.preventDefault()
                           setReplyTo(null)
                         }
                       }}
+                      onKeyUp={mention.sync}
+                      onClick={mention.sync}
                       onPaste={(e) => {
                         // A pasted screenshot is an attachment, not text.
                         if (e.clipboardData.files.length) {

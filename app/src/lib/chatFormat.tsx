@@ -1,3 +1,4 @@
+import { Link } from 'react-router'
 import type { ReactNode } from 'react'
 
 /**
@@ -134,13 +135,38 @@ function splitTrailing(raw: string): { href: string; text: string; trailing: str
   return { href: text.startsWith('www.') ? `https://${text}` : text, text, trailing }
 }
 
-/** Addresses inside a run of plain text, as links. */
-function linkify(text: string, key: string): ReactNode[] {
-  const parts = text.split(LINK_RE)
+/**
+ * @handle mentions inside a run of plain text, as links to the person.
+ *
+ * Only at the start or after a space, as when typed: an email address has an
+ * @ in it and names nobody. A trailing dot is the sentence's full stop.
+ */
+function mentionify(text: string, key: string): ReactNode[] {
+  const parts = text.split(/(^|\s)(@[a-z0-9_.]{2,40})/i)
   if (parts.length === 1) return [text]
   return parts.map((part, index) => {
     if (!part) return null
-    if (!/^(?:https?:\/\/|www\.)/i.test(part)) return part
+    if (index % 3 !== 2) return part
+    const trailing = /\.+$/.exec(part)?.[0] ?? ''
+    const token = trailing ? part.slice(0, -trailing.length) : part
+    return (
+      <span key={`${key}-m${index}`}>
+        <Link to={`/u/${token.slice(1).toLowerCase()}`} className="font-semibold underline-offset-2 hover:underline">
+          {token}
+        </Link>
+        {trailing}
+      </span>
+    )
+  })
+}
+
+/** Addresses inside a run of plain text, as links. */
+function linkify(text: string, key: string): ReactNode[] {
+  const parts = text.split(LINK_RE)
+  if (parts.length === 1) return mentionify(text, key)
+  return parts.flatMap((part, index) => {
+    if (!part) return null
+    if (!/^(?:https?:\/\/|www\.)/i.test(part)) return mentionify(part, `${key}-t${index}`)
     const { href, text: label, trailing } = splitTrailing(part)
     if (!label) return part
     return (

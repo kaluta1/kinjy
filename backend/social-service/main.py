@@ -653,6 +653,8 @@ def _post_out(
         "media": [
             {
                 "url": signed_media[m.media_id],
+                # Lets an article place this file in its text by id.
+                "media_id": m.media_id,
                 "kind": m.kind,
                 "alt_text": m.alt_text,
                 "width": m.width,
@@ -2009,6 +2011,8 @@ def get_post_media(post_id: str, principal: MaybeUser, db: OrmSession = Depends(
         "media": [
             {
                 "url": mediasign.sign_url(m.url, m.media_id, viewer_id),
+                # Lets an article place this file in its text by id.
+                "media_id": m.media_id,
                 "kind": m.kind,
                 "alt_text": m.alt_text,
             }

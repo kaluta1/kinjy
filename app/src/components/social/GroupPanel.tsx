@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
+import { createPortal } from 'react-dom'
 import { Link } from 'react-router'
 import { Check, Globe, Link2, Lock, LogOut, Pencil, Pin, PinOff, Search, ShieldCheck, UserPlus, X } from 'lucide-react'
 import { copyLink, siteOrigin } from '@/lib/share'
@@ -24,6 +25,57 @@ import { cn } from '@/lib/utils'
  * nobody into a room with a minor in it, comes in by link - the server says
  * so in one sentence that does not say which.
  */
+function GroupAccessDialog({
+  conversation,
+  runs,
+  onChanged,
+  onClose,
+}: {
+  conversation: Conversation
+  runs: boolean
+  onChanged: () => void
+  onClose: () => void
+}) {
+  const { tok } = useAppTheme()
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => event.key === 'Escape' && onClose()
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [onClose])
+  return createPortal(
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-label="Share, privacy and pin"
+      className="fixed inset-0 z-[80] flex items-center justify-center bg-black/50 p-4"
+      onClick={onClose}
+    >
+      <div
+        onClick={(event) => event.stopPropagation()}
+        className={cn('max-h-[80svh] w-full max-w-md overflow-hidden rounded-2xl', tok.card)}
+      >
+        <header className="flex items-center justify-between gap-2 border-b border-[var(--cloud-border)] px-4 py-3">
+          <h2 className={cn('min-w-0 truncate text-sm font-semibold', tok.text)}>
+            {conversation.title ?? 'Group'}: share, privacy and pin
+          </h2>
+          <button
+            type="button"
+            onClick={onClose}
+            aria-label="Close"
+            className={cn('rounded-full p-1.5 hover:bg-text-hi/[0.07]', tok.mid)}
+          >
+            <X size={16} aria-hidden="true" />
+          </button>
+        </header>
+        <div className="max-h-[calc(80svh-56px)] overflow-y-auto p-4">
+          <GroupAccess conversation={conversation} runs={runs} onChanged={onChanged} />
+        </div>
+      </div>
+    </div>,
+    document.body,
+  )
+}
+
 function GroupAccess({
   conversation,
   runs,
@@ -74,7 +126,7 @@ function GroupAccess({
     }, 'Could not get the link')
 
   return (
-    <div className="mt-5 space-y-3 rounded-xl border border-[var(--cloud-border)] p-3">
+    <div className="space-y-4">
       <div className="flex flex-wrap gap-2">
         <button
           type="button"
@@ -244,6 +296,19 @@ export default function GroupPanel({
   const [found, setFound] = useState<Array<PersonBrief & { user_id: string }>>([])
 
   const runs = conversation.my_role === 'owner' || conversation.my_role === 'admin'
+
+  // Privacy, the link, pins and join requests live in their own dialog; the
+  // panel shows a one-line summary, with the queue size so an admin notices.
+  const [accessOpen, setAccessOpen] = useState(false)
+  const [waiting, setWaiting] = useState(0)
+  const refreshWaiting = useCallback(() => {
+    if (!runs || conversation.is_welcome) return
+    kaluta.messages
+      .requests(conversation.id)
+      .then((page) => setWaiting(page.items.length))
+      .catch(() => setWaiting(0))
+  }, [conversation.id, conversation.is_welcome, runs])
+  useEffect(refreshWaiting, [refreshWaiting])
 
   const load = useCallback(() => {
     kaluta.messages
@@ -467,7 +532,36 @@ export default function GroupPanel({
         )}
 
         {!conversation.is_welcome && (
-          <GroupAccess conversation={conversation} runs={runs} onChanged={() => { load(); onChanged() }} />
+          <button
+            type="button"
+            onClick={() => setAccessOpen(true)}
+            className="mt-5 flex w-full items-center gap-2.5 rounded-xl border border-[var(--cloud-border)] px-3 py-2.5 text-start hover:bg-text-hi/[0.04]"
+          >
+            <Link2 size={16} className="shrink-0 text-gold-soft" aria-hidden="true" />
+            <span className="min-w-0 flex-1">
+              <span className={cn('block text-sm font-semibold', tok.text)}>Share, privacy and pin</span>
+              <span className={cn('block text-xs', tok.low)}>
+                {(conversation.privacy ?? 'private') === 'public' ? 'Public' : 'Private'}
+                {conversation.pinned ? ' · Pinned' : ''}
+                {runs && waiting > 0 ? ` · ${waiting} waiting to join` : ''}
+              </span>
+            </span>
+          </button>
+        )}
+        {accessOpen && (
+          <GroupAccessDialog
+            conversation={conversation}
+            runs={runs}
+            onClose={() => {
+              setAccessOpen(false)
+              refreshWaiting()
+            }}
+            onChanged={() => {
+              load()
+              onChanged()
+              refreshWaiting()
+            }}
+          />
         )}
 
         <div className="mt-5 flex items-center justify-between gap-2">

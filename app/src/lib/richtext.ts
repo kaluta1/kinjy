@@ -85,6 +85,147 @@ function linkifyInto(text: string, out: Node, doc: Document): void {
   if (last < text.length) out.appendChild(doc.createTextNode(text.slice(last)))
 }
 
+/**
+ * Pictures and videos inside an article.
+ *
+ * Stored as an empty marker - `<figure data-media-id data-kind>` - never as an
+ * address. The file itself is one of the post's own attachments, so it went
+ * through the ownership check, the age classifier (a post with a picture is
+ * never released without a human) and the signed-link gate like any other.
+ * The address a reader gets is signed for them at read time and put into the
+ * marker here, on the way to the screen.
+ *
+ * A video from elsewhere is a provider and an id, rebuilt into a known embed
+ * address on display. A raw `<iframe src>` from a paste is never kept.
+ */
+const MEDIA_ID_RE = /^mda_[A-Za-z0-9]{6,60}$/
+const FIGURE_KINDS = new Set(['image', 'video'])
+const EMBED_ID: Record<string, RegExp> = {
+  youtube: /^[A-Za-z0-9_-]{11}$/,
+  vimeo: /^\d{6,12}$/,
+}
+
+/** The provider and id of a YouTube or Vimeo address, or null. */
+export function embedFromUrl(raw: string): { provider: string; id: string } | null {
+  let url: URL
+  try {
+    url = new URL(raw.trim())
+  } catch {
+    return null
+  }
+  const host = url.hostname.replace(/^www\.|^m\./, '')
+  let provider = ''
+  let id = ''
+  if (host === 'youtu.be') {
+    provider = 'youtube'
+    id = url.pathname.slice(1)
+  } else if (host === 'youtube.com' || host === 'youtube-nocookie.com') {
+    provider = 'youtube'
+    id = url.searchParams.get('v') ?? url.pathname.match(/^\/(?:embed|shorts|live)\/([^/?#]+)/)?.[1] ?? ''
+  } else if (host === 'vimeo.com' || host === 'player.vimeo.com') {
+    provider = 'vimeo'
+    id = url.pathname.match(/(\d{6,12})/)?.[1] ?? ''
+  }
+  return provider && EMBED_ID[provider].test(id) ? { provider, id } : null
+}
+
+/** A clean, empty marker for a figure, or null when it is not one we know. */
+function cleanFigure(element: Element, doc: Document): Element | null {
+  const mediaId = element.getAttribute('data-media-id') ?? ''
+  const kind = element.getAttribute('data-kind') ?? ''
+  if (MEDIA_ID_RE.test(mediaId) && FIGURE_KINDS.has(kind)) {
+    const figure = doc.createElement('figure')
+    figure.setAttribute('data-media-id', mediaId)
+    figure.setAttribute('data-kind', kind)
+    return figure
+  }
+  const provider = element.getAttribute('data-embed') ?? ''
+  const id = element.getAttribute('data-id') ?? ''
+  if (EMBED_ID[provider]?.test(id)) {
+    const figure = doc.createElement('figure')
+    figure.setAttribute('data-embed', provider)
+    figure.setAttribute('data-id', id)
+    return figure
+  }
+  return null
+}
+
+/** The media ids an article places in its text, in order. */
+export function articleMediaIds(html: string): string[] {
+  return Array.from(html.matchAll(/data-media-id="(mda_[A-Za-z0-9]{6,60})"/g), (m) => m[1])
+}
+
+export interface InlineMedia {
+  url: string | null
+  kind: string
+  alt_text?: string | null
+}
+
+/**
+ * Fill an article's figures for display.
+ *
+ * Takes HTML that already went through sanitizeHtml, so every figure is an
+ * empty, validated marker; what goes inside is built here from those
+ * attributes and the post's own (signed) media. A marker whose media is not
+ * on the post shows nothing - a body cannot name somebody else's file.
+ */
+export function hydrateArticle(html: string, media: (id: string) => InlineMedia | null): string {
+  if (!html.includes('<figure')) return html
+  const doc = new DOMParser().parseFromString(`<body>${html}</body>`, 'text/html')
+  for (const figure of Array.from(doc.body.querySelectorAll('figure'))) {
+    figure.className = 'article-figure'
+    figure.setAttribute('contenteditable', 'false')
+    const provider = figure.getAttribute('data-embed')
+    const embedId = figure.getAttribute('data-id') ?? ''
+    if (provider && EMBED_ID[provider]?.test(embedId)) {
+      const frame = doc.createElement('iframe')
+      frame.setAttribute(
+        'src',
+        provider === 'youtube'
+          ? `https://www.youtube-nocookie.com/embed/${embedId}`
+          : `https://player.vimeo.com/video/${embedId}`,
+      )
+      frame.setAttribute('title', provider === 'youtube' ? 'YouTube video' : 'Vimeo video')
+      frame.setAttribute('loading', 'lazy')
+      frame.setAttribute('referrerpolicy', 'strict-origin-when-cross-origin')
+      frame.setAttribute('allow', 'encrypted-media; picture-in-picture; fullscreen')
+      frame.setAttribute('allowfullscreen', '')
+      frame.setAttribute('sandbox', 'allow-scripts allow-same-origin allow-presentation allow-popups')
+      figure.appendChild(frame)
+      continue
+    }
+    const id = figure.getAttribute('data-media-id') ?? ''
+    const item = MEDIA_ID_RE.test(id) ? media(id) : null
+    if (!item) {
+      figure.remove()
+      continue
+    }
+    if (!item.url) {
+      const note = doc.createElement('p')
+      note.className = 'article-figure-note'
+      note.textContent =
+        item.kind === 'video' ? 'Video held back to save data.' : 'Picture held back to save data.'
+      figure.appendChild(note)
+      continue
+    }
+    if (item.kind === 'video') {
+      const video = doc.createElement('video')
+      video.setAttribute('src', item.url)
+      video.setAttribute('controls', '')
+      video.setAttribute('preload', 'metadata')
+      video.setAttribute('playsinline', '')
+      figure.appendChild(video)
+    } else {
+      const img = doc.createElement('img')
+      img.setAttribute('src', item.url)
+      img.setAttribute('alt', item.alt_text ?? '')
+      img.setAttribute('loading', 'lazy')
+      figure.appendChild(img)
+    }
+  }
+  return doc.body.innerHTML
+}
+
 function clean(node: Node, out: Node, doc: Document, inAnchor = false): void {
   for (const child of Array.from(node.childNodes)) {
     if (child.nodeType === Node.TEXT_NODE) {
@@ -96,6 +237,12 @@ function clean(node: Node, out: Node, doc: Document, inAnchor = false): void {
     if (child.nodeType !== Node.ELEMENT_NODE) continue
 
     const element = child as Element
+    if (element.tagName === 'FIGURE') {
+      // Its contents are a preview; only the validated marker is kept.
+      const figure = inAnchor ? null : cleanFigure(element, doc)
+      if (figure) out.appendChild(figure)
+      continue
+    }
     if (!ALLOWED_TAGS.has(element.tagName)) {
       // Keep the words, drop the wrapper: unwrapping a <div> or a <span> loses
       // styling but never loses the author's text.
@@ -137,7 +284,7 @@ export function htmlToText(html: string): string {
 
 /** Does this body actually contain markup, or is it plain text? */
 export function looksLikeHtml(value: string): boolean {
-  return /<(p|br|h2|h3|ul|ol|li|blockquote|strong|b|em|i|a|code|pre)\b/i.test(value)
+  return /<(p|br|h2|h3|ul|ol|li|blockquote|strong|b|em|i|a|code|pre|figure)\b/i.test(value)
 }
 
 /**

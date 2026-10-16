@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import re
 import secrets
 import time
 from datetime import datetime, timedelta, timezone
@@ -2227,6 +2228,7 @@ async def send_message(
     conversation_id: str,
     payload: MessageIn,
     principal: CurrentUser,
+    background: BackgroundTasks,
     db: OrmSession = Depends(get_db),
 ):
     sender = _member(db, conversation_id, principal.user_id)
@@ -2465,7 +2467,82 @@ async def send_message(
     if offline:
         db.commit()
 
+    await _notify_mentions(db, conversation, message, principal.user_id, sender_name, participants, background)
+
     return {"id": message.id, "created_at": message.created_at, "client_id": message.client_id}
+
+
+# How a handle is written in a message: the same shape the post composer and
+# the mention picker use. Preceded by the start or a space, so an email address
+# is not a mention of anybody.
+MENTION_RE = re.compile(r"(?:^|(?<=\s))@([a-z0-9_.]{2,40})", re.IGNORECASE)
+# A message naming more people than this is a broadcast, not a mention.
+MAX_MENTIONS = 10
+
+
+def _mentioned_ids(text: str) -> dict[str, str]:
+    """{user_id: handle} for the @handles in a message, resolved by user-service."""
+    handles = []
+    for raw in MENTION_RE.findall(text or ""):
+        handle = raw.rstrip(".").lower()
+        if handle and handle not in handles:
+            handles.append(handle)
+    if not handles:
+        return {}
+    try:
+        response = httpx.post(
+            f"{USER_URL}/internal/profiles/by-handle", json={"handles": handles[:MAX_MENTIONS]}, timeout=5
+        )
+        response.raise_for_status()
+        profiles = response.json().get("profiles", {})
+    except Exception as exc:
+        log.warning("could not resolve mentions: %s", exc)
+        return {}
+    return {p["user_id"]: h for h, p in profiles.items() if p and p.get("user_id")}
+
+
+async def _notify_mentions(
+    db: OrmSession,
+    conversation: models.Conversation,
+    message: models.Message,
+    sender_id: str,
+    sender_name: str | None,
+    participants: list[str],
+    background: BackgroundTasks,
+) -> None:
+    """Tell whoever was @mentioned, if they are in the room.
+
+    Somebody outside the conversation is never told: a mention is not a way to
+    reach a person the room's own rules keep out, nor to announce to them that
+    the room exists. Inside it, a mention is delivered even where ordinary
+    message notifications are not - the welcome group pushes nothing for its
+    traffic, and being named is the case where you do want to hear.
+
+    The server reads the text only when it can: an end-to-end encrypted
+    message carries no plaintext here, so its mentions stay between the
+    devices. The notification never quotes the message either.
+    """
+    if message.encrypted or message.kind == "system":
+        return
+    text = _plain(message)[0] or ""
+    if "@" not in text:
+        return
+    present = set(participants)
+    named = {uid: h for uid, h in _mentioned_ids(text).items() if uid in present and uid != sender_id}
+    if not named:
+        return
+    who = sender_name or (_profiles({sender_id}).get(sender_id) or {}).get("display_name") or "Someone"
+    where = conversation.title if conversation.kind == "group" and conversation.title else None
+    for uid in named:
+        await internal_notify(
+            user_id=uid,
+            background=background,
+            kind="mention",
+            title=f"{who} mentioned you" + (f" in {where}" if where else ""),
+            body=None,
+            link=f"/messages?c={conversation.id}",
+            db=db,
+        )
 
 
 # --- reactions -----------------------------------------------------------------
