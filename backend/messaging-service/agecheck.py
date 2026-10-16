@@ -172,7 +172,14 @@ def may_send_media(db: OrmSession, sender_id: str, conversation_id: str) -> tupl
     Text first. An image that arrives before consent has already been seen by
     the time anybody can report it, and "delete for everyone" does not unsee
     it. The rule applies to every recipient in the room who has not accepted.
+
+    Direct conversations only. In a group one teenager who has not accepted
+    would stop everybody else's photos; there the attachment is withheld from
+    that teenager instead (main._withheld_from), and the room carries on.
     """
+    conversation = db.get(models.Conversation, conversation_id)
+    if conversation is not None and conversation.kind == "group":
+        return True, ""
     others = db.scalars(
         select(models.Participant).where(
             models.Participant.conversation_id == conversation_id,

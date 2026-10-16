@@ -1020,3 +1020,28 @@ What came from where: replies, the composer's emoji/sticker panel, the redesign 
   `pre-chat-groups-20261016-1629`). Checked from outside: 13/13 healthy, New +
   Video Only returns only video, the age fix is in the running container.
   Not clicked through in production with a real account.
+
+## Teenagers added to a group, and requests that every deploy accepted (16/10)
+
+- ~~A teen added to a group received photos at once.~~ Since 13/10 everybody
+  put into a group was marked accepted. Now a minor (or anyone whose age
+  cannot be read) arrives unaccepted - on creation, when added, and in the
+  welcome group. They read the text; attachments from others are **withheld
+  from them** (no signed link, on the read path and in the live frame) until
+  they press Accept, or reply. The sender is not refused: one teen who has not
+  accepted would otherwise stop every photo in the room, the welcome group's
+  included. Adults added to a group are accepted at once, as before.
+- ~~Message requests had no Accept button.~~ A banner in the thread now offers
+  it, for groups and for direct requests.
+- ~~Every deploy accepted every pending request.~~ A migration meant as a
+  one-off backfill ran on every boot (`UPDATE participants SET accepted_at =
+  joined_at WHERE accepted_at IS NULL`), so each restart opened every request
+  and unlocked attachments to people who had never answered. It is bounded to
+  rows from before 25/09 now. **In production it already ran on every deploy:
+  0 of 253 participants were pending on 16/10, and which ones had been pending
+  cannot be recovered.** Existing teens in groups therefore stay accepted;
+  only new arrivals wait.
+- Tests: `e2e_teen_group_media.py` (11 checks, including a restart; it fails
+  against the old migration), and `e2e_messaging_age.py` rewritten for the
+  group case - its old photo was never a real attachment, so it proved
+  nothing. 22/22.

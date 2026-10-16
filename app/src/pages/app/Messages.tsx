@@ -288,6 +288,17 @@ function Attachment({
   const url = message.media_url ?? message.preview_url ?? null
   const kind = message.media_kind ?? 'file'
 
+  // Held back by the server: this reader has not accepted the group yet.
+  if (message.media_withheld) {
+    return (
+      <p className="flex items-center gap-2 rounded-card-sm border border-dashed border-[var(--cloud-border)] px-3 py-2 text-sm text-text-low">
+        <Lock size={13} aria-hidden="true" />
+        {kind === 'image' ? 'A photo' : kind === 'video' ? 'A video' : 'An attachment'} is hidden until you accept
+        this group.
+      </p>
+    )
+  }
+
   if (url && kind === 'image') {
     return (
       <button type="button" onClick={() => onOpenImage(url)} className="block overflow-hidden rounded-card-sm">
@@ -1216,6 +1227,7 @@ export default function Messages() {
                 media_name: event.media_name ?? null,
                 media_type: event.media_type ?? null,
                 media_size: event.media_size ?? null,
+                media_withheld: Boolean(event.media_withheld),
                 created_at: event.created_at ?? new Date().toISOString(),
               },
             ]),
@@ -2385,6 +2397,30 @@ export default function Messages() {
                   rests in the bottom-end corner (lib/floating.ts, slot 0) —
                   exactly where a full-height thread puts its composer. No
                   orb, no gap: Send keeps the full width. */}
+              {/* A request the viewer has not answered. In a group this is a
+                  minor who was added by somebody else: they read the text, and
+                  attachments wait for this button. */}
+              {active?.accepted === false && (
+                <div className="mx-3 mb-1 flex flex-wrap items-center gap-2 rounded-card-sm border border-gold/35 bg-gold/[0.07] px-3 py-2 sm:mx-5">
+                  <p className="min-w-0 flex-1 text-xs text-text-mid">
+                    {active.kind === 'group'
+                      ? 'You were added to this group. Photos and files from others stay hidden until you accept it.'
+                      : 'This is a message request. Accept it to receive photos and files.'}
+                  </p>
+                  <button
+                    type="button"
+                    onClick={() =>
+                      void kaluta.messages.accept(active.id).then(() => {
+                        conversations.reload()
+                        void openThread(active.id, 'url')
+                      })
+                    }
+                    className="rounded-full bg-gradient-to-br from-gold-soft to-gold px-4 py-1.5 text-xs font-bold text-ink"
+                  >
+                    Accept
+                  </button>
+                </div>
+              )}
               {/* Editing happens where the message is read, not in a dialog over it:
                   the point of an edit is the words around it. */}
               {editing && (

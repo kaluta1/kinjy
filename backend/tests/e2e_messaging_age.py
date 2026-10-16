@@ -186,22 +186,39 @@ if group:
     check("text reaches an unaccepted minor", r.status_code in (200, 201),
           f"{r.status_code} {r.text[:120]}")
 
+    # In a group the attachment is not refused to the sender - one teenager
+    # who has not accepted would stop everybody's photos. It is withheld from
+    # that teenager instead, until they accept.
+    listed = {x["id"]: x for x in c.get("/conversations", headers=auth(teen17_tok)).json()["items"]}
+    check("a minor added to a group starts unaccepted", listed[group].get("accepted") is False,
+          listed.get(group))
+    png = (b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00\x1f\x15\xc4\x89"
+           b"\x00\x00\x00\rIDATx\x9cc\xf8\xff\xff?\x00\x05\xfe\x02\xfe\xa7\x9a\xa0\xa0\x00\x00\x00\x00IEND\xaeB`\x82") + bytes(random.randbytes(6))
+    up = c.post("/media/upload", headers=auth(teen14_tok),
+                files={"file": ("photo.png", png, "image/png")}, data={"purpose": "chat"})
+    check("a photo can be uploaded", up.status_code in (200, 201), f"{up.status_code} {up.text[:100]}")
     r = c.post(f"/conversations/{group}/messages", headers=auth(teen14_tok),
-               json={"body": "photo", "kind": "media",
-                     "media_url": "http://localhost:8200/media/mda_z"})
-    check("an attachment to an unaccepted minor is refused", r.status_code == 403,
+               json={"body": "photo", "media_id": up.json().get("id")})
+    check("a photo can still be sent into the group", r.status_code in (200, 201),
           f"{r.status_code} {r.text[:140]}")
-    check("the refusal explains what unlocks it",
-          "accept" in r.text.lower(), r.text[:140])
+    photo_id = r.json().get("id")
+
+    def photo_as(token):
+        items = c.get(f"/conversations/{group}/messages", headers=auth(token)).json().get("items", [])
+        return next((m for m in items if m["id"] == photo_id), {})
+
+    seen = photo_as(teen17_tok)
+    check("the unaccepted minor is not handed the photo",
+          seen.get("media_withheld") is True and not seen.get("media_url"), seen)
+    mine = photo_as(teen14_tok)
+    check("the sender still sees their own photo",
+          bool(mine.get("media_url")) and not mine.get("media_withheld"), mine)
 
     r = c.post(f"/conversations/{group}/accept", headers=auth(teen17_tok))
     check("the minor can accept", r.status_code == 200, f"{r.status_code}")
-
-    r = c.post(f"/conversations/{group}/messages", headers=auth(teen14_tok),
-               json={"body": "photo", "kind": "media",
-                     "media_url": "http://localhost:8200/media/mda_z"})
-    check("after acceptance the attachment goes through", r.status_code in (200, 201),
-          f"{r.status_code} {r.text[:120]}")
+    seen = photo_as(teen17_tok)
+    check("after acceptance the photo is there",
+          bool(seen.get("media_url")) and not seen.get("media_withheld"), seen)
 
 print("\n== teenagers and each other ==")
 r = open_convo(teen15_tok, teen14["id"])

@@ -864,6 +864,8 @@ export interface Conversation {
   privacy?: 'public' | 'private' | null
   /** Pinned to the top of the viewer's list. */
   pinned?: boolean
+  /** False while this is a request the viewer has not answered. */
+  accepted?: boolean
   encrypted: boolean
   last_message_at: string
   /**
@@ -912,6 +914,8 @@ export interface Message {
   media_name?: string | null
   media_type?: string | null
   media_size?: number | null
+  /** Held back from this reader (a minor) until they accept the group. */
+  media_withheld?: boolean
   /** The message this one answers; the quote itself is built client-side. */
   reply_to_id?: string | null
   /** True when the original has expired or been deleted. Its content is never sent. */
@@ -2238,6 +2242,8 @@ export const kaluta = {
         `/conversations/${conversationId}/privacy`,
         { privacy },
       ),
+    /** Answer a conversation request: yes. Replying does the same. */
+    accept: (conversationId: string) => api.post<unknown>(`/conversations/${conversationId}/accept`),
     /** The group's link, for any member to send. */
     shareLink: (conversationId: string) =>
       api.post<{ path: string; code: string }>(`/conversations/${conversationId}/share-link`),

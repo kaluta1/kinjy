@@ -98,7 +98,13 @@ MIGRATIONS = [
     # in them is treated as having accepted. Retro-fitting a request state onto
     # live threads would silently block attachments between people who have
     # been talking for months.
-    f"UPDATE {models.SCHEMA}.participants SET accepted_at = joined_at WHERE accepted_at IS NULL",
+    #
+    # Bounded to rows from before the request model existed. Unbounded, this
+    # ran on every boot and accepted every request made since - so each deploy
+    # quietly accepted every pending conversation, a minor's included, and
+    # unlocked attachments to people who had never answered.
+    f"UPDATE {models.SCHEMA}.participants SET accepted_at = joined_at "
+    "WHERE accepted_at IS NULL AND joined_at < TIMESTAMPTZ '2026-09-25 12:00:00+00'",
     # Idempotent sends (a retried message is not delivered twice) and attachments.
     f"ALTER TABLE {models.SCHEMA}.messages ADD COLUMN IF NOT EXISTS client_id VARCHAR(64)",
     f"CREATE UNIQUE INDEX IF NOT EXISTS uq_message_sender_client_id "
@@ -437,6 +443,43 @@ def _member(db: OrmSession, conversation_id: str, user_id: str) -> models.Partic
     return participant
 
 
+def _arrival_accepted(user_id: str) -> bool:
+    """Whether somebody put into a group counts as having accepted it.
+
+    An adult, yes: a room nobody sees until they accept it is a room nobody
+    sees. A minor, no - or anybody whose age cannot be read, which is treated
+    as a minor's. They read the room's text at once; attachments from others
+    are withheld from them until they accept.
+    """
+    return not ageclient.age_profile(user_id).is_minor
+
+
+def _withheld_from(db: OrmSession, conversation: models.Conversation | None) -> set[str]:
+    """The members of a group who must not be handed others' attachments yet:
+    minors who have not accepted it. Only unaccepted rows are looked at, so
+    this costs nothing in a room where everybody has accepted."""
+    if conversation is None or conversation.kind != "group":
+        return set()
+    waiting = db.scalars(
+        select(models.Participant.user_id).where(
+            models.Participant.conversation_id == conversation.id,
+            models.Participant.accepted_at.is_(None),
+        )
+    ).all()
+    return {uid for uid in waiting if ageclient.age_profile(uid).is_minor}
+
+
+WITHHELD_MEDIA = {
+    "media_url": None,
+    "media_name": None,
+    "media_type": None,
+    "media_size": None,
+    # The kind stays, so the bubble can say "a photo is hidden" rather than
+    # showing an empty message.
+    "media_withheld": True,
+}
+
+
 def _accept(db: OrmSession, conversation_id: str, user_id: str) -> None:
     """Mark a participant as having accepted. Idempotent."""
     row = db.scalar(
@@ -563,9 +606,15 @@ def create_conversation(payload: ConversationIn, principal: CurrentUser, db: Orm
                 # A group is different: the check above already asked whether
                 # each member allows this person to message them, and a room
                 # that sits in everybody's requests is a room nobody sees.
+                #
+                # Except a minor: being put in a room by somebody else is not
+                # consent, and their attachments wait until they accept (they
+                # read the text; images are withheld from them, not refused to
+                # the room). See _arrival_accepted.
                 accepted_at=(
                     datetime.now(timezone.utc)
-                    if uid == principal.user_id or payload.kind == "group"
+                    if uid == principal.user_id
+                    or (payload.kind == "group" and _arrival_accepted(uid))
                     else None
                 ),
             )
@@ -916,7 +965,7 @@ async def add_participants(
                 conversation_id=conversation_id,
                 user_id=uid,
                 role="member",
-                accepted_at=datetime.now(timezone.utc),
+                accepted_at=datetime.now(timezone.utc) if _arrival_accepted(uid) else None,
             )
         )
         added.append(uid)
@@ -1461,7 +1510,7 @@ async def welcome_join(
             conversation_id=conversation.id,
             user_id=payload.user_id,
             role="member",
-            accepted_at=datetime.now(timezone.utc),
+            accepted_at=datetime.now(timezone.utc) if _arrival_accepted(payload.user_id) else None,
         )
     )
     _system_message(
@@ -1522,7 +1571,7 @@ def welcome_backfill(limit: int = 1000, db: OrmSession = Depends(get_db)):
                     conversation_id=conversation.id,
                     user_id=uid,
                     role="member",
-                    accepted_at=now,
+                    accepted_at=now if _arrival_accepted(uid) else None,
                 )
             )
             present.add(uid)
@@ -1697,10 +1746,12 @@ def list_conversations(principal: CurrentUser, db: OrmSession = Depends(get_db))
     # than fetched again per conversation.
     my_role: dict[str, str] = {}
     my_pin: dict[str, datetime] = {}
+    my_accepted: dict[str, bool] = {}
     for m in memberships:
         members.setdefault(m.conversation_id, []).append(m.user_id)
         if m.user_id == principal.user_id:
             my_role[m.conversation_id] = m.role
+            my_accepted[m.conversation_id] = m.accepted_at is not None
             if m.pinned_at is not None:
                 my_pin[m.conversation_id] = m.pinned_at
         # "Seen" is a thing you say about a direct conversation. In a group it
@@ -1756,6 +1807,8 @@ def list_conversations(principal: CurrentUser, db: OrmSession = Depends(get_db))
                 "title": r.title,
                 "privacy": (r.privacy or "private") if r.kind == "group" else None,
                 "pinned": r.id in my_pin,
+                # False while this is a request the viewer has not answered.
+                "accepted": my_accepted.get(r.id, True),
                 # Groups only, and the one thing a group has that a direct
                 # conversation does not: what it is for.
                 "description": r.description,
@@ -2327,9 +2380,7 @@ async def send_message(
     # Everyone in the room, the sender included: their other tabs and devices
     # must show what they just sent, not only the one that sent it.
     participants = _participant_ids(db, conversation_id)
-    deliveries = await _publish_to_users(
-        participants,
-        {
+    frame = {
             "type": "message",
             "conversation_id": conversation_id,
             "message_id": message.id,
@@ -2349,8 +2400,17 @@ async def send_message(
             **_media_fields(message),
             "sticker": stickers.get(message.sticker_id),
             "created_at": message.created_at.isoformat(),
-        },
+    }
+    # The same frame, without the attachment, for a minor who has not accepted
+    # this group: the link is signed and would open the file for them.
+    withheld = (
+        _withheld_from(db, db.get(models.Conversation, conversation_id)) - {principal.user_id}
+        if message.media_kind
+        else set()
     )
+    deliveries = await _publish_to_users([uid for uid in participants if uid not in withheld], frame)
+    if withheld:
+        deliveries.update(await _publish_to_users(list(withheld), {**frame, **WITHHELD_MEDIA}))
 
     # Someone with no socket open would otherwise learn about this only by
     # opening Messages on the off chance. One waiting notification per thread
@@ -2477,7 +2537,12 @@ def list_messages(
     makes when its socket comes back: everything sent while it was away, so a
     reconnect does not silently drop what arrived during the gap.
     """
-    _member(db, conversation_id, principal.user_id)
+    me = _member(db, conversation_id, principal.user_id)
+    # A minor who has not accepted a group reads its text, and is handed no
+    # attachment but their own until they do.
+    withhold = me.accepted_at is None and principal.user_id in _withheld_from(
+        db, db.get(models.Conversation, conversation_id)
+    )
     # Before serving, not after: an expired message must never be in a response.
     _purge_expired(db, conversation_id)
     stmt = select(models.Message).where(models.Message.conversation_id == conversation_id)
@@ -2544,6 +2609,7 @@ def list_messages(
                 # Whether the original is gone (expired). Never its content.
                 "reply_to_deleted": bool(r.reply_to_id) and r.reply_to_id not in alive,
                 **_media_fields(r),
+                **(WITHHELD_MEDIA if withhold and r.media_kind and r.sender_id != principal.user_id else {}),
                 "sticker": stickers.get(r.sticker_id),
                 "edited_at": r.edited_at,
                 # A deleted message keeps its place in the thread and loses its

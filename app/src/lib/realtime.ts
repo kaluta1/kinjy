@@ -18,6 +18,8 @@ export interface RealtimeEvent {
   media_name?: string | null
   media_type?: string | null
   media_size?: number | null
+  /** The attachment is held back from this reader until they accept the group. */
+  media_withheld?: boolean
   /** Set on a message_edited frame: when the text was changed. */
   edited_at?: string | null
   /** Set on a new message that is a sticker, so the bubble can draw it at once. */
