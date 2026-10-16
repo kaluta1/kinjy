@@ -1016,3 +1016,7 @@ What came from where: replies, the composer's emoji/sticker panel, the redesign 
 - **The welcome group itself mixes adults and minors** in one room anybody
   can write in. The age rule protects private messages, not that room.
 - The share link of a chat group cannot be reset yet.
+- Deployed on kinjy.com 16/10 16:30 (messaging, social, web; backups
+  `pre-chat-groups-20261016-1629`). Checked from outside: 13/13 healthy, New +
+  Video Only returns only video, the age fix is in the running container.
+  Not clicked through in production with a real account.
