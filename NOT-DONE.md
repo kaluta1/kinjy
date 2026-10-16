@@ -974,5 +974,5 @@ What came from where: replies, the composer's emoji/sticker panel, the redesign 
 - **No reordering of pins**, oldest pin first. **The fee is per calendar
   year**: on 1 January pins above three stay, but no new one can be added
   until the new year's fee is paid.
-- Verified locally: `e2e_pins_follow.py` (43 checks) and the neighbouring
+- Verified locally: `e2e_pins_follow.py` (37 checks) and the neighbouring
   suites. **Not deployed.**
