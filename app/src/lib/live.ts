@@ -7,7 +7,7 @@
  * that is more plumbing than the problem deserves, and a data-fetching library
  * is a dependency this app does not otherwise need.
  */
-export type LiveTopic = 'profile' | 'connections' | 'feed' | 'circles'
+export type LiveTopic = 'profile' | 'connections' | 'feed' | 'circles' | 'pins'
 
 export function announce(topic: LiveTopic): void {
   window.dispatchEvent(new CustomEvent('kaluta:changed', { detail: topic }))

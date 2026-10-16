@@ -694,6 +694,10 @@ export interface Permissions {
   can_add_community: boolean
   can_invite: boolean
   reason: string
+  /** Whether the viewer already follows them. Only on `/connections/with`. */
+  following?: boolean
+  /** Whether they follow the viewer. */
+  follows_you?: boolean
 }
 
 export interface Privacy {
@@ -1974,7 +1978,7 @@ export const kaluta = {
   },
 
   social: {
-    follow: (userId: string) => api.post<{ following: boolean }>(`/users/${userId}/follow`),
+    follow: (userId: string) => api.post<{ following: boolean; already?: boolean }>(`/users/${userId}/follow`),
     unfollow: (userId: string) => api.delete<void>(`/users/${userId}/follow`),
   },
 
@@ -2034,7 +2038,18 @@ export const kaluta = {
         members_count: number
         my_role: string | null
         my_status: string | null
+        my_pinned?: boolean
       }>(`/communities/${id}${invite ? `?invite=${encodeURIComponent(invite)}` : ''}`),
+
+    /** The groups pinned to the sidebar, oldest pin first. */
+    pinned: () =>
+      api.get<{
+        items: Array<{ id: string; slug: string; name: string; kind: string; avatar_url: string | null }>
+        free_pins: number
+      }>('/communities/pinned'),
+    /** Three pins are free; more answer 402 until the year's KYC fee is paid. */
+    pin: (id: string) => api.post<{ pinned: boolean; already?: boolean; count?: number }>(`/communities/${id}/pin`),
+    unpin: (id: string) => api.delete<{ pinned: boolean }>(`/communities/${id}/pin`),
 
     /** The roll and the queue waiting on it. Owner and moderators only. */
     members: (id: string, status?: string) =>
@@ -2815,6 +2830,8 @@ export const kaluta = {
 
     kyc: () => api.get<KycStatus>('/kyc/status'),
     startKyc: () => api.post<{ status: string; attempt?: number }>('/kyc/start'),
+    /** Pay this year's verification fee. The server holds the price; `amount` must match it. */
+    payKycFee: (amount: string) => api.post<OrderPayment>('/payments/checkout', { purpose: 'kyc_fee', amount }),
 
     /**
      * Change the password, and sign the other devices out.

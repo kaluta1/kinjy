@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { Link, useLocation } from 'react-router'
-import { ArrowLeft, Globe, Link2, Lock, LogOut, UsersRound } from 'lucide-react'
+import { ArrowLeft, Globe, Link2, Lock, LogOut, Pin, PinOff, UsersRound } from 'lucide-react'
 import Composer from '@/components/social/Composer'
 import PostCard from '@/components/social/PostCard'
 import MemberQueue from '@/components/community/MemberQueue'
@@ -8,6 +8,7 @@ import { useApi } from '@/hooks/useApi'
 import { useAuth } from '@/hooks/useAuth'
 import { ApiError, kaluta, type Post } from '@/lib/api'
 import { copyLink, siteOrigin } from '@/lib/share'
+import { announce } from '@/lib/live'
 import { cn } from '@/lib/utils'
 
 const KIND_LABEL: Record<string, string> = {
@@ -68,6 +69,9 @@ export default function CommunityView({
   const [fresh, setFresh] = useState<Post[]>([])
   const [managing, setManaging] = useState(false)
   const [shareNote, setShareNote] = useState<string | null>(null)
+  // Whether the fee is what stands between this member and another pin, so
+  // the refusal can carry the way to pay it.
+  const [pinNeedsKyc, setPinNeedsKyc] = useState(false)
 
   const community = detail.data
   const isMember = community?.my_status === 'active'
@@ -136,6 +140,30 @@ export default function CommunityView({
       setShareNote(result === 'copied' ? 'Link copied.' : `Copy this link: ${url.toString()}`)
     } catch (err) {
       setShareNote(err instanceof ApiError ? err.message : 'Could not get the link')
+    }
+  }
+
+  const togglePin = async () => {
+    if (!community) return
+    setBusy(true)
+    setNote(null)
+    setPinNeedsKyc(false)
+    try {
+      if (community.my_pinned) {
+        await kaluta.communities.unpin(community.id)
+        setNote('Unpinned from your sidebar.')
+      } else {
+        await kaluta.communities.pin(community.id)
+        setNote('Pinned to your sidebar.')
+      }
+      announce('pins')
+      detail.reload()
+    } catch (err) {
+      // 402: three pins are used and the KYC fee is not paid this year.
+      if (err instanceof ApiError && err.status === 402) setPinNeedsKyc(true)
+      setNote(err instanceof ApiError ? err.message : 'Could not change the pin')
+    } finally {
+      setBusy(false)
     }
   }
 
@@ -272,6 +300,18 @@ export default function CommunityView({
                   {managing ? 'Close' : 'Manage members'}
                 </button>
               )}
+              {isMember && (
+                <button
+                  type="button"
+                  onClick={togglePin}
+                  disabled={busy}
+                  aria-pressed={Boolean(community.my_pinned)}
+                  className="inline-flex items-center gap-1.5 rounded-full border border-[var(--cloud-border)] px-5 py-2.5 text-sm font-semibold text-text-mid hover:border-gold/50 hover:text-gold-soft disabled:opacity-40"
+                >
+                  {community.my_pinned ? <PinOff size={13} aria-hidden="true" /> : <Pin size={13} aria-hidden="true" />}
+                  {community.my_pinned ? 'Unpin' : 'Pin'}
+                </button>
+              )}
               <button
                 type="button"
                 onClick={share}
@@ -321,6 +361,14 @@ export default function CommunityView({
             {note && (
               <p role="status" className="mt-3 text-sm text-text-mid">
                 {note}
+                {pinNeedsKyc && (
+                  <>
+                    {' '}
+                    <Link to="/dashboard?tab=verification" className="font-semibold text-gold-soft hover:underline">
+                      Pay the KYC fee
+                    </Link>
+                  </>
+                )}
               </p>
             )}
 

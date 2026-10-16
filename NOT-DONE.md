@@ -947,3 +947,32 @@ What came from where: replies, the composer's emoji/sticker panel, the redesign 
   `/root/kaluta-pre-group-privacy-20261016-1508.tar.gz`). Checked from outside:
   13/13 healthy, the new routes answer, `invite_code` exists. The e2e test was
   run locally only, not against production, to keep test accounts out of it.
+
+## Pinned groups, the KYC fee, and Follow (16/10)
+
+- ~~The Follow button on a profile forgot it had been pressed.~~ The profile
+  page never asked whether the viewer already followed; it started at
+  "Follow" every time. Notifications (browser and in-app) and Connections all
+  lead to that page, which is why it looked tied to where the first click
+  happened. `/connections/with/{id}` now returns `following` and
+  `follows_you`; the button starts from the server's answer, says "Follow
+  back" when they follow you, and a second press unfollows. The server never
+  double-counted (it answered "already"), so no follower count needs repair.
+- ~~Groups could not be pinned.~~ A member pins a group from its page; pinned
+  groups show in the left rail. Three are free; a fourth answers 402 until
+  this year's KYC fee is paid. The pin lives on the membership: leaving drops
+  it, a ban hides it.
+- ~~The KYC fee could be paid for one cent.~~ The checkout took the amount
+  from the client for `kyc_fee`. It is now the configured fee or a 400, and a
+  second payment in the same year is a 409.
+- ~~The Verification tab said "Pay the fee" with nothing to press.~~ It has a
+  pay button now.
+- **In production the fee is not real money yet.** No NowPayments or
+  Mangopay key is set on kinjy.com, so payments run in test mode and "Complete
+  the test payment" marks the fee paid. Until a rail is configured, the
+  fourth pin is effectively free - as are marketplace orders.
+- **No reordering of pins**, oldest pin first. **The fee is per calendar
+  year**: on 1 January pins above three stay, but no new one can be added
+  until the new year's fee is paid.
+- Verified locally: `e2e_pins_follow.py` (43 checks) and the neighbouring
+  suites. **Not deployed.**

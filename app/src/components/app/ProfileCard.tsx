@@ -1,6 +1,6 @@
 import { useEffect } from 'react'
 import { Link } from 'react-router'
-import { Award, Code2, Crown, LayoutGrid, LifeBuoy, MapPin, Medal, Tag, Users, Wallet } from 'lucide-react'
+import { Award, Code2, Crown, LayoutGrid, LifeBuoy, MapPin, Medal, Pin, Tag, Users, Wallet } from 'lucide-react'
 import { VerifiedBadge } from '@/components/ui-kit'
 import { MODULE_ICONS } from '@/components/appdemo/Chrome'
 import { ROUTE_FOR } from './navigation'
@@ -61,6 +61,9 @@ export default function ProfileCard() {
   // A circle made, renamed or deleted anywhere in the app changes this rail.
   // (The profile's own counts are refreshed by useMyProfile.)
   useEffect(() => onChange('circles', circles.reload), [circles.reload])
+  // The groups the member pinned, refreshed when a pin changes anywhere.
+  const pinned = useApi(() => kaluta.communities.pinned(), [])
+  useEffect(() => onChange('pins', pinned.reload), [pinned.reload])
 
   // The profile is what the editor changes; the account copy only stands in
   // until it has loaded.
@@ -147,6 +150,31 @@ export default function ProfileCard() {
           })}
         </ul>
       </div>
+
+      {/* Pinned groups. Only when there are some: an empty box saying
+          "nothing pinned" is furniture. Pinning is done from a group's page. */}
+      {(pinned.data?.items ?? []).length > 0 && (
+        <div className={cn('rounded-card-lg p-3.5', tok.card)}>
+          <p className={cn('mb-2 text-xs font-bold', tok.low)}>Pinned groups</p>
+          <ul className="space-y-1">
+            {(pinned.data?.items ?? []).map((group) => (
+              <li key={group.id}>
+                <Link
+                  to={`/communities/${group.slug}`}
+                  className={cn(
+                    'flex w-full items-center gap-2 rounded-full px-3 py-1.5 text-xs font-semibold',
+                    tok.mid,
+                    tok.hoverBg,
+                  )}
+                >
+                  <Pin size={12} className="shrink-0 text-gold" aria-hidden="true" />
+                  <span className="truncate">{group.name}</span>
+                </Link>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
 
       {/* The public pages, from inside the app.
 

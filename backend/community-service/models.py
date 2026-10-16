@@ -63,6 +63,10 @@ class Membership(Base):
     role: Mapped[str] = mapped_column(String(20), default="member")  # member|moderator|owner
     status: Mapped[str] = mapped_column(String(20), default="active")  # pending|active|banned
     joined_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    # Pinned to the member's sidebar, and when. On the membership because a pin
+    # belongs to somebody *in* the group: leaving deletes the row and the pin
+    # with it, and a ban keeps the row but the pinned list reads active only.
+    pinned_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class Forum(Base):

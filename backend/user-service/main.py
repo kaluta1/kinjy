@@ -1915,8 +1915,26 @@ def permissions(actor_id: str, target_id: str, db: OrmSession = Depends(get_db))
 
 @app.get("/connections/with/{user_id}", tags=["connections"])
 def my_permissions(user_id: str, principal: CurrentUser, db: OrmSession = Depends(get_db)):
-    """The same answer, for the signed-in member's own UI."""
-    return permissions(principal.user_id, user_id, db)
+    """The same answer, for the signed-in member's own UI.
+
+    Plus whether a follow already exists, in both directions. A profile page
+    that does not ask this can only start at "Follow", and that is what every
+    profile did: arriving from a notification or from Connections showed
+    "Follow" for somebody followed weeks ago, as if the click had never
+    counted.
+    """
+    answer = dict(permissions(principal.user_id, user_id, db))
+    answer["following"] = _follows(db, principal.user_id, user_id)
+    answer["follows_you"] = _follows(db, user_id, principal.user_id)
+    return answer
+
+
+def _follows(db: OrmSession, follower_id: str, followee_id: str) -> bool:
+    return db.scalar(
+        select(models.Follow.follower_id).where(
+            models.Follow.follower_id == follower_id, models.Follow.followee_id == followee_id
+        )
+    ) is not None
 
 
 class ProfileIds(BaseModel):

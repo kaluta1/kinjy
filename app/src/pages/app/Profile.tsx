@@ -59,7 +59,15 @@ export default function Profile() {
         kaluta.connections.with(found.user_id),
         kaluta.posts.byAuthor(found.user_id),
       ])
-      if (perm.status === 'fulfilled') setPermissions(perm.value)
+      if (perm.status === 'fulfilled') {
+        setPermissions(perm.value)
+        // From the server, not assumed: a profile reached from a notification
+        // or from Connections used to start at "Follow" for somebody already
+        // followed, and asked for the same click again and again.
+        setFollowing(Boolean(perm.value.following))
+      } else {
+        setFollowing(false)
+      }
       if (page.status === 'fulfilled') setPosts(page.value.items)
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'Could not load this profile')
@@ -74,16 +82,27 @@ export default function Profile() {
 
   const isSelf = profile?.user_id === user?.id
 
-  const follow = async () => {
+  /** Follow, or stop following: the same button, as everywhere else. */
+  const toggleFollow = async () => {
     if (!profile) return
     setBusy(true)
+    setNote(null)
     try {
-      await kaluta.social.follow(profile.user_id)
-      setFollowing(true)
+      if (following) {
+        await kaluta.social.unfollow(profile.user_id)
+        setFollowing(false)
+        setProfile((p) => (p ? { ...p, followers_count: Math.max(0, p.followers_count - 1) } : p))
+      } else {
+        const result = await kaluta.social.follow(profile.user_id)
+        setFollowing(true)
+        // Already followed means the count already included us.
+        if (!result.already) {
+          setProfile((p) => (p ? { ...p, followers_count: p.followers_count + 1 } : p))
+        }
+      }
       announce('profile')
-      setProfile((p) => (p ? { ...p, followers_count: p.followers_count + 1 } : p))
     } catch (err) {
-      setNote(err instanceof ApiError ? err.message : 'Could not follow')
+      setNote(err instanceof ApiError ? err.message : following ? 'Could not unfollow' : 'Could not follow')
     } finally {
       setBusy(false)
     }
@@ -291,8 +310,9 @@ export default function Profile() {
             <div className="mt-6 flex flex-wrap gap-2.5">
               <button
                 type="button"
-                onClick={follow}
-                disabled={busy || following}
+                onClick={toggleFollow}
+                disabled={busy}
+                aria-pressed={following}
                 className={cn(
                   action,
                   following
@@ -301,7 +321,7 @@ export default function Profile() {
                 )}
               >
                 <UserPlus size={15} aria-hidden="true" />
-                {following ? 'Following' : 'Follow'}
+                {following ? 'Following' : permissions?.follows_you ? 'Follow back' : 'Follow'}
               </button>
 
               {permissions?.connected ? (

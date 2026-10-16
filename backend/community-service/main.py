@@ -35,6 +35,11 @@ MESSAGING_URL = "http://messaging-service:8000"
 
 USER_URL = "http://user-service:8000"
 AI_URL = "http://ai-service:8000"
+PAYMENT_URL = "http://payment-service:8000"
+
+# Groups any member may pin. Beyond this, the year's verification (KYC) fee
+# has to be paid.
+FREE_PINS = 3
 
 # Below this a thread is short enough to read. Summarising six replies wastes a
 # model call and tells the reader nothing they could not get by scrolling.
@@ -88,6 +93,8 @@ MIGRATIONS = [
     # The secret-community invite behind a shared link. Additive and nullable.
     f"ALTER TABLE {models.SCHEMA}.communities ADD COLUMN IF NOT EXISTS invite_code VARCHAR(32)",
     f"CREATE INDEX IF NOT EXISTS ix_communities_invite_code ON {models.SCHEMA}.communities (invite_code)",
+    # Groups pinned to a member's sidebar. Additive and nullable.
+    f"ALTER TABLE {models.SCHEMA}.memberships ADD COLUMN IF NOT EXISTS pinned_at TIMESTAMPTZ",
 ]
 
 app = create_app(
@@ -533,6 +540,97 @@ def _visible_threads(db: OrmSession, age, threads: list[models.Thread]) -> list[
     return [t for t in threads if _engine.can_view_content(age, ratings.get(t.id)).allowed]
 
 
+# --- pinned groups -----------------------------------------------------------
+
+
+def _kyc_fee_paid(user_id: str) -> tuple[bool, str]:
+    """(paid this year, fee in USD). Fails closed: if payment-service cannot
+    answer, the extra pin waits rather than being given away."""
+    try:
+        response = httpx.get(f"{PAYMENT_URL}/internal/kyc/{user_id}", timeout=5)
+        response.raise_for_status()
+        body = response.json()
+        return bool(body.get("fee_paid")), str(body.get("fee_usd", ""))
+    except Exception as exc:
+        log.warning("could not read the KYC fee of %s: %s", user_id, exc)
+        return False, ""
+
+
+def _pinned_rows(db: OrmSession, user_id: str) -> list[models.Membership]:
+    return list(
+        db.scalars(
+            select(models.Membership)
+            .where(
+                models.Membership.user_id == user_id,
+                models.Membership.status == "active",
+                models.Membership.pinned_at.is_not(None),
+            )
+            .order_by(models.Membership.pinned_at)
+        ).all()
+    )
+
+
+def _pinnable(db: OrmSession, handle: str, user_id: str) -> models.Membership:
+    community = _resolve(db, handle)
+    membership = _membership(db, community.id, user_id) if community else None
+    if membership is None or membership.status != "active":
+        # One answer for a group that does not exist and one you are not in:
+        # pinning must not become a way to probe for secret groups.
+        raise HTTPException(status_code=404, detail="Join this group before pinning it")
+    return membership
+
+
+@app.get("/communities/pinned", tags=["communities"])
+def pinned_communities(principal: CurrentUser, db: OrmSession = Depends(get_db)):
+    """The groups this member pinned, oldest pin first, and how many are free."""
+    rows = _pinned_rows(db, principal.user_id)
+    ids = [r.community_id for r in rows]
+    groups = {
+        c.id: c
+        for c in db.scalars(select(models.Community).where(models.Community.id.in_(ids))).all()
+    } if ids else {}
+    items = [
+        {"id": g.id, "slug": g.slug, "name": g.name, "kind": g.kind, "avatar_url": g.avatar_url}
+        for g in (groups.get(i) for i in ids)
+        if g is not None
+    ]
+    return {"items": items, "free_pins": FREE_PINS}
+
+
+@app.post("/communities/{community_id}/pin", tags=["communities"])
+def pin_community(community_id: str, principal: CurrentUser, db: OrmSession = Depends(get_db)):
+    """Pin a group you belong to. Three are free; more ask for the KYC fee."""
+    membership = _pinnable(db, community_id, principal.user_id)
+    if membership.pinned_at is not None:
+        return {"pinned": True, "already": True}
+
+    count = len(_pinned_rows(db, principal.user_id))
+    if count >= FREE_PINS:
+        paid, fee = _kyc_fee_paid(principal.user_id)
+        if not paid:
+            price = f"${fee} " if fee else ""
+            raise HTTPException(
+                status_code=402,
+                detail=(
+                    f"You can pin {FREE_PINS} groups. To pin more, pay your "
+                    f"{price}annual verification (KYC) fee."
+                ),
+            )
+    membership.pinned_at = datetime.now(timezone.utc)
+    db.commit()
+    return {"pinned": True, "count": count + 1}
+
+
+@app.delete("/communities/{community_id}/pin", tags=["communities"])
+def unpin_community(community_id: str, principal: CurrentUser, db: OrmSession = Depends(get_db)):
+    community = _resolve(db, community_id)
+    membership = _membership(db, community.id, principal.user_id) if community else None
+    if membership is not None and membership.pinned_at is not None:
+        membership.pinned_at = None
+        db.commit()
+    return {"pinned": False}
+
+
 @app.get("/communities/{community_id}", tags=["communities"])
 def get_community(
     community_id: str,
@@ -572,6 +670,7 @@ def get_community(
         "avatar_url": community.avatar_url,
         "my_role": membership.role if membership else None,
         "my_status": membership.status if membership else None,
+        "my_pinned": bool(membership and membership.status == "active" and membership.pinned_at),
     }
 
 

@@ -85,6 +85,26 @@ def checkout(payload: CheckoutIn, principal: CurrentUser, db: OrmSession = Depen
     # forgot its own check still cannot take a minor's money.
     agefeatures.require(principal.user_id, "payments")
 
+    if payload.purpose == "kyc_fee":
+        # The fee has one price, set here, not by the client. Before this a
+        # checkout for one cent marked the year as paid - and a paid fee now
+        # unlocks things (more than three pinned groups), so it has to cost
+        # what it says.
+        if economy.money(payload.amount) != economy.money(settings.KYC_ANNUAL_FEE_USD):
+            raise HTTPException(
+                status_code=400,
+                detail=f"The verification fee is ${settings.KYC_ANNUAL_FEE_USD}",
+            )
+        paid = db.scalar(
+            select(models.KycRecord).where(
+                models.KycRecord.user_id == principal.user_id,
+                models.KycRecord.year == date.today().year,
+                models.KycRecord.fee_paid.is_(True),
+            )
+        )
+        if paid is not None:
+            raise HTTPException(status_code=409, detail="This year's verification fee is already paid")
+
     rail = rails.choose_rail(payload.rail, "USD")
     intent = models.PaymentIntent(
         id=new_id("pmt"),
@@ -575,6 +595,25 @@ def kyc_start(principal: CurrentUser, db: OrmSession = Depends(get_db)):
         "attempt": record.attempts,
         "provider_reference": record.provider_reference,
         "note": "KinjyKYC stores only the verification result on-platform, never the documents.",
+    }
+
+
+@app.get("/internal/kyc/{user_id}", tags=["internal"])
+def kyc_fee_of(user_id: str, db: OrmSession = Depends(get_db)):
+    """Whether this member paid this year's verification fee, for other services.
+
+    community-service asks it before a fourth pinned group. Paying is what is
+    asked, not passing: the fee is the commitment, the check is the provider's.
+    """
+    year = date.today().year
+    record = db.scalar(
+        select(models.KycRecord).where(models.KycRecord.user_id == user_id, models.KycRecord.year == year)
+    )
+    return {
+        "year": year,
+        "fee_paid": bool(record and record.fee_paid),
+        "status": record.status if record else "unverified",
+        "fee_usd": str(settings.KYC_ANNUAL_FEE_USD),
     }
 
 
