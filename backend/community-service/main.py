@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import re
+import secrets
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import Literal
@@ -83,9 +84,16 @@ def _live(topic: str, event: str, **data) -> None:
         log.debug("live update dropped (%s %s): %s", topic, event, exc)
 
 
+MIGRATIONS = [
+    # The secret-community invite behind a shared link. Additive and nullable.
+    f"ALTER TABLE {models.SCHEMA}.communities ADD COLUMN IF NOT EXISTS invite_code VARCHAR(32)",
+    f"CREATE INDEX IF NOT EXISTS ix_communities_invite_code ON {models.SCHEMA}.communities (invite_code)",
+]
+
 app = create_app(
     name="community-service",
     schema=models.SCHEMA,
+    migrations=MIGRATIONS,
     description="Communities and groups, geographic + topic forums, forum-to-knowledge.",
 )
 
@@ -265,7 +273,12 @@ def invite_member(
 
 
 @app.post("/communities/{community_id}/join", tags=["communities"])
-def join(community_id: str, principal: CurrentUser, db: OrmSession = Depends(get_db)):
+def join(
+    community_id: str,
+    principal: CurrentUser,
+    invite: str | None = None,
+    db: OrmSession = Depends(get_db),
+):
     community = db.get(models.Community, community_id)
     if community is None:
         raise HTTPException(status_code=404, detail="Community not found")
@@ -286,7 +299,14 @@ def join(community_id: str, principal: CurrentUser, db: OrmSession = Depends(get
             raise HTTPException(status_code=403, detail="You are banned from this community")
         return {"joined": True, "status": existing.status, "already": True}
 
-    status = "pending" if community.kind == "private" else "active"
+    if community.kind == "secret" and not _invite_matches(community, invite):
+        # Without the invite a secret community does not exist, here as on
+        # its page. Before this check, knowing the id was enough to walk in.
+        raise HTTPException(status_code=404, detail="Community not found")
+
+    # A shared invite to a secret community knocks; it does not open the
+    # door. Links get forwarded, and the members decide who comes in.
+    status = "pending" if community.kind in ("private", "secret") else "active"
     db.add(models.Membership(community_id=community_id, user_id=principal.user_id, status=status))
     if status == "active":
         community.members_count += 1
@@ -514,7 +534,12 @@ def _visible_threads(db: OrmSession, age, threads: list[models.Thread]) -> list[
 
 
 @app.get("/communities/{community_id}", tags=["communities"])
-def get_community(community_id: str, principal: MaybeUser, db: OrmSession = Depends(get_db)):
+def get_community(
+    community_id: str,
+    principal: MaybeUser,
+    invite: str | None = None,
+    db: OrmSession = Depends(get_db),
+):
     """One community, by id or by slug.
 
     A secret community is reachable by direct link *for its members only* —
@@ -527,7 +552,11 @@ def get_community(community_id: str, principal: MaybeUser, db: OrmSession = Depe
         raise HTTPException(status_code=404, detail="Community not found")
 
     membership = _membership(db, community.id, principal.user_id) if principal else None
-    if community.kind == "secret" and (membership is None or membership.status != "active"):
+    if (
+        community.kind == "secret"
+        and (membership is None or membership.status not in ("active", "pending"))
+        and not _invite_matches(community, invite)
+    ):
         raise HTTPException(status_code=404, detail="Community not found")
 
     return {
@@ -627,6 +656,97 @@ def act_on_member(
             link=f"/communities?open={community_id}",
         )
     return {"ok": True, "action": action}
+
+
+# --- privacy and sharing ----------------------------------------------------
+
+
+def _invite_matches(community: models.Community, invite: str | None) -> bool:
+    if not invite or not community.invite_code:
+        return False
+    return secrets.compare_digest(invite, community.invite_code)
+
+
+class PrivacyIn(BaseModel):
+    # Paid is not on the list: it is a price, not a privacy setting, and
+    # turning it on or off would change what members already paid for.
+    kind: str = Field(pattern="^(public|private|secret)$")
+
+
+@app.patch("/communities/{community_id}/privacy", tags=["governance"])
+def set_privacy(
+    community_id: str, payload: PrivacyIn, principal: CurrentUser, db: OrmSession = Depends(get_db)
+):
+    """Make a community public, private or secret. Owner and moderators.
+
+    Opening a private community answers everybody who was waiting at its door:
+    the door is open now, so they are in, and they are told. Closing a public
+    one keeps the members it has - nobody is put out for a setting they did
+    not choose.
+    """
+    community = _require_steward(db, community_id, principal.user_id)
+    if community.kind == "paid":
+        raise HTTPException(
+            status_code=409,
+            detail="A paid community stays paid: its members bought their place.",
+        )
+    before = community.kind
+    if before == payload.kind:
+        return {"kind": before, "changed": False, "admitted": 0}
+
+    admitted: list[str] = []
+    if payload.kind == "public":
+        waiting = db.scalars(
+            select(models.Membership).where(
+                models.Membership.community_id == community.id,
+                models.Membership.status == "pending",
+            )
+        ).all()
+        for row in waiting:
+            row.status = "active"
+            admitted.append(row.user_id)
+        community.members_count += len(admitted)
+
+    community.kind = payload.kind
+    db.commit()
+
+    if admitted:
+        notify.notify_many(
+            admitted,
+            kind="community_approved",
+            title=f"{community.name} is public now - you are in",
+            link=f"/communities/{community.slug}",
+        )
+    _live(f"community:{community.id}", "community.privacy", kind=community.kind)
+    return {"kind": community.kind, "changed": True, "admitted": len(admitted)}
+
+
+@app.post("/communities/{community_id}/share-link", tags=["communities"])
+def share_link(community_id: str, principal: MaybeUser, db: OrmSession = Depends(get_db)):
+    """The address to send somebody, whatever kind of community it is.
+
+    Public and private communities already open from their plain address - a
+    private one shows its name and a way to ask in. A secret one answers 404
+    to anybody outside it, so its link carries an invite that lets the page
+    open and the request be made. Only a member can get that invite: handing
+    it to whoever asks would make the community merely unlisted.
+    """
+    community = _resolve(db, community_id)
+    if community is None:
+        raise HTTPException(status_code=404, detail="Community not found")
+    path = f"/communities/{community.slug}"
+    if community.kind != "secret":
+        return {"path": path, "invite": None}
+
+    membership = _membership(db, community.id, principal.user_id) if principal else None
+    if membership is None or membership.status != "active":
+        raise HTTPException(status_code=404, detail="Community not found")
+    if not community.invite_code:
+        community.invite_code = secrets.token_urlsafe(12)
+        db.commit()
+    # `access`, not `invite`: the app already reads `?invite=` as a referral
+    # code, and the two must not be mistaken for each other.
+    return {"path": f"{path}?access={community.invite_code}", "invite": community.invite_code}
 
 
 # --- forums ----------------------------------------------------------------

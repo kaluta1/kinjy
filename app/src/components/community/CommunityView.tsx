@@ -1,20 +1,28 @@
 import { useState } from 'react'
 import { Link, useLocation } from 'react-router'
-import { ArrowLeft, Globe, Lock, LogOut, UsersRound } from 'lucide-react'
+import { ArrowLeft, Globe, Link2, Lock, LogOut, UsersRound } from 'lucide-react'
 import Composer from '@/components/social/Composer'
 import PostCard from '@/components/social/PostCard'
 import MemberQueue from '@/components/community/MemberQueue'
 import { useApi } from '@/hooks/useApi'
 import { useAuth } from '@/hooks/useAuth'
 import { ApiError, kaluta, type Post } from '@/lib/api'
+import { copyLink, siteOrigin } from '@/lib/share'
 import { cn } from '@/lib/utils'
 
 const KIND_LABEL: Record<string, string> = {
   public: 'Public — anyone can read and join',
   private: 'Private — a moderator approves who joins',
-  secret: 'Secret — members only',
+  secret: 'Secret — unlisted, opened only by a shared link',
   paid: 'Paid — access is bought',
 }
+
+/** The choices a steward has. Paid is a price, not a privacy setting. */
+const PRIVACY_CHOICES: Array<{ kind: 'public' | 'private' | 'secret'; label: string; hint: string }> = [
+  { kind: 'public', label: 'Public', hint: 'Anyone can read it and join.' },
+  { kind: 'private', label: 'Private', hint: 'Anyone can find it; a moderator approves who joins.' },
+  { kind: 'secret', label: 'Secret', hint: 'Unlisted; only a shared link opens it, and joining still needs approval.' },
+]
 
 /**
  * One community, opened: what has been posted in it, and the box to add to it.
@@ -43,7 +51,10 @@ export default function CommunityView({
 }) {
   const { user } = useAuth()
   const location = useLocation()
-  const detail = useApi(() => kaluta.communities.get(handle), [handle])
+  // A secret community's shared link carries `?access=`. Without it the page
+  // would be a 404 for the very person the link was sent to.
+  const access = new URLSearchParams(location.search).get('access')
+  const detail = useApi(() => kaluta.communities.get(handle, access), [handle, access])
   // The posts are fetched by id rather than by the slug in the URL, because
   // they are served by social-service, which knows ids and nothing about
   // community naming. So this waits for the community to resolve.
@@ -56,18 +67,20 @@ export default function CommunityView({
   const [note, setNote] = useState<string | null>(null)
   const [fresh, setFresh] = useState<Post[]>([])
   const [managing, setManaging] = useState(false)
+  const [shareNote, setShareNote] = useState<string | null>(null)
 
   const community = detail.data
   const isMember = community?.my_status === 'active'
   const isPending = community?.my_status === 'pending'
   const isOwner = community?.my_role === 'owner'
+  const isSteward = isMember && (isOwner || community?.my_role === 'moderator')
 
   const join = async () => {
     if (!community) return
     setBusy(true)
     setNote(null)
     try {
-      const result = await kaluta.communities.join(communityId)
+      const result = await kaluta.communities.join(communityId, access)
       setNote(
         result.status === 'pending'
           ? 'Request sent — a moderator has to approve it.'
@@ -96,6 +109,56 @@ export default function CommunityView({
       onChanged?.()
     } catch (err) {
       setNote(err instanceof ApiError ? err.message : 'Could not leave')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  /**
+   * Copy the group's address, whatever its privacy. A public or private group
+   * opens from its plain address; a secret one needs the access code, which
+   * the server hands to members only. Somebody who arrived on a shared secret
+   * link passes on the same link. A signed-in member's referral code rides
+   * along, as it does on a shared post.
+   */
+  const share = async () => {
+    if (!community) return
+    setShareNote(null)
+    try {
+      let path = `/communities/${community.slug}`
+      if (community.kind === 'secret') {
+        if (isMember) path = (await kaluta.communities.shareLink(community.id)).path
+        else if (access) path = `${path}?access=${encodeURIComponent(access)}`
+      }
+      const url = new URL(path, siteOrigin())
+      if (user?.referral_code) url.searchParams.set('ref', user.referral_code)
+      const result = await copyLink(url.toString())
+      setShareNote(result === 'copied' ? 'Link copied.' : `Copy this link: ${url.toString()}`)
+    } catch (err) {
+      setShareNote(err instanceof ApiError ? err.message : 'Could not get the link')
+    }
+  }
+
+  const changePrivacy = async (kind: 'public' | 'private' | 'secret') => {
+    if (!community || kind === community.kind) return
+    setBusy(true)
+    setNote(null)
+    try {
+      const result = await kaluta.communities.setPrivacy(community.id, kind)
+      setNote(
+        kind === 'public'
+          ? result.admitted
+            ? `This group is public now. ${result.admitted} waiting request${result.admitted === 1 ? ' was' : 's were'} admitted.`
+            : 'This group is public now.'
+          : kind === 'private'
+            ? 'This group is private now. Members stay; newcomers ask to join.'
+            : 'This group is secret now. It is unlisted, and only a shared link opens it.',
+      )
+      detail.reload()
+      feed.reload()
+      onChanged?.()
+    } catch (err) {
+      setNote(err instanceof ApiError ? err.message : 'Could not change the privacy')
     } finally {
       setBusy(false)
     }
@@ -162,7 +225,7 @@ export default function CommunityView({
                 // Not signed in. The link carries this page so they come back
                 // to the community they were reading, not to a dashboard.
                 <Link
-                  to={`/join?mode=signin&next=${encodeURIComponent(location.pathname)}`}
+                  to={`/join?mode=signin&next=${encodeURIComponent(location.pathname + location.search)}`}
                   className="rounded-full bg-gradient-to-br from-gold-soft to-gold px-5 py-2.5 text-sm font-bold text-ink"
                 >
                   Sign in to join
@@ -176,7 +239,7 @@ export default function CommunityView({
                     disabled={busy}
                     className="rounded-full bg-gradient-to-br from-gold-soft to-gold px-5 py-2.5 text-sm font-bold text-ink disabled:opacity-40"
                   >
-                    {community.kind === 'private'
+                    {community.kind === 'private' || community.kind === 'secret'
                       ? 'Request to join'
                       : community.kind === 'paid'
                         ? 'Buy access'
@@ -209,7 +272,51 @@ export default function CommunityView({
                   {managing ? 'Close' : 'Manage members'}
                 </button>
               )}
+              <button
+                type="button"
+                onClick={share}
+                className="inline-flex items-center gap-1.5 rounded-full border border-[var(--cloud-border)] px-5 py-2.5 text-sm font-semibold text-text-mid hover:border-gold/50 hover:text-gold-soft"
+              >
+                <Link2 size={13} aria-hidden="true" />
+                Share link
+              </button>
             </div>
+
+            {shareNote && (
+              <p role="status" className="mt-3 break-all text-sm text-text-mid">
+                {shareNote}
+              </p>
+            )}
+
+            {isSteward && community.kind !== 'paid' && (
+              <fieldset className="mt-5">
+                <legend className="text-sm font-semibold text-text-hi">Privacy</legend>
+                <div role="radiogroup" className="mt-2 flex flex-wrap gap-2">
+                  {PRIVACY_CHOICES.map((choice) => (
+                    <button
+                      key={choice.kind}
+                      type="button"
+                      role="radio"
+                      aria-checked={community.kind === choice.kind}
+                      disabled={busy}
+                      onClick={() => changePrivacy(choice.kind)}
+                      className={cn(
+                        'inline-flex items-center gap-1.5 rounded-full border px-4 py-2 text-sm font-semibold disabled:opacity-40',
+                        community.kind === choice.kind
+                          ? 'border-gold/60 bg-gold/15 text-gold-soft'
+                          : 'border-[var(--cloud-border)] text-text-mid hover:border-gold/40',
+                      )}
+                    >
+                      {choice.kind === 'public' ? <Globe size={13} aria-hidden="true" /> : <Lock size={13} aria-hidden="true" />}
+                      {choice.label}
+                    </button>
+                  ))}
+                </div>
+                <p className="mt-2 text-xs text-text-low">
+                  {PRIVACY_CHOICES.find((c) => c.kind === community.kind)?.hint}
+                </p>
+              </fieldset>
+            )}
 
             {note && (
               <p role="status" className="mt-3 text-sm text-text-mid">

@@ -920,3 +920,26 @@ What came from where: replies, the composer's emoji/sticker panel, the redesign 
   tar never removes files, so the stale copy was moved to
   /root/removed-FamilyGraph.tsx.bak on the server. Nothing imports it.
 - Pre-merge source backup: /root/kaluta-pre-merge-20261011-1053.tar.gz
+
+## Group privacy and share links (16/10)
+
+- ~~A group's privacy was fixed at creation.~~ The owner or a moderator now
+  switches it between public, private and secret from the group page
+  (`PATCH /communities/{id}/privacy`). Opening a private group admits everyone
+  who was waiting and tells them; closing a public one keeps its members. A
+  paid group stays paid (409): turning it free would change what members
+  bought. Verified locally, `e2e_group_privacy.py`, 38/38.
+- ~~A group had no link to send.~~ Every group page has "Share link", whatever
+  its privacy. Public and private open from their plain address; a secret one
+  gets `?access=<code>`, which only a member can obtain, opens the name and
+  description (never the posts) and lets the visitor *ask* to join.
+- **Found while doing it, and closed:** `POST /communities/{id}/join` let
+  anybody who knew a secret group's id walk straight in as an active member.
+  It is now a 404 without the access code, and a request with it.
+- **The access code cannot be rotated.** Once a secret link has leaked there
+  is no way to kill it: switching the group to private and back to secret
+  keeps the same code. A "reset link" action is needed. (A leaked link still
+  only lets people ask; a moderator decides.)
+- **A privacy change leaves no trace for the members.** Only those admitted by
+  an opening are notified; nobody sees "X made this group private".
+- **Not deployed** to kinjy.com yet.

@@ -43,6 +43,10 @@ class Community(Base):
     city: Mapped[str | None] = mapped_column(String(120))
     members_count: Mapped[int] = mapped_column(Integer, default=0)
     avatar_url: Mapped[str | None] = mapped_column(String(500))
+    # What lets a link to a *secret* community open for somebody outside it.
+    # Minted the first time a member asks for a share link; public and private
+    # communities never need one, their plain address already opens.
+    invite_code: Mapped[str | None] = mapped_column(String(32), index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
 

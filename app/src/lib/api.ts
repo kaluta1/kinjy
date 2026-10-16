@@ -2019,8 +2019,11 @@ export const kaluta = {
   },
 
   communities: {
-    /** One community. A secret one answers 404 unless you are a member. */
-    get: (id: string) =>
+    /**
+     * One community. A secret one answers 404 unless you are a member, or
+     * unless `invite` is the code a member's share link carries.
+     */
+    get: (id: string, invite?: string | null) =>
       api.get<{
         id: string
         slug: string
@@ -2031,7 +2034,7 @@ export const kaluta = {
         members_count: number
         my_role: string | null
         my_status: string | null
-      }>(`/communities/${id}`),
+      }>(`/communities/${id}${invite ? `?invite=${encodeURIComponent(invite)}` : ''}`),
 
     /** The roll and the queue waiting on it. Owner and moderators only. */
     members: (id: string, status?: string) =>
@@ -2057,7 +2060,19 @@ export const kaluta = {
     },
     create: (input: { name: string; description?: string; kind?: string; price_usd?: number; country?: string }) =>
       api.post<{ id: string; slug: string; kind: string }>('/communities', { kind: 'public', ...input }),
-    join: (id: string) => api.post<{ joined: boolean; status: string }>(`/communities/${id}/join`),
+    join: (id: string, invite?: string | null) =>
+      api.post<{ joined: boolean; status: string }>(
+        `/communities/${id}/join${invite ? `?invite=${encodeURIComponent(invite)}` : ''}`,
+      ),
+    /** Public, private or secret. Owner and moderators; a paid community stays paid. */
+    setPrivacy: (id: string, kind: 'public' | 'private' | 'secret') =>
+      api.patch<{ kind: string; changed: boolean; admitted: number }>(`/communities/${id}/privacy`, { kind }),
+    /**
+     * The path to send somebody. For a secret community it carries the access
+     * code that lets the page open for them, and only a member can get it.
+     */
+    shareLink: (id: string) =>
+      api.post<{ path: string; invite: string | null }>(`/communities/${id}/share-link`),
     /** Leave, or withdraw a request that has not been answered. */
     leave: (id: string) => api.post<{ left: boolean }>(`/communities/${id}/leave`),
     /**
