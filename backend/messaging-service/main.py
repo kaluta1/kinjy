@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import secrets
 import time
 from datetime import datetime, timedelta, timezone
 
@@ -26,6 +27,7 @@ from common.security import decode_token, ACCESS
 from common.service import create_app
 
 import agecheck
+from common import ageclient
 import agenotify
 import models
 from common import stickers
@@ -65,6 +67,13 @@ def _profiles(user_ids: set[str]) -> dict[str, dict]:
     return resolved
 
 MIGRATIONS = [
+    # Group privacy, share links and pins. Additive; existing groups are
+    # private, which is what they were: nobody could join without an admin.
+    f"ALTER TABLE {models.SCHEMA}.conversations ADD COLUMN IF NOT EXISTS privacy VARCHAR(10) DEFAULT 'private'",
+    f"UPDATE {models.SCHEMA}.conversations SET privacy = 'private' WHERE privacy IS NULL",
+    f"ALTER TABLE {models.SCHEMA}.conversations ADD COLUMN IF NOT EXISTS invite_code VARCHAR(32)",
+    f"CREATE INDEX IF NOT EXISTS ix_conversations_invite_code ON {models.SCHEMA}.conversations (invite_code)",
+    f"ALTER TABLE {models.SCHEMA}.participants ADD COLUMN IF NOT EXISTS pinned_at TIMESTAMPTZ",
     f"ALTER TABLE {models.SCHEMA}.participants ADD COLUMN IF NOT EXISTS accepted_at TIMESTAMPTZ",
     # Disappearing messages shipped their model without these, so every attempt
     # to create a conversation raised UndefinedColumn - and the caller saw it
@@ -999,6 +1008,343 @@ async def set_participant_role(
     return {"user_id": user_id, "role": target.role}
 
 
+# --- privacy, share links, join requests, pins --------------------------------
+
+PAYMENT_URL = "http://payment-service:8000"
+# Groups anybody may pin. More need this year's verification (KYC) fee.
+FREE_PINS = 3
+# One sentence for every refusal to join by link, whatever the reason, so the
+# refusal never tells anybody that a minor is in the room.
+LINK_REFUSED = "You cannot join this group by link. Ask one of its admins to add you."
+
+
+class PrivacyIn(BaseModel):
+    privacy: str = Field(pattern="^(public|private)$")
+
+
+class RequestActionIn(BaseModel):
+    action: str = Field(pattern="^(approve|reject)$")
+
+
+def _by_code(db: OrmSession, code: str) -> models.Conversation:
+    row = db.scalar(
+        select(models.Conversation).where(
+            models.Conversation.invite_code == code, models.Conversation.kind == "group"
+        )
+    ) if code else None
+    if row is None or row.is_welcome:
+        raise HTTPException(status_code=404, detail="This link does not lead anywhere")
+    return row
+
+
+def _may_join_by_link(db: OrmSession, conversation_id: str, user_id: str) -> bool:
+    """The age gate on walking into a room through a link.
+
+    Being added by an admin goes through the per-person checks, between the
+    admin and the person added. A link has nobody vouching for the newcomer,
+    and once inside they can write to everybody in the room. So:
+
+    * a minor, or anybody whose age is not confirmed, does not join by link -
+      an admin they are connected to can add them;
+    * an adult does not join by link a room that has a minor in it.
+
+    Fails closed: an age that cannot be read counts as a minor's.
+    """
+    joiner = ageclient.age_profile(user_id)
+    if joiner.is_minor:
+        return False
+    for uid in _participant_ids(db, conversation_id):
+        if ageclient.age_profile(uid).is_minor:
+            return False
+    return True
+
+
+def _admit(db: OrmSession, conversation_id: str, user_id: str) -> None:
+    db.add(
+        models.Participant(
+            conversation_id=conversation_id,
+            user_id=user_id,
+            role="member",
+            accepted_at=datetime.now(timezone.utc),
+        )
+    )
+    db.execute(
+        delete(models.JoinRequest).where(
+            models.JoinRequest.conversation_id == conversation_id,
+            models.JoinRequest.user_id == user_id,
+        )
+    )
+
+
+@app.patch("/conversations/{conversation_id}/privacy", tags=["groups"])
+async def set_group_privacy(
+    conversation_id: str,
+    payload: PrivacyIn,
+    principal: CurrentUser,
+    background: BackgroundTasks,
+    db: OrmSession = Depends(get_db),
+):
+    """Public or private. Admins only; the welcome group is everybody's already.
+
+    Opening a group answers everybody waiting at its door - except anybody the
+    age rule would keep out, whose request stays for an admin to see.
+    """
+    conversation = _group(db, conversation_id, principal.user_id)
+    _runs_group(db, conversation_id, principal.user_id)
+    if conversation.is_welcome:
+        raise HTTPException(status_code=403, detail="The welcome group's privacy does not change")
+    if (conversation.privacy or "private") == payload.privacy:
+        return {"privacy": payload.privacy, "changed": False, "admitted": 0}
+
+    conversation.privacy = payload.privacy
+    who = _display_names({principal.user_id})[principal.user_id]
+    _system_message(
+        db,
+        conversation_id,
+        who + (" made the group public: anyone with its link can join."
+               if payload.privacy == "public"
+               else " made the group private: joining by link now needs an admin's approval."),
+    )
+    admitted: list[str] = []
+    if payload.privacy == "public":
+        waiting = db.scalars(
+            select(models.JoinRequest).where(models.JoinRequest.conversation_id == conversation_id)
+        ).all()
+        for row in waiting:
+            if _may_join_by_link(db, conversation_id, row.user_id):
+                _admit(db, conversation_id, row.user_id)
+                admitted.append(row.user_id)
+    db.commit()
+    if admitted:
+        await _announce_joined(db, conversation_id, admitted, background)
+    else:
+        await _publish_to_users(
+            _participant_ids(db, conversation_id),
+            {"type": "conversation", "conversation_id": conversation_id},
+        )
+    return {"privacy": conversation.privacy, "changed": True, "admitted": len(admitted)}
+
+
+@app.post("/conversations/{conversation_id}/share-link", tags=["groups"])
+def group_share_link(conversation_id: str, principal: CurrentUser, db: OrmSession = Depends(get_db)):
+    """The link to send, public or private. Any member may share it."""
+    conversation = _group(db, conversation_id, principal.user_id)
+    if conversation.is_welcome:
+        raise HTTPException(status_code=400, detail="Everybody is in the welcome group already")
+    if not conversation.invite_code:
+        conversation.invite_code = secrets.token_urlsafe(12)
+        db.commit()
+    return {"path": f"/messages/join/{conversation.invite_code}", "code": conversation.invite_code}
+
+
+@app.get("/conversations/join/{code}", tags=["groups"])
+def preview_by_link(code: str, principal: CurrentUser, db: OrmSession = Depends(get_db)):
+    """What somebody holding the link sees before they decide: the group's face
+    and what it is for, never its messages or its members."""
+    conversation = _by_code(db, code)
+    member = db.scalar(
+        select(models.Participant).where(
+            models.Participant.conversation_id == conversation.id,
+            models.Participant.user_id == principal.user_id,
+        )
+    )
+    pending = db.scalar(
+        select(models.JoinRequest).where(
+            models.JoinRequest.conversation_id == conversation.id,
+            models.JoinRequest.user_id == principal.user_id,
+        )
+    )
+    return {
+        "id": conversation.id if member else None,
+        "title": conversation.title,
+        "description": conversation.description,
+        "avatar_url": conversation.avatar_url,
+        "cover_url": conversation.cover_url,
+        "privacy": conversation.privacy or "private",
+        "members_count": len(_participant_ids(db, conversation.id)),
+        "my_state": "member" if member else "pending" if pending else "none",
+    }
+
+
+@app.post("/conversations/join/{code}", tags=["groups"])
+async def join_by_link(
+    code: str,
+    principal: CurrentUser,
+    background: BackgroundTasks,
+    db: OrmSession = Depends(get_db),
+):
+    """Walk in (public) or ask to (private)."""
+    conversation = _by_code(db, code)
+    present = set(_participant_ids(db, conversation.id))
+    if principal.user_id in present:
+        return {"status": "member", "conversation_id": conversation.id}
+    if not _may_join_by_link(db, conversation.id, principal.user_id):
+        raise HTTPException(status_code=403, detail=LINK_REFUSED)
+
+    if (conversation.privacy or "private") == "public":
+        _admit(db, conversation.id, principal.user_id)
+        who = _display_names({principal.user_id})[principal.user_id]
+        _system_message(db, conversation.id, who + " joined with the group's link.")
+        db.commit()
+        await _announce_joined(db, conversation.id, [principal.user_id], background)
+        return {"status": "member", "conversation_id": conversation.id}
+
+    exists = db.scalar(
+        select(models.JoinRequest).where(
+            models.JoinRequest.conversation_id == conversation.id,
+            models.JoinRequest.user_id == principal.user_id,
+        )
+    )
+    if exists is None:
+        db.add(models.JoinRequest(conversation_id=conversation.id, user_id=principal.user_id))
+        db.commit()
+        admins = db.scalars(
+            select(models.Participant.user_id).where(
+                models.Participant.conversation_id == conversation.id,
+                models.Participant.role.in_(("owner", "admin")),
+            )
+        ).all()
+        who = _display_names({principal.user_id})[principal.user_id]
+        for uid in admins:
+            background.add_task(
+                _push_to_member,
+                uid,
+                {
+                    "kind": "group_request",
+                    "title": who + " asked to join " + (conversation.title or "your group"),
+                    "link": "/messages?c=" + conversation.id,
+                },
+            )
+        await _publish_to_users(admins, {"type": "conversation", "conversation_id": conversation.id})
+    return {"status": "pending", "conversation_id": None}
+
+
+@app.get("/conversations/{conversation_id}/requests", tags=["groups"])
+def group_requests(conversation_id: str, principal: CurrentUser, db: OrmSession = Depends(get_db)):
+    """Who is waiting at a private group's door. Admins only."""
+    _group(db, conversation_id, principal.user_id)
+    _runs_group(db, conversation_id, principal.user_id)
+    rows = db.scalars(
+        select(models.JoinRequest)
+        .where(models.JoinRequest.conversation_id == conversation_id)
+        .order_by(models.JoinRequest.created_at)
+    ).all()
+    people = _profiles({r.user_id for r in rows})
+    return {
+        "items": [
+            {
+                "user_id": r.user_id,
+                "created_at": r.created_at,
+                "handle": (people.get(r.user_id) or {}).get("handle"),
+                "display_name": (people.get(r.user_id) or {}).get("display_name") or r.user_id[:12],
+                "avatar_url": (people.get(r.user_id) or {}).get("avatar_url"),
+            }
+            for r in rows
+        ]
+    }
+
+
+@app.post("/conversations/{conversation_id}/requests/{user_id}", tags=["groups"])
+async def answer_request(
+    conversation_id: str,
+    user_id: str,
+    payload: RequestActionIn,
+    principal: CurrentUser,
+    background: BackgroundTasks,
+    db: OrmSession = Depends(get_db),
+):
+    """Let somebody in, or turn them away. Admins only.
+
+    Approving is checked again against the age rule: an admin's yes does not
+    lift it, because the admin may not know who else is in the room.
+    """
+    conversation = _group(db, conversation_id, principal.user_id)
+    _runs_group(db, conversation_id, principal.user_id)
+    row = db.scalar(
+        select(models.JoinRequest).where(
+            models.JoinRequest.conversation_id == conversation_id,
+            models.JoinRequest.user_id == user_id,
+        )
+    )
+    if row is None:
+        raise HTTPException(status_code=404, detail="No request from this member")
+    if payload.action == "reject":
+        db.delete(row)
+        db.commit()
+        return {"user_id": user_id, "status": "rejected"}
+
+    if not _may_join_by_link(db, conversation_id, user_id):
+        raise HTTPException(
+            status_code=403,
+            detail="This member cannot be let in from a link. Add them from the member list instead.",
+        )
+    _admit(db, conversation_id, user_id)
+    names = _display_names({user_id, principal.user_id})
+    _system_message(db, conversation_id, names[principal.user_id] + " let " + names[user_id] + " in.")
+    db.commit()
+    background.add_task(
+        _push_to_member,
+        user_id,
+        {
+            "kind": "group_approved",
+            "title": "You were let into " + (conversation.title or "a group"),
+            "link": "/messages?c=" + conversation_id,
+        },
+    )
+    await _announce_joined(db, conversation_id, [user_id], background)
+    return {"user_id": user_id, "status": "member"}
+
+
+def _kyc_fee_paid(user_id: str) -> tuple[bool, str]:
+    """(paid this year, fee). Fails closed: an extra pin waits rather than
+    being given away when payment-service cannot answer."""
+    try:
+        response = httpx.get(f"{PAYMENT_URL}/internal/kyc/{user_id}", timeout=5)
+        response.raise_for_status()
+        body = response.json()
+        return bool(body.get("fee_paid")), str(body.get("fee_usd", ""))
+    except Exception as exc:
+        log.warning("could not read the KYC fee of %s: %s", user_id, exc)
+        return False, ""
+
+
+@app.post("/conversations/{conversation_id}/pin", tags=["groups"])
+async def pin_group(conversation_id: str, principal: CurrentUser, db: OrmSession = Depends(get_db)):
+    """Pin a group to the top of your list. Three are free; more ask for the KYC fee."""
+    _group(db, conversation_id, principal.user_id)
+    me = _member(db, conversation_id, principal.user_id)
+    if me.pinned_at is not None:
+        return {"pinned": True, "already": True}
+    count = db.scalar(
+        select(func.count()).select_from(models.Participant).where(
+            models.Participant.user_id == principal.user_id,
+            models.Participant.pinned_at.is_not(None),
+        )
+    ) or 0
+    if count >= FREE_PINS:
+        paid, fee = _kyc_fee_paid(principal.user_id)
+        if not paid:
+            price = f"${fee} " if fee else ""
+            raise HTTPException(
+                status_code=402,
+                detail=f"You can pin {FREE_PINS} groups. To pin more, pay your {price}annual verification (KYC) fee.",
+            )
+    me.pinned_at = datetime.now(timezone.utc)
+    db.commit()
+    await _publish_to_users([principal.user_id], {"type": "conversation", "conversation_id": conversation_id})
+    return {"pinned": True, "count": count + 1}
+
+
+@app.delete("/conversations/{conversation_id}/pin", tags=["groups"])
+async def unpin_group(conversation_id: str, principal: CurrentUser, db: OrmSession = Depends(get_db)):
+    me = _member(db, conversation_id, principal.user_id)
+    if me.pinned_at is not None:
+        me.pinned_at = None
+        db.commit()
+    await _publish_to_users([principal.user_id], {"type": "conversation", "conversation_id": conversation_id})
+    return {"pinned": False}
+
+
 def _welcome_admin_id() -> str | None:
     """The account configured to run the welcome group, if there is one.
 
@@ -1350,10 +1696,13 @@ def list_conversations(principal: CurrentUser, db: OrmSession = Depends(get_db))
     # This viewer's own role in each room, picked out of the same rows rather
     # than fetched again per conversation.
     my_role: dict[str, str] = {}
+    my_pin: dict[str, datetime] = {}
     for m in memberships:
         members.setdefault(m.conversation_id, []).append(m.user_id)
         if m.user_id == principal.user_id:
             my_role[m.conversation_id] = m.role
+            if m.pinned_at is not None:
+                my_pin[m.conversation_id] = m.pinned_at
         # "Seen" is a thing you say about a direct conversation. In a group it
         # would be a row per member, which is both meaningless to draw and the
         # same payload problem as the profiles above.
@@ -1395,12 +1744,18 @@ def list_conversations(principal: CurrentUser, db: OrmSession = Depends(get_db))
         ).all()
     }
 
+    # Pinned groups first, in the order they were pinned; then everything by
+    # its latest message, as before.
+    rows = sorted(rows, key=lambda r: (0, my_pin[r.id].timestamp()) if r.id in my_pin else (1, 0))
+
     return {
         "items": [
             {
                 "id": r.id,
                 "kind": r.kind,
                 "title": r.title,
+                "privacy": (r.privacy or "private") if r.kind == "group" else None,
+                "pinned": r.id in my_pin,
                 # Groups only, and the one thing a group has that a direct
                 # conversation does not: what it is for.
                 "description": r.description,

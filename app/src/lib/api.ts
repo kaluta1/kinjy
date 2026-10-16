@@ -472,6 +472,11 @@ export interface FeedPage {
   algorithm: string
   algorithm_name?: string
   ranked: boolean
+  /**
+   * On a date-ordered mode, the chosen algorithm's filter that still applied
+   * (Video Only keeps videos in New too), or null when it filters nothing.
+   */
+  filtered?: { name: string; formats: string[]; topics: string[] } | null
   total_candidates?: number
   empty_reason?: string
   /**
@@ -855,6 +860,10 @@ export interface Conversation {
   is_welcome?: boolean
   /** What the viewer may do here: owner and admin run it, member does not. */
   my_role?: 'owner' | 'admin' | 'member'
+  /** Groups: what the share link does. Public lets people in, private asks an admin. */
+  privacy?: 'public' | 'private' | null
+  /** Pinned to the top of the viewer's list. */
+  pinned?: boolean
   encrypted: boolean
   last_message_at: string
   /**
@@ -2223,6 +2232,41 @@ export const kaluta = {
       }),
     removeMember: (conversationId: string, userId: string) =>
       api.delete<{ removed: string }>(`/conversations/${conversationId}/participants/${userId}`),
+    /** Public or private. Admins only. Opening a group lets in whoever was waiting. */
+    setPrivacy: (conversationId: string, privacy: 'public' | 'private') =>
+      api.patch<{ privacy: string; changed: boolean; admitted: number }>(
+        `/conversations/${conversationId}/privacy`,
+        { privacy },
+      ),
+    /** The group's link, for any member to send. */
+    shareLink: (conversationId: string) =>
+      api.post<{ path: string; code: string }>(`/conversations/${conversationId}/share-link`),
+    /** What a link leads to, before deciding. Never the messages or the members. */
+    previewLink: (code: string) =>
+      api.get<{
+        id: string | null
+        title: string | null
+        description: string | null
+        avatar_url: string | null
+        cover_url: string | null
+        privacy: 'public' | 'private'
+        members_count: number
+        my_state: 'member' | 'pending' | 'none'
+      }>(`/conversations/join/${encodeURIComponent(code)}`),
+    joinByLink: (code: string) =>
+      api.post<{ status: 'member' | 'pending'; conversation_id: string | null }>(
+        `/conversations/join/${encodeURIComponent(code)}`,
+      ),
+    requests: (conversationId: string) =>
+      api.get<{ items: Array<GroupMember & { created_at: string }> }>(`/conversations/${conversationId}/requests`),
+    answerRequest: (conversationId: string, userId: string, action: 'approve' | 'reject') =>
+      api.post<{ user_id: string; status: string }>(`/conversations/${conversationId}/requests/${userId}`, {
+        action,
+      }),
+    /** Three groups pin free; more answer 402 until this year's KYC fee is paid. */
+    pin: (conversationId: string) =>
+      api.post<{ pinned: boolean; already?: boolean; count?: number }>(`/conversations/${conversationId}/pin`),
+    unpin: (conversationId: string) => api.delete<{ pinned: boolean }>(`/conversations/${conversationId}/pin`),
     setRole: (conversationId: string, userId: string, role: 'admin' | 'member') =>
       api.post<{ user_id: string; role: string }>(
         `/conversations/${conversationId}/participants/${userId}/role`,

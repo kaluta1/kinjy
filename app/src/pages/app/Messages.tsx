@@ -13,6 +13,7 @@ import {
   MessageSquare,
   Mic,
   Pencil,
+  Pin,
   Plus,
   Search,
   Send,
@@ -1750,8 +1751,11 @@ export default function Messages() {
                             size={52}
                           />
                           <span className="min-w-0 flex-1">
-                            <span className="block truncate text-[15px] font-semibold leading-tight text-text-hi">
-                              {titleOf(conversation, others)}
+                            <span className="flex items-center gap-1.5 text-[15px] font-semibold leading-tight text-text-hi">
+                              <span className="truncate">{titleOf(conversation, others)}</span>
+                              {conversation.pinned && (
+                                <Pin size={12} className="shrink-0 text-gold" aria-label="Pinned" />
+                              )}
                             </span>
                             <span className="mt-0.5 flex items-center gap-1.5 text-[0.82rem] leading-tight">
                               <span

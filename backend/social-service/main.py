@@ -2538,6 +2538,16 @@ def feed(
     # everybody and the ranker's affinity term never applied.
     following = ctx.following
 
+    # An algorithm does two things: it *filters* (Video Only keeps videos) and
+    # it *ranks*. The date-ordered modes refuse the ranking by design, but they
+    # used to refuse the filter with it - so a member who chose Video Only and
+    # read New got every text and photo post, with a note saying the choice was
+    # ignored. The filter now applies in every mode; only the order differs.
+    picked = db.get(models.Algorithm, algorithm_id) if algorithm_id else None
+    if mode in ("following", "new") and picked is not None:
+        stmt = _algorithm_filter(stmt, picked)
+    unranked_algorithm = picked.id if picked is not None and _filters(picked) else "chronological"
+
     if mode == "following":
         if principal is not None and not ctx.graph_known:
             # Saying "you follow nobody" would be a lie the member cannot see
@@ -2550,7 +2560,7 @@ def feed(
         # into a void.
         audience = set(following) | ({viewer} if viewer else set())
         if not audience:
-            return {"mode": mode, "algorithm": "chronological", "items": [],
+            return {"mode": mode, "algorithm": unranked_algorithm, "items": [],
                     "age_tier": agefilter.tier_of(age), "degraded": age.degraded,
                     "empty_reason": "not_following_anyone"}
         rows = db.scalars(
@@ -2561,7 +2571,7 @@ def feed(
         ).all()
         if not rows and not following:
             # Still empty, and the reason is the one the member can act on.
-            return {"mode": mode, "algorithm": "chronological", "items": [],
+            return {"mode": mode, "algorithm": unranked_algorithm, "items": [],
                     "age_tier": agefilter.tier_of(age), "degraded": age.degraded,
                     "empty_reason": "not_following_anyone"}
         authors = _resolve_authors(_author_ids(db, list(rows)))
@@ -2569,7 +2579,8 @@ def feed(
         actors = _known_actors(db, viewer, following, list(rows))
         return {
             "mode": mode,
-            "algorithm": "chronological",
+            "algorithm": unranked_algorithm,
+            "filtered": _filters(picked) if picked is not None else None,
             "ranked": False,
             "age_tier": agefilter.tier_of(age),
             "degraded": age.degraded,
@@ -2593,7 +2604,8 @@ def feed(
         actors = _known_actors(db, viewer, following, list(rows))
         return {
             "mode": mode,
-            "algorithm": "chronological",
+            "algorithm": unranked_algorithm,
+            "filtered": _filters(picked) if picked is not None else None,
             "ranked": False,
             "age_tier": agefilter.tier_of(age),
             "degraded": age.degraded,
@@ -2637,6 +2649,11 @@ def feed(
     ctx.country = country
     ctx.city = city
 
+    # Filtered in the query too, not only by the ranker: the window below is
+    # the 500 newest posts, and when few of them are videos a Video Only feed
+    # ran dry while older videos sat outside the window.
+    stmt = _algorithm_filter(stmt, algorithm)
+
     # Rank a bounded candidate window rather than the whole table.
     candidates = db.scalars(stmt.order_by(models.Post.created_at.desc()).limit(500)).all()
     scored = ranking.rank(list(candidates), algorithm, ctx)
@@ -2672,6 +2689,31 @@ def feed(
             for item in page
         ],
     }
+
+
+def _filters(algorithm: models.Algorithm) -> dict | None:
+    """What an algorithm keeps, said plainly, or None when it keeps everything."""
+    formats, topics = ranking.wanted_formats(algorithm), ranking.wanted_topics(algorithm)
+    if not formats and not topics:
+        return None
+    return {"name": algorithm.name, "formats": sorted(formats), "topics": sorted(topics)}
+
+
+def _algorithm_filter(stmt, algorithm: models.Algorithm):
+    """An algorithm's format and topic filters, pushed into the query.
+
+    Topics are stored as a comma list that may carry spaces; it is compared
+    whole-word (",video," inside ",tech,video,") so "art" does not match
+    "party".
+    """
+    formats = ranking.wanted_formats(algorithm)
+    if formats:
+        stmt = stmt.where(func.lower(models.Post.format).in_(formats))
+    topics = ranking.wanted_topics(algorithm)
+    if topics:
+        padded = func.concat(",", func.replace(func.lower(func.coalesce(models.Post.topics, "")), " ", ""), ",")
+        stmt = stmt.where(or_(*[padded.like(f"%,{t.replace(' ', '')},%") for t in topics]))
+    return stmt
 
 
 @app.get("/feed/modes", tags=["feed"])

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import { Link } from 'react-router'
-import { Check, LogOut, Pencil, Search, ShieldCheck, UserPlus, X } from 'lucide-react'
+import { Check, Globe, Link2, Lock, LogOut, Pencil, Pin, PinOff, Search, ShieldCheck, UserPlus, X } from 'lucide-react'
+import { copyLink, siteOrigin } from '@/lib/share'
 import MemberAvatar from '@/components/social/MemberAvatar'
 import { useAppTheme } from '@/components/appdemo/theme'
 import { ApiError, kaluta, type Conversation, type GroupMember, type PersonBrief } from '@/lib/api'
@@ -15,6 +16,202 @@ import { cn } from '@/lib/utils'
  * has no buttons on it, rather than seeing a tidier screen that hides what the
  * room is.
  */
+/**
+ * Who may come in, how to send them the link, who is waiting, and the pin.
+ *
+ * The link exists whatever the privacy: a public group lets its holder in, a
+ * private one turns it into a request an admin answers. Nobody under 18, and
+ * nobody into a room with a minor in it, comes in by link - the server says
+ * so in one sentence that does not say which.
+ */
+function GroupAccess({
+  conversation,
+  runs,
+  onChanged,
+}: {
+  conversation: Conversation
+  runs: boolean
+  onChanged: () => void
+}) {
+  const { tok } = useAppTheme()
+  const privacy = conversation.privacy ?? 'private'
+  const [note, setNote] = useState<string | null>(null)
+  const [needsKyc, setNeedsKyc] = useState(false)
+  const [busy, setBusy] = useState(false)
+  const [requests, setRequests] = useState<Array<GroupMember & { created_at: string }>>([])
+
+  const loadRequests = useCallback(() => {
+    if (!runs) return
+    kaluta.messages
+      .requests(conversation.id)
+      .then((page) => setRequests(page.items))
+      .catch(() => setRequests([]))
+  }, [conversation.id, runs])
+  useEffect(loadRequests, [loadRequests])
+
+  const act = async (action: () => Promise<string | void>, failure: string) => {
+    setBusy(true)
+    setNote(null)
+    setNeedsKyc(false)
+    try {
+      const said = await action()
+      if (said) setNote(said)
+      loadRequests()
+      onChanged()
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 402) setNeedsKyc(true)
+      setNote(err instanceof ApiError ? err.message : failure)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const share = () =>
+    act(async () => {
+      const { path } = await kaluta.messages.shareLink(conversation.id)
+      const url = new URL(path, siteOrigin()).toString()
+      return (await copyLink(url)) === 'copied' ? 'Link copied.' : `Copy this link: ${url}`
+    }, 'Could not get the link')
+
+  return (
+    <div className="mt-5 space-y-3 rounded-xl border border-[var(--cloud-border)] p-3">
+      <div className="flex flex-wrap gap-2">
+        <button
+          type="button"
+          onClick={() => void share()}
+          disabled={busy}
+          className="inline-flex items-center gap-1.5 rounded-full border border-gold/50 px-3 py-1 text-xs font-semibold text-gold-soft hover:bg-gold/10 disabled:opacity-50"
+        >
+          <Link2 size={12} aria-hidden="true" />
+          Share link
+        </button>
+        <button
+          type="button"
+          aria-pressed={Boolean(conversation.pinned)}
+          onClick={() =>
+            void act(async () => {
+              if (conversation.pinned) {
+                await kaluta.messages.unpin(conversation.id)
+                return 'Unpinned.'
+              }
+              await kaluta.messages.pin(conversation.id)
+              return 'Pinned to the top of your list.'
+            }, 'Could not change the pin')
+          }
+          disabled={busy}
+          className={cn(
+            'inline-flex items-center gap-1.5 rounded-full border border-[var(--cloud-border)] px-3 py-1 text-xs font-semibold hover:bg-text-hi/[0.05] disabled:opacity-50',
+            tok.mid,
+          )}
+        >
+          {conversation.pinned ? <PinOff size={12} aria-hidden="true" /> : <Pin size={12} aria-hidden="true" />}
+          {conversation.pinned ? 'Unpin' : 'Pin'}
+        </button>
+      </div>
+
+      {runs ? (
+        <div role="radiogroup" aria-label="Who can join with the link" className="flex gap-2">
+          {(['public', 'private'] as const).map((choice) => (
+            <button
+              key={choice}
+              type="button"
+              role="radio"
+              aria-checked={privacy === choice}
+              disabled={busy}
+              onClick={() =>
+                privacy !== choice &&
+                void act(async () => {
+                  const result = await kaluta.messages.setPrivacy(conversation.id, choice)
+                  if (choice === 'private') return 'The group is private: the link now asks an admin.'
+                  return result.admitted
+                    ? `The group is public. ${result.admitted} waiting ${result.admitted === 1 ? 'person was' : 'people were'} let in.`
+                    : 'The group is public: anyone with the link can join.'
+                }, 'Could not change the privacy')
+              }
+              className={cn(
+                'inline-flex items-center gap-1.5 rounded-full border px-3 py-1 text-xs font-semibold disabled:opacity-50',
+                privacy === choice
+                  ? 'border-gold/60 bg-gold/15 text-gold-soft'
+                  : cn('border-[var(--cloud-border)] hover:border-gold/40', tok.mid),
+              )}
+            >
+              {choice === 'public' ? <Globe size={12} aria-hidden="true" /> : <Lock size={12} aria-hidden="true" />}
+              {choice === 'public' ? 'Public' : 'Private'}
+            </button>
+          ))}
+        </div>
+      ) : null}
+      <p className={cn('flex items-center gap-1.5 text-xs', tok.low)}>
+        {privacy === 'public' ? <Globe size={12} aria-hidden="true" /> : <Lock size={12} aria-hidden="true" />}
+        {privacy === 'public'
+          ? 'Public: anyone with the link can join.'
+          : 'Private: the link sends a request an admin answers.'}
+      </p>
+
+      {note && (
+        <p role="status" className={cn('break-all text-xs', tok.mid)}>
+          {note}
+          {needsKyc && (
+            <>
+              {' '}
+              <Link to="/dashboard?tab=verification" className="font-semibold text-gold-soft hover:underline">
+                Pay the KYC fee
+              </Link>
+            </>
+          )}
+        </p>
+      )}
+
+      {runs && requests.length > 0 && (
+        <div>
+          <h4 className={cn('text-xs font-semibold', tok.text)}>
+            {requests.length} waiting to join
+          </h4>
+          <ul className="mt-1 space-y-1">
+            {requests.map((person) => (
+              <li key={person.user_id} className="flex items-center gap-2">
+                <MemberAvatar
+                  handle={person.handle ?? undefined}
+                  displayName={person.display_name}
+                  avatarUrl={person.avatar_url}
+                  size={28}
+                />
+                <span className={cn('min-w-0 flex-1 truncate text-xs', tok.text)}>{person.display_name}</span>
+                <button
+                  type="button"
+                  disabled={busy}
+                  aria-label={`Let ${person.display_name} in`}
+                  onClick={() =>
+                    void act(async () => {
+                      await kaluta.messages.answerRequest(conversation.id, person.user_id, 'approve')
+                    }, 'Could not let them in')
+                  }
+                  className="rounded-full p-1.5 text-emerald-300 hover:bg-emerald-500/10"
+                >
+                  <Check size={14} aria-hidden="true" />
+                </button>
+                <button
+                  type="button"
+                  disabled={busy}
+                  aria-label={`Turn ${person.display_name} away`}
+                  onClick={() =>
+                    void act(async () => {
+                      await kaluta.messages.answerRequest(conversation.id, person.user_id, 'reject')
+                    }, 'Could not answer')
+                  }
+                  className={cn('rounded-full p-1.5 hover:bg-text-hi/[0.07]', tok.low)}
+                >
+                  <X size={14} aria-hidden="true" />
+                </button>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+    </div>
+  )
+}
+
 export default function GroupPanel({
   conversation,
   meId,
@@ -267,6 +464,10 @@ export default function GroupPanel({
               {conversation.description || 'No description yet.'}
             </p>
           </div>
+        )}
+
+        {!conversation.is_welcome && (
+          <GroupAccess conversation={conversation} runs={runs} onChanged={() => { load(); onChanged() }} />
         )}
 
         <div className="mt-5 flex items-center justify-between gap-2">

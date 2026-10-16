@@ -42,6 +42,13 @@ class Conversation(Base):
     # property of the room everyone in it can see, not a per-message trick one
     # participant can play on another. 0 means messages are kept.
     disappear_after_seconds: Mapped[int] = mapped_column(Integer, default=0)
+    # Groups: who may come in through a shared link. "public" lets them in at
+    # once, "private" turns the link into a request an admin answers. Either
+    # way a group is never listed anywhere - the link is the only door.
+    privacy: Mapped[str] = mapped_column(String(10), default="private")
+    # The code a group's link carries. Random rather than the group's id, so a
+    # link cannot be guessed from another one. Minted on the first share.
+    invite_code: Mapped[str | None] = mapped_column(String(32), index=True)
     last_message_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
@@ -64,6 +71,29 @@ class Participant(Base):
     accepted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_read_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     joined_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    # Pinned to the top of this member's list, and when. Groups only.
+    pinned_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class JoinRequest(Base):
+    """Somebody who opened a private group's link and asked to come in.
+
+    A table of its own rather than a participant row with a flag: every read
+    path in this service treats "has a participant row" as "may read the
+    room", and a pending flag that one of them forgot would hand the history
+    to someone nobody admitted.
+    """
+
+    __tablename__ = "join_requests"
+    __table_args__ = (
+        UniqueConstraint("conversation_id", "user_id", name="uq_join_request"),
+        {"schema": SCHEMA},
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    conversation_id: Mapped[str] = mapped_column(String(40), index=True)
+    user_id: Mapped[str] = mapped_column(String(40), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
 
 class Message(Base):

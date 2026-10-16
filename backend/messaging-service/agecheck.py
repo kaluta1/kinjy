@@ -95,6 +95,11 @@ def is_connected(db: OrmSession, actor: str, target: str) -> bool:
     An accepted conversation counts, because replying to somebody is a clearer
     statement of consent than any setting. A pending request does not: that is
     the state this whole mechanism exists to govern.
+
+    A *direct* conversation, and only that. Sharing a group is not consent to
+    be written to privately: the welcome group holds every member of the
+    platform, accepted, so counting groups here made every adult "connected"
+    to every minor and switched the adult-to-minor rule off for everybody.
     """
     accepted = db.scalar(
         select(func.count())
@@ -104,6 +109,7 @@ def is_connected(db: OrmSession, actor: str, target: str) -> bool:
             models.Conversation.id == models.Participant.conversation_id,
         )
         .where(
+            models.Conversation.kind == "direct",
             models.Participant.user_id == target,
             models.Participant.accepted_at.is_not(None),
             models.Participant.conversation_id.in_(

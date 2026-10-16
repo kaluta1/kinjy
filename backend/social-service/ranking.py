@@ -135,11 +135,23 @@ def passes_filters(post: models.Post, algorithm: models.Algorithm, ctx: Context)
             return False
 
     if algorithm.format_filter:
-        formats = {f.strip().lower() for f in algorithm.format_filter.split(",") if f.strip()}
-        if post.format.lower() not in formats:
+        if post.format.lower() not in wanted_formats(algorithm):
             return False
 
     return True
+
+
+def wanted_formats(algorithm: models.Algorithm) -> set[str]:
+    """The post formats an algorithm keeps. A short is a video: "Video Only"
+    that left out the vertical reel would be leaving out most of the video."""
+    formats = {f.strip().lower() for f in (algorithm.format_filter or "").split(",") if f.strip()}
+    if "video" in formats:
+        formats.add("short")
+    return formats
+
+
+def wanted_topics(algorithm: models.Algorithm) -> set[str]:
+    return {t.strip().lower() for t in (algorithm.topic_filter or "").split(",") if t.strip()}
 
 
 def rank(posts: list[models.Post], algorithm: models.Algorithm, ctx: Context) -> list[Scored]:

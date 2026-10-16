@@ -979,3 +979,40 @@ What came from where: replies, the composer's emoji/sticker panel, the redesign 
   backups `pre-pins-follow-20261016-1540`). Checked from outside only: the
   routes answer, `pinned_at` exists, `/internal/kyc` is not reachable from
   the internet. Not clicked through in production with a real account.
+
+## Chat groups: privacy, links, pins; Video Only; a safety hole (16/10)
+
+- ~~"Video Only" showed text and photo posts.~~ The date-ordered modes (New,
+  Following) dropped the algorithm entirely, its filter included, and said
+  "The current mode ignores it by design". An algorithm both *filters* and
+  *ranks*; those modes now keep its filter and refuse only the ranking. The
+  filter is also pushed into the query in ranked modes, so a Video Only feed
+  no longer runs dry when the 500 newest posts hold few videos. A short counts
+  as a video.
+- ~~Chat groups had no privacy and no link.~~ Admins switch a group between
+  public and private; any member gets its link (`/messages/join/<code>`, a
+  random code, never the id). Public lets the holder in; private makes a
+  request admins answer from the group panel. Members can pin groups to the
+  top of their list: three free, more with this year's KYC fee. Verified
+  locally, `e2e_chat_group_access.py` (47 checks).
+- **Links and minors, by design:** nobody under 18 (or of unconfirmed age)
+  joins by link, and no adult joins by link a room with a minor in it. Same
+  refusal sentence for both, so it reveals nothing. An admin can still add a
+  teen they are connected to, through the existing per-person checks.
+- ~~Every adult counted as "connected" to every minor.~~ `agecheck.is_connected`
+  counted *any* accepted conversation the two shared, and the welcome group
+  (13/10) puts everybody in one. So the adult-to-minor rule on private
+  messages was off for the whole platform. Only a direct conversation counts
+  now. In production `contact_attempts` shows no adult-to-minor contact
+  allowed since, so it was not used. `e2e_messaging_age.py` was failing on it
+  and nobody had noticed.
+- **Still failing, not fixed:** `e2e_messaging_age.py` expects a teen added
+  to a group to be "unaccepted" until they reply, so media waits. Since 13/10
+  group members are accepted on arrival, by design, so a teen added to a
+  group by somebody they may be reached by gets images at once. Decide.
+- **Still failing, not fixed:** `e2e_unread_count.py` - a new member starts
+  with hundreds of unread messages: every arrival writes a system line into
+  the welcome group, and system lines count as unread.
+- **The welcome group itself mixes adults and minors** in one room anybody
+  can write in. The age rule protects private messages, not that room.
+- The share link of a chat group cannot be reset yet.

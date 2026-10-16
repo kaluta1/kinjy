@@ -428,7 +428,7 @@ export default function SocialHub() {
 
       <Suggestions />
       <RailCard title="Your algorithm">
-        <p className="caption mb-3">Applies to every ranked mode.</p>
+        <p className="caption mb-3">Its filter applies in every mode; its ranking, in the ranked ones.</p>
         <select
           id="algorithm-picker"
           value={algorithmId}
@@ -444,7 +444,11 @@ export default function SocialHub() {
           ))}
         </select>
         {feed?.ranked === false && (
-          <p className="caption mt-2 text-text-low">The current mode ignores it by design.</p>
+          <p className="caption mt-2 text-text-low">
+            {feed.filtered
+              ? `This mode keeps date order, and still shows only what ${feed.filtered.name} allows.`
+              : 'This mode keeps date order, so it does not rank.'}
+          </p>
         )}
         <Link to="/feeds" className="caption mt-3 block text-gold-soft hover:underline">
           Browse the Algorithm Marketplace →
