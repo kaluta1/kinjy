@@ -1093,3 +1093,6 @@ What came from where: replies, the composer's emoji/sticker panel, the redesign 
   published article's media is not possible (post edit is text-only, as
   before). Uploads dropped from the text before publishing stay as orphan
   files in media-service.
+- Deployed on kinjy.com 16/10 19:12 (messaging, social, web; backups
+  `pre-mentions-articles-20261016-1910`). Checked from outside and in the
+  running containers; not clicked through in production with a real account.
