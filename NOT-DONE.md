@@ -942,4 +942,8 @@ What came from where: replies, the composer's emoji/sticker panel, the redesign 
   only lets people ask; a moderator decides.)
 - **A privacy change leaves no trace for the members.** Only those admitted by
   an opening are notified; nobody sees "X made this group private".
-- **Not deployed** to kinjy.com yet.
+- Deployed on kinjy.com 16/10 15:10 (community-service + web only; backups
+  `/opt/kaluta/backups/pre-group-privacy-20261016-1508.sql.gz` and
+  `/root/kaluta-pre-group-privacy-20261016-1508.tar.gz`). Checked from outside:
+  13/13 healthy, the new routes answer, `invite_code` exists. The e2e test was
+  run locally only, not against production, to keep test accounts out of it.
