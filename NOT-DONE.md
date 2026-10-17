@@ -1240,3 +1240,6 @@ Three causes, all fixed:
 - Previews already cached by WhatsApp or Facebook for links shared before
   this stay as they were; Facebook's Sharing Debugger re-reads a link.
 - `e2e_own_link_preview.py` 18/18, `e2e_share_preview.py` 22/22.
+- Deployed on kinjy.com 17/10 22:15 (social, messaging, web; backups
+  `pre-share-links-20261017-2214`). Checked with WhatsApp, Facebook and
+  browser User-Agents: the same title, description and picture for each.
