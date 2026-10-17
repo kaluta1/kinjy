@@ -57,7 +57,15 @@ services:
 
   auth-service: *prod-service
   user-service: *prod-service
-  social-service: *prod-service
+  social-service:
+    ports: !override []
+    volumes: !override []
+    environment:
+      ENV: production
+      # Link previews read the built app's index.html from nginx (port 80);
+      # docker-compose.yml points it at the Vite dev server instead.
+      OG_INDEX_URL: http://web/index.html
+    command: uvicorn main:app --host 0.0.0.0 --port 8000 --workers 2
   community-service: *prod-service
   family-service: *prod-service
   memorial-service: *prod-service
