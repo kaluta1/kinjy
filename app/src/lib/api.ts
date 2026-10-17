@@ -1833,7 +1833,13 @@ export const kaluta = {
     remove: (id: string) => api.delete<void>(`/posts/${id}`),
     /** Share to your own audience. A body makes it a quote rather than a plain share. */
     /** Fix your own post, within its first 24 hours. */
-    edit: (postId: string, body: string) => api.patch<Post>(`/posts/${postId}`, { body }),
+    /**
+     * Fix a post within its first 24 hours. For an article, `media` names the
+     * files newly placed in its text (already uploaded); sending it also tells
+     * the server to detach the ones taken out of the text.
+     */
+    edit: (postId: string, body: string, media?: Array<{ media_id: string; url: string; kind: string }>) =>
+      api.patch<Post>(`/posts/${postId}`, media ? { body, media } : { body }),
     /** Fix a comment, within its first 24 hours. */
     editComment: (commentId: string, body: string) =>
       api.patch<{ id: string; body: string; edited_at: string }>(`/comments/${commentId}`, { body }),

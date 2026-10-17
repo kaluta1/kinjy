@@ -2043,9 +2043,16 @@ def edit_post(post_id: str, payload: PostIn, principal: CurrentUser, db: OrmSess
             status_code=403,
             detail="A post can only be edited in the first 24 hours. Older posts stand as written.",
         )
+    previous_body = post.body or ""
     post.body = payload.body
     post.topics = _merge_topics(payload.topics, payload.body)
     post.edited_at = datetime.now(timezone.utc)
+    # An article's pictures and clips live in its text, so editing the text is
+    # where they are added and taken out. Only when the client says so (it sent
+    # `media`): a plain correction leaves the attachments exactly as they were.
+    added_media: list[str] = []
+    if post.format == "article" and "media" in payload.model_fields_set:
+        added_media = _sync_article_media(db, post, previous_body, payload.media, principal.user_id)
     # An edit of original content becomes "edited" — provenance must stay honest.
     if post.provenance == "original":
         post.provenance = "edited"
@@ -2054,6 +2061,9 @@ def edit_post(post_id: str, payload: PostIn, principal: CurrentUser, db: OrmSess
     # the text it replaced.
     verdict = _reclassify_after_edit(db, post, _viewer_age(principal.user_id).is_minor)
     db.commit()
+    if added_media:
+        # Like at creation: attached media stops being publicly fetchable.
+        _restrict_attached_media(added_media)
     if verdict.block_publication:
         # The same deliberately vague refusal as create_post.
         raise HTTPException(
@@ -2061,6 +2071,72 @@ def edit_post(post_id: str, payload: PostIn, principal: CurrentUser, db: OrmSess
             detail="This post cannot be published. If you believe this is a mistake, contact support.",
         )
     return _post_out(post, db)
+
+
+ARTICLE_MEDIA_RE = re.compile(r'data-media-id="(mda_[A-Za-z0-9]{6,60})"')
+# A long article can carry a lot of pictures; a body naming hundreds of files
+# is not an article.
+MAX_ARTICLE_MEDIA = 30
+
+
+def _article_media_ids(body: str) -> list[str]:
+    return list(dict.fromkeys(ARTICLE_MEDIA_RE.findall(body or "")))
+
+
+def _sync_article_media(
+    db: OrmSession, post: models.Post, previous_body: str, items: list[dict], author_id: str
+) -> list[str]:
+    """Make an article's attachments match the pictures and clips in its text.
+
+    - A file the text places and the post does not have yet is attached - and
+      checked exactly as at creation (the author's own finished post media),
+      so an edit cannot place somebody else's file.
+    - A file that was in the text and has been taken out of it is detached.
+    - A file attached to the post but never placed in the text (the grid under
+      the post) is left alone: this edit is about the text.
+
+    The caller reclassifies after this, which reads the attachments: a picture
+    added by an edit waits for a human like one posted at creation. Returns
+    the ids attached, so the caller can restrict them after the commit.
+    """
+    wanted = _article_media_ids(post.body)
+    if len(wanted) > MAX_ARTICLE_MEDIA:
+        raise HTTPException(status_code=400, detail=f"An article can carry at most {MAX_ARTICLE_MEDIA} pictures and clips")
+    rows = list(db.scalars(select(models.PostMedia).where(models.PostMedia.post_id == post.id)).all())
+    have = {r.media_id for r in rows}
+    was_inline = set(_article_media_ids(previous_body))
+
+    for row in rows:
+        if row.media_id in was_inline and row.media_id not in wanted:
+            db.delete(row)
+
+    new_ids = [m for m in wanted if m not in have]
+    if not new_ids:
+        db.flush()
+        return []
+    offered = {i.get("media_id"): i for i in items if isinstance(i, dict)}
+    missing = [m for m in new_ids if m not in offered]
+    if missing:
+        raise HTTPException(status_code=400, detail=NOT_YOUR_MEDIA)
+    checked = _verified_media([offered[m] for m in new_ids], author_id)
+    position = max((r.position for r in rows), default=-1) + 1
+    for item in checked:
+        db.add(
+            models.PostMedia(
+                post_id=post.id,
+                media_id=item["media_id"],
+                url=item["url"],
+                kind=item["kind"],
+                alt_text=item.get("alt_text"),
+                position=position,
+                width=item.get("width"),
+                height=item.get("height"),
+                duration_seconds=item.get("duration_seconds"),
+            )
+        )
+        position += 1
+    db.flush()
+    return [item["media_id"] for item in checked]
 
 
 def _media_to_discard(db: OrmSession, post: models.Post, removed_by: str, previous_status: str) -> list[str]:

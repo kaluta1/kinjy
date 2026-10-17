@@ -1089,10 +1089,9 @@ What came from where: replies, the composer's emoji/sticker panel, the redesign 
   `<iframe>` is never kept. Inline media are left out of the grid under the
   post, so nothing appears twice.
 - **Not done:** no caption or alt text on an inline picture yet; no way to
-  move a figure once placed other than cutting and re-inserting it; editing a
-  published article's media is not possible (post edit is text-only, as
-  before). Uploads dropped from the text before publishing stay as orphan
-  files in media-service.
+  move a figure once placed other than cutting and re-inserting it. Uploads
+  dropped from the text before publishing stay as orphan files in
+  media-service. (Editing an article's media: done 17/10, below.)
 - Deployed on kinjy.com 16/10 19:12 (messaging, social, web; backups
   `pre-mentions-articles-20261016-1910`). Checked from outside and in the
   running containers; not clicked through in production with a real account.
@@ -1105,3 +1104,21 @@ What came from where: replies, the composer's emoji/sticker panel, the redesign 
   which did not show it, and a signed-in member has no footer at all. It is
   now under the copyright on every public page, and at the foot of the
   "Spaces & help" card in the app's left rail. One source, `COMPANY`.
+
+## Editing a post: a dialog, and articles that could not be edited (17/10)
+
+- ~~An article could not be edited.~~ The card always drew the article, so
+  the in-place textarea never appeared; and its draft was the article
+  stripped to plain text, so saving would have wiped every heading, list and
+  picture. **Every post is now edited in a dialog** (`EditPostDialog`): an
+  article with its headline and the same rich editor it was written in -
+  pictures and clips shown, added, taken out - and any other post as text.
+- Server side, an article edit that sends `media` syncs its attachments with
+  its text: a newly placed file is checked like at creation (own, finished
+  post media; somebody else's is refused), a file taken out of the text is
+  detached, and the grid under the post is left alone. A plain correction
+  (no `media`) touches no attachment. A picture added by an edit puts the
+  post back to UNCLASSIFIED / pending human review (`edit:heuristic:
+  media_opaque`), verified. `e2e_article_edit.py` 14/14.
+- Still 24 hours to edit, as before. A detached picture's file is not
+  deleted from media-service.

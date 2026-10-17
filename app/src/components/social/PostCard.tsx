@@ -3,6 +3,7 @@ import { useTranslation } from 'react-i18next'
 import { Check, Columns2, Eye, EyeOff, Flag, HelpCircle, Languages, Link2, Lock, MapPin, MessageCircle, Pencil, Repeat2, Share2, SlidersHorizontal, Trash2 } from 'lucide-react'
 import { ApiError, kaluta, type Post, type WhyFactor } from '@/lib/api'
 import { useTopic } from '@/hooks/useRealtime'
+import EditPostDialog from './EditPostDialog'
 import { articleMediaIds, htmlToText, hydrateArticle, looksLikeHtml, readableText, sanitizeHtml } from '@/lib/richtext'
 import { useAuth } from '@/hooks/useAuth'
 import { isLink, LINK_RE, splitTrailing, TAG_OR_MENTION } from '@/lib/linkify'
@@ -310,13 +311,10 @@ export default function PostCard({
    * saver has not downloaded, still gets the plain dialog: a photo viewer with
    * no photo in it is a black screen with a sidebar.
    */
-  // The post being rewritten, as a draft. Null when not editing.
-  //
-  // The body is edited rather than the whole post: the pictures, the audience
-  // and the community it was posted to are not typos, and offering to change
-  // them here would turn a correction into a re-post.
-  const [draft, setDraft] = useState<string | null>(null)
-  const [savingEdit, setSavingEdit] = useState(false)
+  // Whether the edit dialog is open (EditPostDialog). The text is edited, and
+  // an article's own pictures with it; the audience, the community and the
+  // photos under a post are not typos, and changing them would be a re-post.
+  const [editing, setEditing] = useState(false)
   // The body as saved, once this card has edited it. The post arrives as a
   // prop from the feed, which does not refetch just because one card changed.
   const [editedBody, setEditedBody] = useState<string | null>(null)
@@ -332,23 +330,6 @@ export default function PostCard({
     isOwn &&
     !post.repost_of &&
     Date.now() - new Date(target.created_at).getTime() < 24 * 60 * 60 * 1000
-
-  const saveEdit = async () => {
-    if (draft === null || !draft.trim()) return
-    setSavingEdit(true)
-    try {
-      const updated = await kaluta.posts.edit(target.id, draft.trim())
-      // The server's copy, not the draft: it re-derives the topics and may
-      // have reclassified the post, so the card shows what was stored rather
-      // than what was typed.
-      setEditedBody(updated.body)
-      setDraft(null)
-    } catch (err) {
-      setNote(err instanceof ApiError ? err.message : 'Could not save the change')
-    } finally {
-      setSavingEdit(false)
-    }
-  }
 
   const openDetail = () => {
     if (media.length > 0 && media[0]?.url) {
@@ -664,41 +645,6 @@ export default function PostCard({
            interactive elements inside a button is invalid and unreadable to a
            screen reader. A plain click handler leaves them alone, and the
            header already offers a keyboard route to the same place. */
-        draft !== null ? (
-        /* Edited in place. The pictures, the audience and the community stay
-           as they are: those are not typos, and offering to change them here
-           would turn a correction into a re-post. */
-        <form
-          onSubmit={(event) => {
-            event.preventDefault()
-            void saveEdit()
-          }}
-          className="mt-3"
-        >
-          <textarea
-            autoFocus
-            value={draft}
-            onChange={(event) => setDraft(event.target.value)}
-            onKeyDown={(event) => event.key === 'Escape' && setDraft(null)}
-            rows={4}
-            aria-label="Edit your post"
-            className="w-full resize-y rounded-xl border border-white/15 bg-white/5 px-3 py-2 text-[0.95rem] leading-relaxed text-text-hi focus:border-gold/40 focus:outline-none"
-          />
-          <div className="mt-2 flex items-center gap-3 text-xs">
-            <button
-              type="submit"
-              disabled={savingEdit || !draft.trim()}
-              className="rounded-full bg-gradient-to-br from-gold-soft to-gold px-3.5 py-1.5 font-bold text-ink disabled:opacity-40"
-            >
-              {savingEdit ? 'Saving…' : 'Save'}
-            </button>
-            <button type="button" onClick={() => setDraft(null)} className="text-text-low hover:text-text-hi">
-              Cancel
-            </button>
-            <span className="text-text-low">Escape to cancel · editable for 24 hours</span>
-          </div>
-        </form>
-        ) : (
         <Expandable collapsedHeight={BODY_COLLAPSED} lines={BODY_LINES} className="mt-3" deps={[body]}>
           <p
             onClick={(event) => {
@@ -717,7 +663,6 @@ export default function PostCard({
             {withHashtags(readableText(body), source.mentions ?? {})}
           </p>
         </Expandable>
-        )
       )}
 
       {/* Only when the post has no media of its own: a post with a photo and a
@@ -856,13 +801,13 @@ export default function PostCard({
           </button>
         )}
 
-        {isOwn && editable && draft === null && (
+        {isOwn && editable && (
           /* Only while it can still be edited. A button that answers "too
              late" is worse than no button, and the server would refuse it
              anyway. */
           <button
             type="button"
-            onClick={() => setDraft(plainBody)}
+            onClick={() => setEditing(true)}
             className="inline-flex items-center gap-1.5 rounded-full px-3 py-1.5 text-xs font-semibold text-text-low hover:text-text-hi"
           >
             <Pencil size={13} aria-hidden="true" />
@@ -1048,6 +993,22 @@ export default function PostCard({
           postId={target.id}
           currentUserId={currentUserId}
           onCountChange={(delta) => setComments((n) => n + delta)}
+        />
+      )}
+
+      {editing && (
+        <EditPostDialog
+          post={target}
+          body={sourceBody}
+          media={media}
+          onSaved={(updated) => {
+            // The server's copy, not the draft: it re-derives the topics and
+            // may have reclassified the post.
+            setEditedBody(updated.body)
+            setMedia(updated.media)
+            setEditing(false)
+          }}
+          onClose={() => setEditing(false)}
         />
       )}
 
