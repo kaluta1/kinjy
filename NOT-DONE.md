@@ -1096,3 +1096,12 @@ What came from where: replies, the composer's emoji/sticker panel, the redesign 
 - Deployed on kinjy.com 16/10 19:12 (messaging, social, web; backups
   `pre-mentions-articles-20261016-1910`). Checked from outside and in the
   running containers; not clicked through in production with a real account.
+
+## The registered office on every page (17/10)
+
+- ~~The address was on the old footer only.~~ `lib/company.ts` has carried
+  "77 High Street, #10-12B High Street Plaza, Singapore 179433" since 06/10,
+  but the home page and the redesigned public pages use `LandingFooter`,
+  which did not show it, and a signed-in member has no footer at all. It is
+  now under the copyright on every public page, and at the foot of the
+  "Spaces & help" card in the app's left rail. One source, `COMPANY`.

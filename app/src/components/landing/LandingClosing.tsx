@@ -4,6 +4,7 @@ import { ASSISTANT_SKILLS, FOOTER_COLUMNS, PLANS, TESTIMONIALS, TRUST } from './
 import { Brand, StoreBadges } from './shared'
 import { useJoinTarget } from './useJoinTarget'
 import { useAuth } from '@/hooks/useAuth'
+import { COMPANY } from '@/lib/company'
 
 const NIGHT_FIELD = 'radial-gradient(120% 120% at 20% 0%, #242142 0%, #0B0E1D 65%)'
 
@@ -231,7 +232,12 @@ export function LandingFooter() {
       ))}
     </div>
     <div className="mt-12 flex flex-wrap items-center justify-between gap-4 border-t border-[var(--kl-paper-2)] pt-6">
-      <span>© {new Date().getFullYear()} Kinjy</span>
+      <div>
+        <span className="block">© {new Date().getFullYear()} {COMPANY.name}</span>
+        {/* Who is behind the platform and where to write to them, on every
+            public page - the older footer had it, this one did not. */}
+        <address className="mt-0.5 block text-xs not-italic">Registered office: {COMPANY.address}</address>
+      </div>
       <Link to="/join?mode=signup" className="font-semibold text-[var(--kl-gold-deep)] hover:underline">
         {tr('nav.join')} →
       </Link>

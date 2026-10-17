@@ -16,6 +16,7 @@ import { useMyProfile } from '@/hooks/useMyProfile'
 import { useUnreadMessages } from '@/hooks/useUnreadMessages'
 import UnreadBadge from './UnreadBadge'
 import { countryName } from '@/lib/profileOptions'
+import { COMPANY } from '@/lib/company'
 import { cn } from '@/lib/utils'
 
 /**
@@ -202,6 +203,13 @@ export default function ProfileCard() {
             </li>
           ))}
         </ul>
+        {/* Signed in, there is no site footer - so the registered office it
+            carries is said here, under the pages it would sit beside. */}
+        <address className={cn('mt-3 border-t border-[var(--cloud-border)] px-3 pt-2.5 text-[0.65rem] not-italic leading-snug', tok.low)}>
+          {COMPANY.name} · Registered office
+          <br />
+          {COMPANY.address}
+        </address>
       </div>
 
       {/* Circles quick-switch */}
