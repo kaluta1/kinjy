@@ -1174,3 +1174,14 @@ What came from where: replies, the composer's emoji/sticker panel, the redesign 
   wider, and an article keeps its formatting there.
 - **Pre-existing, not fixed:** `e2e_media_preview.py` fails "a small picture
   is served as it is" (gets WebP) - the same with the code before this change.
+- Deployed on kinjy.com 17/10 13:02 with the three commits before it (address,
+  edit dialog, links/mentions/group dialog): media (now with ffmpeg), social,
+  gateway, messaging, web; backups `pre-share-video-20261017-1300`. Video
+  cover backfill run: 20/20 built. `docker-compose.prod.yml` gives
+  social-service its own `OG_INDEX_URL=http://web/index.html` (the base file
+  points it at Vite for dev).
+- **In production every public post with a picture or video is still waiting
+  for a human review (46 unclassified, 6 rated adult), so none of them can be
+  previewed with its picture yet** - they share with the generic card. Text
+  posts show their own title and description. Clearing the review queue in
+  the Trust & Safety console is what turns their previews on.
