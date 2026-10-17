@@ -1187,6 +1187,21 @@ def group_share_link(conversation_id: str, principal: CurrentUser, db: OrmSessio
     return {"path": f"/messages/join/{conversation.invite_code}", "code": conversation.invite_code}
 
 
+@app.get("/internal/groups/by-code/{code}", tags=["internal"])
+def group_by_code(code: str, db: OrmSession = Depends(get_db)):
+    """A group's face for a link preview: what the join page itself shows,
+    never its members or messages. Internal - not routed by the gateway."""
+    conversation = _by_code(db, code)
+    return {
+        "title": conversation.title,
+        "description": conversation.description,
+        "avatar_url": conversation.avatar_url,
+        "cover_url": conversation.cover_url,
+        "privacy": conversation.privacy or "private",
+        "members_count": len(_participant_ids(db, conversation.id)),
+    }
+
+
 @app.get("/conversations/join/{code}", tags=["groups"])
 def preview_by_link(code: str, principal: CurrentUser, db: OrmSession = Depends(get_db)):
     """What somebody holding the link sees before they decide: the group's face

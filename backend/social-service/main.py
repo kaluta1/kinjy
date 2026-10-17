@@ -1064,6 +1064,14 @@ def link_preview(url: str, principal: CurrentUser, db: OrmSession = Depends(get_
     that post, every time - this platform pointing a crowd at somebody else's
     server.
     """
+    # A link to Kinjy itself is answered from the inside, for this member:
+    # fetched from outside it was read as a signed-out stranger (so a post
+    # with a picture, or one for followers, came back as Kinjy's generic
+    # card) and then cached for a week.
+    own = _own_link_card(db, url, principal.user_id)
+    if own is not None:
+        return own
+
     key = hashlib.sha256(url.strip().encode("utf-8")).hexdigest()
     cached = db.get(models.LinkPreview, key)
     now = datetime.now(timezone.utc)
@@ -1109,54 +1117,12 @@ def link_preview(url: str, principal: CurrentUser, db: OrmSession = Depends(get_
 def post_share_card(post_id: str, request: Request, db: OrmSession = Depends(get_db)):
     """The page a link unfurler sees for a shared post.
 
-    The app is a single-page build: one index.html with one set of meta tags,
-    written before any post existed. A crawler does not run JavaScript, so
-    every shared post previewed as the same generic Kinjy card no matter what
-    was in it.
-
-    This renders the tags for one post. Caddy sends crawler requests for /p/<id>
-    here and everyone else to the app, so a person still gets the real page.
-
-    Only a public post gets a card, and only one that a signed-out visitor could
-    read anyway. A crawler has no account and no age, so it is treated exactly
-    as the most restricted visitor: anything else would turn a preview into a
-    way of reading a post the link's recipient could not open - and would put
-    the first line of a followers-only post into a chat app's preview.
+    Caddy sends crawler requests for /p/<id> here (by User-Agent); nginx sends
+    everybody else's to /og/p/<id>. Both answer with the same thing - there
+    was a second, older implementation here, and the crawlers that matter
+    (WhatsApp, Facebook, X...) were the ones still reading it.
     """
-    post = db.get(models.Post, post_id)
-    fallback = f"{settings.FRONTEND_URL.rstrip('/')}/og-image.png"
-    site = settings.FRONTEND_URL.rstrip("/")
-
-    title, description, image = "Kinjy", DEFAULT_SHARE_DESCRIPTION, fallback
-    if (
-        post is not None
-        and post.status == "published"
-        and post.visibility == "public"
-        and agefilter.visible_to(db, _viewer_age(None), post.id)
-    ):
-        author = _resolve_authors({post.author_id}).get(post.author_id) or {}
-        who = author.get("display_name") or author.get("handle") or "Someone"
-        title = f"{who} on Kinjy"
-        body = htmlish_to_text(post.body).strip()
-        description = (body[:197] + "…") if len(body) > 200 else (body or DEFAULT_SHARE_DESCRIPTION)
-        # The post's own picture if it has one, Kinjy's otherwise - a card with
-        # no image is a grey rectangle in every chat app.
-        shot = db.scalar(
-            select(models.PostMedia)
-            .where(models.PostMedia.post_id == post.id, models.PostMedia.kind == "image")
-            .order_by(models.PostMedia.position)
-        )
-        if shot is not None and shot.url:
-            # Signed, like every other read of post media. A bare media URL is
-            # a 404: the bytes are served against a ticket, so an unsigned
-            # og:image is a blank rectangle in every chat app. `sign_url` binds
-            # an absent viewer as the literal "anon", which is exactly what a
-            # crawler is. Long-lived because an unfurler may come back to the
-            # link days later - it is a public post's picture either way.
-            image = mediasign.sign_url(shot.url, shot.media_id, None, ttl=60 * 60 * 24 * 14)
-
-    url = f"{site}/p/{post_id}"
-    return HTMLResponse(_share_html(title, description, image, url))
+    return og_page(post_id, request, db)
 
 
 DEFAULT_SHARE_DESCRIPTION = (
@@ -1988,6 +1954,80 @@ def get_post(post_id: str, principal: MaybeUser, db: OrmSession = Depends(get_db
     return _apply_prefs(_post_out(post, db, viewer=viewer), prefs)
 
 
+# --- links to Kinjy, previewed inside Kinjy ---------------------------------
+
+_OWN_POST_RE = re.compile(r"^/p/([A-Za-z0-9_]+)/?$")
+_OWN_JOIN_RE = re.compile(r"^/messages/join/([A-Za-z0-9_-]+)/?$")
+
+
+def _own_link_card(db: OrmSession, url: str, viewer: str) -> dict | None:
+    """The card for a link to a Kinjy post or group, as this member may see it.
+
+    None when the link is not one of ours (the ordinary fetch takes over). A
+    post the member may not read gets a card that says so and nothing more.
+    """
+    from urllib.parse import urlparse
+
+    try:
+        parsed = urlparse(url.strip())
+    except ValueError:
+        return None
+    ours = {urlparse(OG_SITE).hostname, "kinjy.com", "www.kinjy.com", "localhost"}
+    if parsed.hostname not in ours:
+        return None
+    site = OG_SITE
+    match = _OWN_POST_RE.match(parsed.path)
+    if match:
+        post_id = match.group(1)
+        base = {"url": url, "site_name": "Kinjy", "cached": False}
+        try:
+            post = _readable_post(db, post_id, viewer)
+        except HTTPException:
+            post = None
+        if post is None or not agefilter.visible_to(db, _viewer_age(viewer), post.id):
+            return {**base, "title": "A post on Kinjy", "description": "You cannot see this post.", "image": None}
+        authors = _resolve_authors({post.author_id})
+        author = authors.get(post.author_id) or {}
+        name = author.get("display_name") or "A member"
+        headline, text = _og_text(post)
+        media = _og_media(db, post)
+        image = author.get("avatar_url")
+        if media is not None:
+            signed = mediasign.sign_url(media.url, media.media_id, viewer)
+            image = f"{signed}&poster=1" if media.kind in ("video", "short") else f"{signed}&p=1"
+        if not text:
+            text = {"video": f"A video by {name}", "short": f"A video by {name}", "image": f"A photo by {name}"}.get(
+                media.kind if media else "", f"A post by {name}"
+            )
+        return {
+            **base,
+            "title": headline or f"{name} on Kinjy",
+            "description": text if len(text) <= 200 else text[:197].rstrip() + "...",
+            "image": image,
+        }
+    match = _OWN_JOIN_RE.match(parsed.path)
+    if match:
+        try:
+            response = httpx.get(f"{MESSAGING_URL}/internal/groups/by-code/{match.group(1)}", timeout=5)
+        except httpx.HTTPError:
+            return None
+        if response.status_code != 200:
+            return {"url": url, "site_name": "Kinjy", "cached": False, "title": "A group on Kinjy",
+                    "description": "This invitation link does not lead anywhere any more.", "image": None}
+        group = response.json()
+        count = group.get("members_count") or 0
+        return {
+            "url": url,
+            "site_name": "Kinjy",
+            "cached": False,
+            "title": group.get("title") or "A group on Kinjy",
+            "description": group.get("description")
+            or f"{'Public' if group.get('privacy') == 'public' else 'Private'} group · {count} member{'s' if count != 1 else ''}",
+            "image": group.get("avatar_url") or group.get("cover_url"),
+        }
+    return None
+
+
 # --- link previews -------------------------------------------------------
 #
 # A shared post's address is read by crawlers that do not run the app, so its
@@ -2042,6 +2082,30 @@ def _og_post(db: OrmSession, post_id: str) -> models.Post | None:
     return post
 
 
+def _og_words_only(db: OrmSession, post_id: str) -> models.Post | None:
+    """A public post held back only for its pictures, whose words are fine for anyone.
+
+    Most posts with a picture are in the review queue - the classifier cannot
+    see into a file, so it waits for a human - and until then the post is
+    restricted, and its preview was the generic card. Its text, though, can be
+    judged now: if the text alone rates for everyone, the preview shows the
+    post's title, its words and its author's picture; the post's own picture
+    joins once a human has looked at it.
+    """
+    try:
+        post = _readable_post(db, post_id, None)
+    except HTTPException:
+        return None
+    verdict = classifier.classify(
+        body=_og_text(post)[1] + " " + (_og_text(post)[0] or ""),
+        media_kinds=[],
+        author_is_minor=_viewer_age(post.author_id).is_minor,
+    )
+    if verdict.block_publication or verdict.age_rating != "GENERAL":
+        return None
+    return post
+
+
 def _og_text(post: models.Post) -> tuple[str | None, str]:
     """(headline, plain text) of a post, for a preview."""
     body = post.body or ""
@@ -2070,8 +2134,24 @@ def og_page(post_id: str, request: Request, db: OrmSession = Depends(get_db)):
     site = OG_SITE
     url = f"{site}/p/{post_id}"
     post = _og_post(db, post_id)
+    words_only = None if post is not None else _og_words_only(db, post_id)
     image = f"{site}/og-image.png"
-    if post is None:
+    if post is None and words_only is not None:
+        # Words and author now; the post's own picture after its review.
+        authors = _resolve_authors({words_only.author_id})
+        name = (authors.get(words_only.author_id) or {}).get("display_name") or "A member"
+        headline, text = _og_text(words_only)
+        title = headline or f"{name} on Kinjy"
+        if not text:
+            held = _og_media(db, words_only)
+            text = {"video": f"A video by {name}", "short": f"A video by {name}", "image": f"A photo by {name}"}.get(
+                held.kind if held else "", f"A post by {name}"
+            )
+        description = text if len(text) <= 200 else text[:197].rstrip() + "..."
+        avatar = (authors.get(words_only.author_id) or {}).get("avatar_url")
+        if avatar and avatar.startswith("http"):
+            image = avatar
+    elif post is None:
         title = "A post on Kinjy"
         description = "Sign in to Kinjy to see this post."
     else:

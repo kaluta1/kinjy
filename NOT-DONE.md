@@ -1216,3 +1216,27 @@ What came from where: replies, the composer's emoji/sticker panel, the redesign 
   card instead of its first picture. By design for now: an article with a
   picture is previewed with it only after a human review, and that article is
   still in the queue.
+
+## Shared links still showed Kinjy's default card (17/10)
+
+Three causes, all fixed:
+- **Crawlers never reached the new preview.** Caddy sends WhatsApp, Facebook,
+  X, LinkedIn... (by User-Agent) to `/api/share/p/<id>`, an older second
+  implementation that only previewed reviewed posts; nginx's `/og/p/<id>`
+  only ever served browsers. The old route now returns the new one's page.
+- **A link inside Kinjy (chat, posts) was fetched as a stranger and cached
+  for a week.** Every Kinjy link became the generic card - a post with a
+  picture is restricted until review, and a followers' post is invisible to
+  a stranger - and stayed so for 7 days. Links to a Kinjy post or group
+  invitation are now answered from the inside, for the member looking: the
+  post's words and picture (signed for them) if they may see it, "You cannot
+  see this post." otherwise (a minor, a non-follower); a group link shows the
+  group's name, description and photo. Never cached across members.
+- **Outside, a post waiting for review showed nothing of itself.** If its
+  text alone rates for everyone, the preview now shows its title, its words
+  and its author's picture; the post's own picture joins after the human
+  review (still the rule: an unreviewed picture is not shown to whoever a
+  link reaches, children included).
+- Previews already cached by WhatsApp or Facebook for links shared before
+  this stay as they were; Facebook's Sharing Debugger re-reads a link.
+- `e2e_own_link_preview.py` 18/18, `e2e_share_preview.py` 22/22.
