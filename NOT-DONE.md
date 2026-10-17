@@ -1205,3 +1205,14 @@ What came from where: replies, the composer's emoji/sticker panel, the redesign 
 - The edit answer was signed for an anonymous visitor rather than the author;
   it is signed for the author now.
 - Deployed on kinjy.com 17/10 17:28 (social, web; backups `pre-edit-media-20261017-1727`).
+
+## Mentions show the name only (17/10)
+
+- A mention now reads as the person's name everywhere (posts, comments,
+  chat), linked to their profile; the @username is the link's tooltip and is
+  still shown in the picker while typing. An unresolved handle stays as
+  typed. (Asked for on 17/10, replacing "Name @username".)
+- Reported in the same screenshot: a shared article's preview showed Kinjy's
+  card instead of its first picture. By design for now: an article with a
+  picture is previewed with it only after a human review, and that article is
+  still in the queue.

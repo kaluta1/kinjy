@@ -2,14 +2,14 @@ import { Link } from 'react-router'
 import { cn } from '@/lib/utils'
 
 /**
- * A person named in a post, a comment or a message: their name and their
- * username, linked to their profile.
+ * A person named in a post, a comment or a message: their name, linked to
+ * their profile.
  *
- * The name alone hid who it was - two members can share a name, and the
- * username is what tells them apart and what the author typed. The username
- * alone named nobody a reader recognises. So both: the name first, the
- * @username beside it, quieter. A handle the server could not resolve stays
- * exactly as typed.
+ * The name only, everywhere - "Alex Tugume", not "Alex Tugume @alextugume745",
+ * which read as noise in a sentence. The username is still one hover away
+ * (the link's title) and is what the picker shows while typing, where telling
+ * two people with the same name apart actually matters. A handle the server
+ * could not resolve to a name stays exactly as typed.
  */
 export default function MentionLink({
   handle,
@@ -27,16 +27,11 @@ export default function MentionLink({
   return (
     <Link
       to={`/u/${handle}`}
+      title={`@${handle}`}
       onClick={stopPropagation ? (event) => event.stopPropagation() : undefined}
       className={cn('font-semibold hover:underline', className)}
     >
-      {name ? (
-        <>
-          {name} <span className="font-normal opacity-70">@{handle}</span>
-        </>
-      ) : (
-        `@${handle}`
-      )}
+      {name || `@${handle}`}
     </Link>
   )
 }
