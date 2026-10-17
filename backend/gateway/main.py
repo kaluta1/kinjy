@@ -45,6 +45,8 @@ ROUTES: dict[str, str] = {
     "/api/comments": "http://social-service:8000",
     "/api/moderation": "http://social-service:8000",
     "/api/feed": "http://social-service:8000",
+    # Link previews for shared posts (the page crawlers read, and its picture).
+    "/api/og": "http://social-service:8000",
     # A member's own numbers (social-service /stats/me).
     "/api/stats": "http://social-service:8000",
     "/api/shorts": "http://social-service:8000",

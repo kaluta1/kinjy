@@ -24,6 +24,13 @@ COPY common /app/common
 
 ARG SERVICE
 ENV SERVICE=${SERVICE}
+
+# media-service alone needs ffmpeg, to take a cover picture from each video.
+# After the shared layers, so the other services' images are not touched.
+RUN if [ "$SERVICE" = "media-service" ]; then \
+        apt-get update && apt-get install -y --no-install-recommends ffmpeg \
+        && rm -rf /var/lib/apt/lists/*; \
+    fi
 COPY ${SERVICE} /app
 
 EXPOSE 8000

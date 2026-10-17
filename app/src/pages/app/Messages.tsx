@@ -30,6 +30,7 @@ import { useAppTheme } from '@/components/appdemo/theme'
 import AttachmentMenu from '@/components/social/AttachmentMenu'
 import MediaLightbox from '@/components/social/MediaLightbox'
 import VoiceNotePlayer from '@/components/social/VoiceNotePlayer'
+import VideoPlayer from '@/components/social/VideoPlayer'
 import {
   MessageMenu,
   MessageMenuButton,
@@ -313,7 +314,16 @@ function Attachment({
     )
   }
   if (url && kind === 'video') {
-    return <video src={url} controls preload="metadata" className="max-h-80 max-w-full rounded-card-sm" />
+    // Kinjy's own player, not the browser's: the same in every browser, with
+    // a visible spinner while the clip loads. No autoplay in a conversation.
+    return (
+      <VideoPlayer
+        src={url}
+        poster={message.media_withheld ? null : `${url}${url.includes('?') ? '&' : '?'}poster=1`}
+        autoplay={false}
+        className="max-h-80 w-72 max-w-full rounded-card-sm"
+      />
+    )
   }
   if (url && kind === 'audio') {
     return (

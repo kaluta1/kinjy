@@ -108,6 +108,10 @@ services:
     build: {context: ./backend, dockerfile: Dockerfile, args: {SERVICE: social-service}}
     ports: ["8203:8000"]
     volumes: ["./backend/social-service:/app", "./backend/common:/app/common"]
+    # Link previews read the app's index.html; in dev it is the Vite server.
+    environment:
+      <<: *service-env
+      OG_INDEX_URL: http://web:5173/
 
   community-service:
     <<: *service-base

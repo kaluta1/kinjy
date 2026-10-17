@@ -90,6 +90,9 @@ class Asset(Base):
     # the format it arrived in, so the type has to be recorded rather than
     # assumed.
     preview_type: Mapped[str | None] = mapped_column(String(100))
+    # A video's cover picture (poster.py), on the media volume. Null for
+    # anything else, and for a video ffmpeg could not read.
+    poster_path: Mapped[str | None] = mapped_column(String(500))
 
     # A chat attachment: served only on a link signed by the service that knows
     # who may see it, never on its bare URL.

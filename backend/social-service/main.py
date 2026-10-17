@@ -7,6 +7,7 @@ import json
 import logging
 import re
 import threading
+import os
 import time
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -14,7 +15,7 @@ from datetime import datetime, timedelta, timezone
 
 import httpx
 from fastapi import BackgroundTasks, Depends, HTTPException, Query, Request
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from pydantic import BaseModel, Field
 from sqlalchemy import and_, delete, func, or_, select
 from sqlalchemy.orm import Session as OrmSession
@@ -653,6 +654,13 @@ def _post_out(
         "media": [
             {
                 "url": signed_media[m.media_id],
+                # A video's cover, behind the same ticket (media-service
+                # answers 404 when it has none and the player draws its own).
+                "poster_url": (
+                    f"{signed_media[m.media_id]}&poster=1"
+                    if m.kind in ("video", "short") and signed_media[m.media_id]
+                    else None
+                ),
                 # Lets an article place this file in its text by id.
                 "media_id": m.media_id,
                 "kind": m.kind,
@@ -1980,6 +1988,174 @@ def get_post(post_id: str, principal: MaybeUser, db: OrmSession = Depends(get_db
     return _apply_prefs(_post_out(post, db, viewer=viewer), prefs)
 
 
+# --- link previews -------------------------------------------------------
+#
+# A shared post's address is read by crawlers that do not run the app, so its
+# title, description and picture have to be in the HTML. Only what a signed-out
+# visitor may see is put there - a preview is shown to whoever the link reaches,
+# a child included - so everything is judged as for an anonymous viewer, by the
+# same two checks the post's own page uses. Anything else gets the generic
+# card, without the author's name or a word of the text.
+
+OG_INDEX_URL = os.environ.get("OG_INDEX_URL", "http://web/index.html")
+# The site's public address, for the absolute links a preview needs. Taken
+# from where media is served (".../media"), because the gateway rewrites Host.
+OG_SITE = os.environ.get("OG_SITE_URL") or (
+    settings.MEDIA_PUBLIC_BASE.rsplit("/media", 1)[0]
+    if settings.MEDIA_PUBLIC_BASE.startswith("http")
+    else "https://kinjy.com"
+)
+_og_index_cache: tuple[float, str] | None = None
+_OG_STRIP = re.compile(
+    r'\s*<(?:meta\s+(?:property|name)="(?:og:[^"]*|twitter:[^"]*|description)"[^>]*|link\s+rel="canonical"[^>]*)>'
+    r"|\s*<title>.*?</title>",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def _og_index() -> str | None:
+    """The app's index.html, kept a minute: it names this release's bundle."""
+    global _og_index_cache
+    now = time.time()
+    if _og_index_cache and now - _og_index_cache[0] < 60:
+        return _og_index_cache[1]
+    try:
+        # Host: localhost, which nginx (server_name _) ignores and the Vite
+        # dev server requires - it refuses an unknown host name.
+        response = httpx.get(OG_INDEX_URL, timeout=5, headers={"Host": "localhost"})
+        response.raise_for_status()
+    except Exception as exc:
+        log.warning("link preview could not read index.html: %s", exc)
+        return _og_index_cache[1] if _og_index_cache else None
+    _og_index_cache = (now, response.text)
+    return response.text
+
+
+def _og_post(db: OrmSession, post_id: str) -> models.Post | None:
+    """The post if a signed-out visitor may see it, else None."""
+    try:
+        post = _readable_post(db, post_id, None)
+    except HTTPException:
+        return None
+    if not agefilter.visible_to(db, _viewer_age(None), post.id):
+        return None
+    return post
+
+
+def _og_text(post: models.Post) -> tuple[str | None, str]:
+    """(headline, plain text) of a post, for a preview."""
+    body = post.body or ""
+    headline = None
+    if post.format == "article":
+        match = re.match(r"\s*<h2>(.*?)</h2>", body, re.IGNORECASE | re.DOTALL)
+        if match:
+            headline = html_module.unescape(re.sub(r"<[^>]+>", "", match.group(1))).strip() or None
+            body = body[match.end():]
+    text = html_module.unescape(re.sub(r"<[^>]+>", " ", body))
+    return headline, re.sub(r"\s+", " ", text).strip()
+
+
+def _og_media(db: OrmSession, post: models.Post) -> models.PostMedia | None:
+    return db.scalar(
+        select(models.PostMedia)
+        .where(models.PostMedia.post_id == post.id, models.PostMedia.kind.in_(("image", "video", "short")))
+        .order_by(models.PostMedia.position)
+    )
+
+
+@app.get("/og/p/{post_id}", tags=["share"], include_in_schema=False)
+def og_page(post_id: str, request: Request, db: OrmSession = Depends(get_db)):
+    """The app's page, with this post's own title, description and picture."""
+    index = _og_index()
+    site = OG_SITE
+    url = f"{site}/p/{post_id}"
+    post = _og_post(db, post_id)
+    image = f"{site}/og-image.png"
+    if post is None:
+        title = "A post on Kinjy"
+        description = "Sign in to Kinjy to see this post."
+    else:
+        authors = _resolve_authors({post.author_id})
+        name = (authors.get(post.author_id) or {}).get("display_name") or "A member"
+        headline, text = _og_text(post)
+        media = _og_media(db, post)
+        title = headline or f"{name} on Kinjy"
+        if not text:
+            text = {
+                "video": f"A video by {name}", "short": f"A video by {name}", "image": f"A photo by {name}",
+            }.get(media.kind if media else "", f"A post by {name}")
+        description = text if len(text) <= 200 else text[:197].rstrip() + "..."
+        if media is not None:
+            image = f"{site}/api/og/image/{post.id}"
+        else:
+            avatar = (authors.get(post.author_id) or {}).get("avatar_url")
+            if avatar and avatar.startswith("http"):
+                image = avatar
+    esc = html_module.escape
+    head = "\n".join([
+        f"<title>{esc(title)} | Kinjy</title>",
+        f'<meta name="description" content="{esc(description)}" />',
+        f'<link rel="canonical" href="{esc(url)}" />',
+        '<meta property="og:type" content="article" />',
+        '<meta property="og:site_name" content="Kinjy" />',
+        f'<meta property="og:title" content="{esc(title)}" />',
+        f'<meta property="og:description" content="{esc(description)}" />',
+        f'<meta property="og:url" content="{esc(url)}" />',
+        f'<meta property="og:image" content="{esc(image)}" />',
+        f'<meta property="og:image:alt" content="{esc(title)}" />',
+        '<meta name="twitter:card" content="summary_large_image" />',
+        f'<meta name="twitter:title" content="{esc(title)}" />',
+        f'<meta name="twitter:description" content="{esc(description)}" />',
+        f'<meta name="twitter:image" content="{esc(image)}" />',
+    ])
+    if index is None:
+        # The app could not be read: still answer the crawler, and send a
+        # person to the app.
+        page = f'<!doctype html><html><head><meta charset="utf-8" />{head}</head><body><a href="{esc(url)}">{esc(title)}</a></body></html>'
+    else:
+        page = _OG_STRIP.sub("", index).replace("</head>", f"{head}\n</head>", 1)
+    return Response(content=page, media_type="text/html; charset=utf-8", headers={"Cache-Control": "no-cache"})
+
+
+@app.get("/og/image/{post_id}", tags=["share"], include_in_schema=False)
+def og_image(post_id: str, request: Request, db: OrmSession = Depends(get_db)):
+    """The preview picture: the post's first picture, or its video's cover.
+
+    A stable address (a crawler fetches it long after the page), re-checked on
+    every request, and converted to a JPEG no wider than 1200 px - the format
+    every preview reader takes. Anything not for a signed-out visitor, or not
+    available, sends the generic Kinjy card instead.
+    """
+    site = OG_SITE
+    fallback = RedirectResponse(f"{site}/og-image.png", status_code=302)
+    post = _og_post(db, post_id)
+    media = _og_media(db, post) if post else None
+    if media is None:
+        return fallback
+    which = "poster=1" if media.kind in ("video", "short") else "p=1"
+    source = f"{MEDIA_URL}/media/{media.media_id}?{mediasign.query_string(media.media_id, None)}&{which}"
+    try:
+        response = httpx.get(source, timeout=15)
+        response.raise_for_status()
+        from io import BytesIO
+
+        from PIL import Image
+
+        with Image.open(BytesIO(response.content)) as picture:
+            picture = picture.convert("RGB")
+            picture.thumbnail((1200, 1200))
+            out = BytesIO()
+            picture.save(out, "JPEG", quality=85, optimize=True)
+    except Exception as exc:
+        log.info("no preview picture for %s: %s", post_id, exc)
+        return fallback
+    return Response(
+        content=out.getvalue(),
+        media_type="image/jpeg",
+        headers={"Cache-Control": "public, max-age=3600"},
+    )
+
+
 @app.get("/posts/{post_id}/media", tags=["posts"])
 def get_post_media(post_id: str, principal: MaybeUser, db: OrmSession = Depends(get_db)):
     """The full media list, ignoring data saver.
@@ -2011,6 +2187,11 @@ def get_post_media(post_id: str, principal: MaybeUser, db: OrmSession = Depends(
         "media": [
             {
                 "url": mediasign.sign_url(m.url, m.media_id, viewer_id),
+                "poster_url": (
+                    mediasign.sign_url(m.url, m.media_id, viewer_id) + "&poster=1"
+                    if m.kind in ("video", "short")
+                    else None
+                ),
                 # Lets an article place this file in its text by id.
                 "media_id": m.media_id,
                 "kind": m.kind,

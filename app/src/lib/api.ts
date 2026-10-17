@@ -394,6 +394,8 @@ export interface PostMedia {
   url: string | null
   /** Where an article places this file in its text. */
   media_id?: string
+  /** A video's cover, signed like the video. 404 when there is none. */
+  poster_url?: string | null
   kind: string
   alt_text: string | null
   deferred?: boolean

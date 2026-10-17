@@ -289,6 +289,7 @@ function Tile({
           // it plays and again on every seek, and each of those pieces was a
           // round trip to object storage.
           src={preview(item.url) ?? item.url}
+          poster={item.poster_url}
           autoplay={autoplay}
           onExpand={() => onOpen(index)}
           className="h-full w-full"

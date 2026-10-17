@@ -1142,3 +1142,35 @@ What came from where: replies, the composer's emoji/sticker panel, the redesign 
   edge, name, public/private and member count, description, then cards for
   sharing and privacy and for members. The large photo/cover pickers only
   appear in edit mode. Checked in dark and light themes.
+
+## Share previews, video covers, the player, long posts in previews (17/10)
+
+- ~~A shared post showed Kinjy's generic card.~~ Crawlers do not run the app,
+  so they only ever read index.html. nginx now answers `/p/<id>` from
+  social-service (`/og/p/<id>`): the same page, its head carrying the post's
+  title (article headline, or "<name> on Kinjy"), description (its text, tags
+  dropped, 200 chars; "A photo/video by <name>" when there is none) and
+  picture (`/api/og/image/<id>`: the first picture or the video's cover, as a
+  JPEG <= 1200 px; else the author's avatar; else og-image.png). **Only what a
+  signed-out visitor may see**, judged by the same two checks as the post's
+  page: a followers-only post, a missing one, or one still waiting for review
+  gets the generic card with no author and no text. A post with a picture is
+  therefore previewed with it only after a human has reviewed it.
+  `e2e_share_preview.py` 19/19.
+- ~~Videos had no cover.~~ media-service now has ffmpeg (its image only) and
+  takes a JPEG a second into every video at upload, never for a sealed chat
+  attachment. Served behind the video's own ticket (`?poster=1`); posts carry
+  `poster_url`. `/internal/media/backfill-posters` covers older videos.
+- ~~The player gave no sign of loading, and articles and chat used the
+  browser's controls.~~ `VideoPlayer` rewritten: the cover (or a gradient)
+  until the first frame, a spinner from the press of play and on every stall,
+  a seek track showing what has loaded (drag to seek), speed, sound, real
+  fullscreen, keyboard (space/K, arrows, M, F), a retry on error. Used in the
+  feed, the viewer, inside articles (mounted into the article's video slots)
+  and in chat.
+- ~~Long posts read badly in previews.~~ The post dialog shows the text whole
+  (no second "see more") with a sticky close button; beside a picture the
+  text folds after nine lines so the comments stay in reach, the column is
+  wider, and an article keeps its formatting there.
+- **Pre-existing, not fixed:** `e2e_media_preview.py` fails "a small picture
+  is served as it is" (gets WebP) - the same with the code before this change.

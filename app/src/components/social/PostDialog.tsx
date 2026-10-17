@@ -56,16 +56,20 @@ export default function PostDialog({
         onClick={(event) => event.stopPropagation()}
         className="relative w-full max-w-2xl rounded-card-lg bg-ink-2 shadow-cloud"
       >
-        <button
-          type="button"
-          onClick={onClose}
-          aria-label="Close"
-          className="absolute end-3 top-3 z-10 rounded-full bg-ink/70 p-1.5 text-text-mid hover:text-text-hi"
-        >
-          <X size={16} aria-hidden="true" />
-        </button>
+        {/* Sticky: a long post scrolls, and the way out must not scroll with
+            it to the top of a page the reader has left behind. */}
+        <div className="sticky top-0 z-10 flex justify-end rounded-t-card-lg bg-ink-2/85 px-3 pt-3 backdrop-blur">
+          <button
+            type="button"
+            onClick={onClose}
+            aria-label="Close"
+            className="rounded-full bg-ink/70 p-1.5 text-text-mid hover:text-text-hi"
+          >
+            <X size={16} aria-hidden="true" />
+          </button>
+        </div>
 
-        <div className="p-4 sm:p-5">
+        <div className="px-4 pb-4 sm:px-6 sm:pb-6">
           <PostCard
             post={post}
             algorithmId="chronological"

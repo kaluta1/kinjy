@@ -30,6 +30,7 @@ from common.service import create_app
 import models
 import profileimages
 import imagesize
+import poster as videocover
 import preview
 import signatures
 import uploadcenter
@@ -85,6 +86,8 @@ INLINE_KINDS = {"image", "video", "audio", "document"}
 # is already there (avatars and marketing art); post media is marked restricted
 # as it is attached.
 MIGRATIONS = [
+    # A video's cover picture.
+    f"ALTER TABLE {models.SCHEMA}.assets ADD COLUMN IF NOT EXISTS poster_path VARCHAR(500)",
     f"ALTER TABLE {models.SCHEMA}.assets "
     "ADD COLUMN IF NOT EXISTS access VARCHAR(20) DEFAULT 'public'",
     f"ALTER TABLE {models.SCHEMA}.assets ADD COLUMN IF NOT EXISTS provider VARCHAR(20) DEFAULT 'local'",
@@ -246,6 +249,16 @@ async def upload(
             path, size_on_disk, kind_on_disk = made
             preview_path, preview_bytes, preview_type = str(path), size_on_disk, kind_on_disk
 
+    # A video's cover, from the same staging file and for the same reason: it
+    # may be on its way to UploadCenter. Never for a sealed or private file -
+    # a still from an encrypted attachment would be a plaintext copy of it.
+    poster_path: str | None = None
+    if kind == "video" and not seal and not private:
+        covers = ROOT / "previews" / principal.user_id[:12]
+        covers.mkdir(parents=True, exist_ok=True)
+        made_poster = await run_in_threadpool(videocover.make, destination, covers / asset_id)
+        poster_path = str(made_poster) if made_poster else None
+
     # Post media can live at UploadCenter instead of on the volume. It goes there
     # as a *private* file and is read back only through media-service, after the
     # viewer's ticket has been checked (see _serve_remote): no address that would
@@ -292,6 +305,7 @@ async def upload(
         preview_path=preview_path,
         preview_bytes=preview_bytes,
         preview_type=preview_type,
+        poster_path=poster_path,
         private=private,
         sealed_with=crypto.keyring().active_id if seal else None,
         # Restricted from the first byte, not only once attached: the file has
@@ -554,6 +568,7 @@ def serve(
     exp: str | None = None,
     sig: str | None = None,
     p: str | None = None,
+    poster: str | None = None,
     db: OrmSession = Depends(get_db),
 ):
     """Serve the bytes.
@@ -628,6 +643,19 @@ def serve(
     # and anything that wants the real thing ask for the original. The ticket
     # is the same either way - it is signed over the asset, and this is the
     # same picture, smaller.
+    # A video's cover, behind the same ticket as the video: it is a frame of
+    # it, so whoever may not see the video may not see this either. No cover
+    # is a 404, and the player draws its own.
+    if poster:
+        if asset.poster_path and os.path.exists(asset.poster_path):
+            return FileResponse(
+                asset.poster_path,
+                media_type=videocover.CONTENT_TYPE,
+                headers={**_serve_headers(videocover.CONTENT_TYPE), **headers},
+                content_disposition_type="inline",
+            )
+        raise HTTPException(status_code=404, detail="No cover for this asset")
+
     if p and asset.preview_path and os.path.exists(asset.preview_path):
         local_type = asset.preview_type or preview.PREVIEW_CONTENT_TYPE
         return FileResponse(
@@ -854,6 +882,52 @@ def sign_assets(payload: dict):
             for asset_id in asset_ids
         }
     }
+
+
+@app.post("/internal/media/backfill-posters", tags=["internal"])
+def backfill_posters(limit: int = 50, dry_run: bool = True, db: OrmSession = Depends(get_db)):
+    """A cover for every video uploaded before there was one.
+
+    Read from the local copy when there is one (every remote video has one, see
+    preview.wanted), else from the file on the volume. dry_run by default;
+    /internal is not routed through the gateway.
+    """
+    if not videocover.available():
+        return {"error": "ffmpeg is not installed in this container"}
+    videos = db.scalars(
+        select(models.Asset)
+        .where(
+            models.Asset.kind == "video",
+            models.Asset.poster_path.is_(None),
+            models.Asset.private.is_(False),
+            models.Asset.sealed_with.is_(None),
+            models.Asset.status == "ready",
+        )
+        .limit(max(1, min(limit, 200)))
+    ).all()
+    built, failed = [], []
+    for asset in videos:
+        source = next(
+            (Path(p) for p in (asset.preview_path, asset.storage_path) if p and os.path.exists(p)),
+            None,
+        )
+        if source is None:
+            failed.append(asset.id)
+            continue
+        if dry_run:
+            built.append(asset.id)
+            continue
+        covers = ROOT / "previews" / asset.owner_id[:12]
+        covers.mkdir(parents=True, exist_ok=True)
+        made = videocover.make(source, covers / asset.id)
+        if made:
+            asset.poster_path = str(made)
+            built.append(asset.id)
+        else:
+            failed.append(asset.id)
+    if not dry_run:
+        db.commit()
+    return {"dry_run": dry_run, "candidates": len(videos), "built": len(built), "failed": failed}
 
 
 @app.post("/internal/media/backfill-previews", tags=["internal"])

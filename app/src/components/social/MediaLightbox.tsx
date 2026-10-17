@@ -184,6 +184,7 @@ export default function MediaLightbox({
           // video full-size is asking to watch it.
           <VideoPlayer
             src={preview(item.url) ?? item.url ?? ''}
+            poster={item.poster_url}
             autoplay
             startMuted={false}
             fill
@@ -220,7 +221,7 @@ export default function MediaLightbox({
       {aside && wide && (
         <aside
           onClick={(e) => e.stopPropagation()}
-          className="w-[360px] shrink-0 overflow-y-auto overscroll-contain bg-ink-2 p-4 xl:w-[400px]"
+          className="w-[400px] shrink-0 overflow-y-auto overscroll-contain bg-ink-2 p-5 xl:w-[460px]"
         >
           {aside}
         </aside>

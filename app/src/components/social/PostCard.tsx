@@ -1,5 +1,7 @@
 import MentionLink from './MentionLink'
-import { useState } from 'react'
+import { useLayoutEffect, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
+import VideoPlayer from './VideoPlayer'
 import { useTranslation } from 'react-i18next'
 import { Check, Columns2, Eye, EyeOff, Flag, HelpCircle, Languages, Link2, Lock, MapPin, MessageCircle, Pencil, Repeat2, Share2, SlidersHorizontal, Trash2 } from 'lucide-react'
 import { ApiError, kaluta, type Post, type WhyFactor } from '@/lib/api'
@@ -310,6 +312,9 @@ export default function PostCard({
   // an article's own pictures with it; the audience, the community and the
   // photos under a post are not typos, and changing them would be a re-post.
   const [editing, setEditing] = useState(false)
+  // The article's video slots, found after its HTML is on the page.
+  const articleRef = useRef<HTMLDivElement>(null)
+  const [videoSlots, setVideoSlots] = useState<Array<{ el: HTMLElement; src: string; poster: string | null }>>([])
   // The body as saved, once this card has edited it. The post arrives as a
   // prop from the feed, which does not refetch just because one card changed.
   const [editedBody, setEditedBody] = useState<string | null>(null)
@@ -504,8 +509,27 @@ export default function PostCard({
   const inlineIds = isRichArticle ? new Set(articleMediaIds(sourceBody)) : new Set<string>()
   const gridMedia = inlineIds.size ? media.filter((m) => !m.media_id || !inlineIds.has(m.media_id)) : media
   const articleHtml = isRichArticle
-    ? hydrateArticle(sanitizeHtml(body), (id) => media.find((m) => m.media_id === id) ?? null)
+    ? hydrateArticle(sanitizeHtml(body), (id) => media.find((m) => m.media_id === id) ?? null, {
+        mountVideos: true,
+      })
     : ''
+  // React owns the HTML string, the browser owns the nodes it becomes: read
+  // the video slots back after each render of a new article body.
+  useLayoutEffect(() => {
+    const root = articleRef.current
+    if (!root) {
+      setVideoSlots([])
+      return
+    }
+    setVideoSlots(
+      Array.from(root.querySelectorAll<HTMLElement>('.article-video')).map((el) => ({
+        el,
+        src: el.dataset.src ?? '',
+        poster: el.dataset.poster ?? null,
+      })),
+    )
+  }, [articleHtml])
+
   // The first link in the body is the one worth unfurling; a post full of
   // links is a list, and five cards under it is not a post any more. Declared
   // after plainBody, which it reads - a const used above its declaration is a
@@ -628,11 +652,20 @@ export default function PostCard({
       ) : isRichArticle ? (
         /* Sanitised again at render time: the database can hold anything, and
            trusting what was cleaned on the way in would only move the risk. */
-        <Expandable collapsedHeight={BODY_COLLAPSED} className="mt-3" deps={[body]}>
+        <Expandable collapsedHeight={commentsAlwaysOpen ? 1_000_000 : BODY_COLLAPSED} className="mt-3" deps={[body]}>
           <div
+            ref={articleRef}
             className="prose-article text-[0.95rem] text-text-hi"
             dangerouslySetInnerHTML={{ __html: articleHtml }}
           />
+          {/* Kinjy's player in each video slot of the article. */}
+          {videoSlots.map((slot) =>
+            createPortal(
+              <VideoPlayer src={slot.src} poster={slot.poster} autoplay={false} className="rounded-card-sm" />,
+              slot.el,
+              slot.src,
+            ),
+          )}
         </Expandable>
       ) : (
         /* The body opens the post. Not a <button>: the text contains links and
@@ -640,7 +673,14 @@ export default function PostCard({
            interactive elements inside a button is invalid and unreadable to a
            screen reader. A plain click handler leaves them alone, and the
            header already offers a keyboard route to the same place. */
-        <Expandable collapsedHeight={BODY_COLLAPSED} lines={BODY_LINES} className="mt-3" deps={[body]}>
+        // Opened in its own dialog the post is read whole: cutting it there
+        // again is a second "see more" between the reader and the text.
+        <Expandable
+          collapsedHeight={commentsAlwaysOpen ? 1_000_000 : BODY_COLLAPSED}
+          lines={commentsAlwaysOpen ? undefined : BODY_LINES}
+          className="mt-3"
+          deps={[body]}
+        >
           <p
             onClick={(event) => {
               if (!onOpen) return
@@ -1034,10 +1074,25 @@ export default function PostCard({
                 </div>
               </div>
 
+              {/* The text beside the picture, folded after a few lines so a
+                  long post does not push the conversation out of reach. An
+                  article keeps its headings and lists (its pictures are the
+                  ones being viewed, so they are left out here). */}
               {plainBody.trim() !== '' && (
-                <p className="whitespace-pre-wrap text-[0.9375rem] leading-relaxed text-text-hi">
-                  {withHashtags(readableText(plainBody), source.mentions ?? {})}
-                </p>
+                <Expandable collapsedHeight={230} lines={9} deps={[sourceBody]}>
+                  {isRichArticle ? (
+                    <div
+                      className="prose-article text-[0.9375rem] text-text-hi"
+                      dangerouslySetInnerHTML={{
+                        __html: sanitizeHtml(sourceBody).replace(/<figure[\s\S]*?<\/figure>/g, ''),
+                      }}
+                    />
+                  ) : (
+                    <p className="whitespace-pre-wrap text-[0.9375rem] leading-relaxed text-text-hi">
+                      {withHashtags(readableText(plainBody), source.mentions ?? {})}
+                    </p>
+                  )}
+                </Expandable>
               )}
 
               <Comments

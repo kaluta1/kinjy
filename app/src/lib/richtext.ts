@@ -159,6 +159,8 @@ export interface InlineMedia {
   url: string | null
   kind: string
   alt_text?: string | null
+  /** A video's cover. */
+  poster_url?: string | null
 }
 
 /**
@@ -169,7 +171,11 @@ export interface InlineMedia {
  * attributes and the post's own (signed) media. A marker whose media is not
  * on the post shows nothing - a body cannot name somebody else's file.
  */
-export function hydrateArticle(html: string, media: (id: string) => InlineMedia | null): string {
+export function hydrateArticle(
+  html: string,
+  media: (id: string) => InlineMedia | null,
+  { mountVideos = false }: { mountVideos?: boolean } = {},
+): string {
   if (!html.includes('<figure')) return html
   const doc = new DOMParser().parseFromString(`<body>${html}</body>`, 'text/html')
   for (const figure of Array.from(doc.body.querySelectorAll('figure'))) {
@@ -208,12 +214,24 @@ export function hydrateArticle(html: string, media: (id: string) => InlineMedia 
       figure.appendChild(note)
       continue
     }
-    if (item.kind === 'video') {
+    if (item.kind === 'video' && mountVideos) {
+      // A slot for Kinjy's own player, which the post card mounts into it:
+      // HTML cannot carry a React component, and the browser's controls are
+      // not what a member should get.
+      const slot = doc.createElement('div')
+      slot.className = 'article-video'
+      slot.setAttribute('data-src', item.url)
+      if (item.poster_url) slot.setAttribute('data-poster', item.poster_url)
+      figure.appendChild(slot)
+    } else if (item.kind === 'video') {
+      // In the editor: a still preview, no controls - it is being placed,
+      // not watched.
       const video = doc.createElement('video')
       video.setAttribute('src', item.url)
-      video.setAttribute('controls', '')
       video.setAttribute('preload', 'metadata')
+      video.setAttribute('muted', '')
       video.setAttribute('playsinline', '')
+      if (item.poster_url) video.setAttribute('poster', item.poster_url)
       figure.appendChild(video)
     } else {
       const img = doc.createElement('img')
