@@ -2234,6 +2234,13 @@ def edit_post(post_id: str, payload: PostIn, principal: CurrentUser, db: OrmSess
     added_media: list[str] = []
     if post.format == "article" and "media" in payload.model_fields_set:
         added_media = _sync_article_media(db, post, previous_body, payload.media, principal.user_id)
+    elif "media" in payload.model_fields_set:
+        # Any other post: `media` is the list it should carry now, in order.
+        added_media = _replace_post_media(db, post, payload.media, principal.user_id)
+        if not (post.body or "").strip() and not added_media and not db.scalar(
+            select(func.count()).select_from(models.PostMedia).where(models.PostMedia.post_id == post.id)
+        ):
+            raise HTTPException(status_code=400, detail="A post needs a body or media")
     # An edit of original content becomes "edited" — provenance must stay honest.
     if post.provenance == "original":
         post.provenance = "edited"
@@ -2251,7 +2258,70 @@ def edit_post(post_id: str, payload: PostIn, principal: CurrentUser, db: OrmSess
             status_code=403,
             detail="This post cannot be published. If you believe this is a mistake, contact support.",
         )
-    return _post_out(post, db)
+    # Signed for the author, who is looking at it - not for an anonymous
+    # visitor, which is what a missing viewer means.
+    return _post_out(post, db, viewer=principal.user_id)
+
+
+# Pictures and clips one ordinary post may carry: the composer's own limit.
+MAX_POST_MEDIA = 4
+# Formats whose name follows what is attached; the others (article, short,
+# carousel) say something else and are left as they are.
+MEDIA_FORMATS = {"text", "image", "video"}
+
+
+def _replace_post_media(db: OrmSession, post: models.Post, items: list[dict], author_id: str) -> list[str]:
+    """Make a post carry exactly `items`, in that order.
+
+    A file the post already carries is kept as it is (it was checked when it
+    was attached). A new one is checked exactly as at creation - the author's
+    own finished post media - so an edit cannot attach somebody else's file.
+    One left out is detached. The format follows: a post that now carries a
+    video is a video post, so "Video Only" finds it, and one with nothing left
+    is text. Returns the ids attached, for the caller to restrict after the
+    commit; the caller reclassifies, so a new picture waits for a human.
+    """
+    wanted: list[dict] = []
+    seen: set[str] = set()
+    for item in items:
+        media_id = item.get("media_id") if isinstance(item, dict) else None
+        if isinstance(media_id, str) and media_id and media_id not in seen:
+            seen.add(media_id)
+            wanted.append(item)
+    if len(wanted) > MAX_POST_MEDIA:
+        raise HTTPException(status_code=400, detail=f"A post can carry at most {MAX_POST_MEDIA} pictures or clips")
+
+    rows = {r.media_id: r for r in db.scalars(select(models.PostMedia).where(models.PostMedia.post_id == post.id)).all()}
+    new_items = [i for i in wanted if i["media_id"] not in rows]
+    checked = {c["media_id"]: c for c in _verified_media(new_items, author_id)} if new_items else {}
+
+    for media_id, row in rows.items():
+        if media_id not in seen:
+            db.delete(row)
+    for position, item in enumerate(wanted):
+        row = rows.get(item["media_id"])
+        if row is not None:
+            row.position = position
+            continue
+        c = checked[item["media_id"]]
+        db.add(
+            models.PostMedia(
+                post_id=post.id,
+                media_id=c["media_id"],
+                url=c["url"],
+                kind=c["kind"],
+                alt_text=c.get("alt_text"),
+                position=position,
+                width=c.get("width"),
+                height=c.get("height"),
+                duration_seconds=c.get("duration_seconds"),
+            )
+        )
+    if post.format in MEDIA_FORMATS:
+        kinds = [(rows.get(i["media_id"]).kind if i["media_id"] in rows else checked[i["media_id"]]["kind"]) for i in wanted]
+        post.format = "video" if "video" in kinds else "image" if kinds else "text"
+    db.flush()
+    return list(checked)
 
 
 ARTICLE_MEDIA_RE = re.compile(r'data-media-id="(mda_[A-Za-z0-9]{6,60})"')

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
-import { X } from 'lucide-react'
+import { ImagePlus, Loader2, Play, X } from 'lucide-react'
 import RichTextEditor from '@/components/social/RichTextEditor'
 import { ApiError, kaluta, type Post, type PostMedia, type UploadedMedia } from '@/lib/api'
 import { articleMediaIds, htmlToText } from '@/lib/richtext'
@@ -16,9 +16,24 @@ import { articleMediaIds, htmlToText } from '@/lib/richtext'
  * pictures and clips included, where they can be added, moved by cutting and
  * re-inserting, or taken out.
  *
- * The audience, the community and the photos attached under a post are not
- * edited here: those are not typos, and changing them would be a re-post.
+ * Any other post is edited as its text and its pictures and clips: they can
+ * be added (button or paste), taken off, and the server checks a new one
+ * exactly as at creation. The audience and the community are not edited
+ * here: those are not typos, and changing them would be a re-post.
  */
+
+/** A picture or clip on an ordinary post, as this dialog holds it. */
+interface Attached {
+  media_id: string
+  /** What the dialog shows: the signed address, or the local file for a new one. */
+  preview: string
+  /** What the server is sent: the stored address. */
+  url: string
+  kind: string
+  poster?: string | null
+}
+
+const MAX_ATTACHED = 4
 export default function EditPostDialog({
   post,
   body,
@@ -50,6 +65,48 @@ export default function EditPostDialog({
   // Files uploaded in this dialog, offered to the server if the text keeps them.
   const added = useRef(new Map<string, UploadedMedia>())
   const previews = useRef<string[]>([])
+  const fileRef = useRef<HTMLInputElement>(null)
+  // An ordinary post's attachments, editable here. Not used for an article,
+  // whose pictures live in its text.
+  const [attached, setAttached] = useState<Attached[]>(() =>
+    isArticle
+      ? []
+      : media
+          .filter((m): m is PostMedia & { media_id: string } => Boolean(m.media_id))
+          .map((m) => ({ media_id: m.media_id, preview: m.url ?? '', url: m.url ?? '', kind: m.kind, poster: m.poster_url })),
+  )
+  const [uploading, setUploading] = useState(false)
+  // An upload inside the article editor; saving before it lands loses it.
+  const [editorUploading, setEditorUploading] = useState(false)
+  const waiting = uploading || editorUploading
+
+  const addFiles = async (files: File[]) => {
+    const wanted = files.filter((f) => f.type.startsWith('image/') || f.type.startsWith('video/'))
+    if (!wanted.length) return
+    const room = MAX_ATTACHED - attached.length
+    if (room <= 0) {
+      setError(`A post can carry at most ${MAX_ATTACHED} pictures or clips.`)
+      return
+    }
+    setUploading(true)
+    setError(null)
+    try {
+      for (const file of wanted.slice(0, room)) {
+        const asset = await kaluta.media.upload(file)
+        const preview = URL.createObjectURL(file)
+        previews.current.push(preview)
+        setAttached((current) => [
+          ...current,
+          { media_id: asset.id, preview, url: asset.url, kind: file.type.startsWith('video/') ? 'video' : asset.kind },
+        ])
+      }
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Upload failed')
+    } finally {
+      setUploading(false)
+      if (fileRef.current) fileRef.current.value = ''
+    }
+  }
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => event.key === 'Escape' && !busy && onClose()
@@ -82,7 +139,7 @@ export default function EditPostDialog({
       return
     }
     const next = isArticle ? `<h2>${headline.trim().replace(/[<>&]/g, '')}</h2>${html}` : text.trim()
-    if (!(isArticle ? htmlToText(html) : next)) {
+    if (!(isArticle ? htmlToText(html) : next || attached.length)) {
       setError(isArticle ? 'The article has no text.' : 'The post is empty.')
       return
     }
@@ -94,7 +151,13 @@ export default function EditPostDialog({
             .filter((m): m is UploadedMedia => Boolean(m))
             .map((m) => ({ media_id: m.id, url: m.url, kind: m.kind }))
         : undefined
-      const updated = await kaluta.posts.edit(post.id, next, newlyPlaced)
+      // An ordinary post sends the whole list it should carry now; the server
+      // keeps, adds and takes off accordingly.
+      const updated = await kaluta.posts.edit(
+        post.id,
+        next,
+        isArticle ? newlyPlaced : attached.map((a) => ({ media_id: a.media_id, url: a.url, kind: a.kind })),
+      )
       onSaved(updated)
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'Could not save the change')
@@ -139,7 +202,14 @@ export default function EditPostDialog({
                 placeholder="Article headline"
                 className="w-full rounded-card-sm border border-[var(--cloud-border)] bg-transparent px-3 py-2 text-lg font-semibold text-text-hi focus:border-gold/40 focus:outline-none"
               />
-              <RichTextEditor value={html} onChange={setHtml} onUploadMedia={upload} mediaFor={mediaFor} minHeight={320} />
+              <RichTextEditor
+                value={html}
+                onChange={setHtml}
+                onUploadMedia={upload}
+                mediaFor={mediaFor}
+                onUploadingChange={setEditorUploading}
+                minHeight={320}
+              />
             </>
           ) : (
             <textarea
@@ -148,8 +218,79 @@ export default function EditPostDialog({
               onChange={(e) => setText(e.target.value)}
               rows={8}
               aria-label="Edit your post"
+              onPaste={(event) => {
+                // A pasted picture joins the post rather than vanishing.
+                const files = Array.from(event.clipboardData.files)
+                if (files.length) {
+                  event.preventDefault()
+                  void addFiles(files)
+                }
+              }}
               className="w-full resize-y rounded-xl border border-[var(--cloud-border)] bg-transparent px-3 py-2 text-[0.95rem] leading-relaxed text-text-hi focus:border-gold/40 focus:outline-none"
             />
+          )}
+          {!isArticle && (
+            <div>
+              <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+                {attached.map((item) => (
+                  <div key={item.media_id} className="relative aspect-square overflow-hidden rounded-xl bg-black/40">
+                    {item.kind === 'video' ? (
+                      item.poster ? (
+                        <img src={item.poster} alt="" className="h-full w-full object-cover" />
+                      ) : (
+                        <video src={item.preview} muted playsInline preload="metadata" className="h-full w-full object-cover" />
+                      )
+                    ) : (
+                      <img src={item.preview} alt="" className="h-full w-full object-cover" />
+                    )}
+                    {item.kind === 'video' && (
+                      <span className="pointer-events-none absolute inset-0 grid place-items-center">
+                        <span className="grid h-9 w-9 place-items-center rounded-full bg-black/55">
+                          <Play size={16} className="ms-0.5 text-white" fill="currentColor" aria-hidden="true" />
+                        </span>
+                      </span>
+                    )}
+                    <button
+                      type="button"
+                      onClick={() => setAttached((current) => current.filter((a) => a.media_id !== item.media_id))}
+                      aria-label="Take this off the post"
+                      className="absolute end-1.5 top-1.5 grid h-7 w-7 place-items-center rounded-full bg-black/65 text-white hover:bg-black/80"
+                    >
+                      <X size={14} aria-hidden="true" />
+                    </button>
+                  </div>
+                ))}
+                {attached.length < MAX_ATTACHED && (
+                  <button
+                    type="button"
+                    onClick={() => fileRef.current?.click()}
+                    disabled={uploading}
+                    className="grid aspect-square place-items-center rounded-xl border border-dashed border-[var(--cloud-border)] text-text-mid hover:border-gold/50 hover:text-gold-soft disabled:opacity-50"
+                  >
+                    <span className="flex flex-col items-center gap-1 text-xs font-semibold">
+                      {uploading ? (
+                        <Loader2 size={20} className="animate-spin" aria-hidden="true" />
+                      ) : (
+                        <ImagePlus size={20} aria-hidden="true" />
+                      )}
+                      {uploading ? 'Uploading…' : 'Add photo or video'}
+                    </span>
+                  </button>
+                )}
+              </div>
+              <input
+                ref={fileRef}
+                type="file"
+                accept="image/*,video/*"
+                multiple
+                hidden
+                onChange={(e) => void addFiles(Array.from(e.target.files ?? []))}
+              />
+              <p className="mt-1.5 text-xs text-text-low">
+                Up to {MAX_ATTACHED}. You can also paste a picture into the text. A new picture is reviewed before
+                everyone can see it.
+              </p>
+            </div>
           )}
           {error && (
             <p role="alert" className="text-sm text-red-300">
@@ -172,10 +313,10 @@ export default function EditPostDialog({
             <button
               type="button"
               onClick={() => void save()}
-              disabled={busy}
+              disabled={busy || waiting}
               className="rounded-full bg-gradient-to-br from-gold-soft to-gold px-4 py-1.5 text-sm font-bold text-ink disabled:opacity-40"
             >
-              {busy ? 'Saving…' : 'Save'}
+              {busy ? 'Saving…' : waiting ? 'Uploading…' : 'Save'}
             </button>
           </div>
         </footer>

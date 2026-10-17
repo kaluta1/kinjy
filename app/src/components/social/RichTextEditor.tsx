@@ -58,6 +58,7 @@ export default function RichTextEditor({
   minHeight = 220,
   onUploadMedia,
   mediaFor,
+  onUploadingChange,
 }: {
   value: string
   onChange: (html: string) => void
@@ -70,6 +71,12 @@ export default function RichTextEditor({
   onUploadMedia?: (file: File) => Promise<{ id: string; url: string; kind: string }>
   /** What a figure already in `value` shows while it is edited. */
   mediaFor?: (id: string) => InlineMedia | null
+  /**
+   * Told when an upload starts and ends, so the form around can hold its
+   * Save or Post until the file is in: saved mid-upload, the picture was
+   * lost - its placeholder has no id and is not part of what is saved.
+   */
+  onUploadingChange?: (uploading: boolean) => void
 }) {
   const { tok } = useAppTheme()
   const editorRef = useRef<HTMLDivElement>(null)
@@ -77,6 +84,7 @@ export default function RichTextEditor({
   const [active, setActive] = useState<Set<string>>(new Set())
   const [empty, setEmpty] = useState(!value)
   const [uploading, setUploading] = useState(false)
+  useEffect(() => onUploadingChange?.(uploading), [uploading, onUploadingChange])
   const [mediaError, setMediaError] = useState<string | null>(null)
   // Where the caret was last seen inside the text. A toolbar click or a file
   // dialog takes the focus away; the media goes where the writer was, not to

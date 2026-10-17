@@ -180,6 +180,8 @@ export default function Composer({
   // like any other media - checked, classified, signed - and placed by id.
   const [inlineMedia, setInlineMedia] = useState<Array<UploadedMedia & { previewUrl: string }>>([])
   const [uploading, setUploading] = useState(false)
+  // A picture still uploading inside the article: posting now would lose it.
+  const [articleUploading, setArticleUploading] = useState(false)
   const [visibility, setVisibility] = useState<string>(community ? 'community' : 'public')
   const [circleId, setCircleId] = useState('')
   const [extras, setExtras] = useState<string[]>([])
@@ -298,7 +300,7 @@ export default function Composer({
   // An article body is HTML, so "<p><br></p>" is empty even though it is not
   // an empty string — measure the text, not the markup.
   const hasText = kind === 'article' ? htmlToText(body).length > 0 : body.trim() !== ''
-  const canPost = (hasText || media.length > 0) && !busy && !uploading
+  const canPost = (hasText || media.length > 0) && !busy && !uploading && !articleUploading
 
   const submit = async (event: React.FormEvent) => {
     event.preventDefault()
@@ -548,7 +550,12 @@ export default function Composer({
 
             {kind === 'article' ? (
               <div className="mt-3">
-                <RichTextEditor value={body} onChange={setBody} onUploadMedia={uploadInline} />
+                <RichTextEditor
+                  value={body}
+                  onChange={setBody}
+                  onUploadMedia={uploadInline}
+                  onUploadingChange={setArticleUploading}
+                />
               </div>
             ) : (
               <div className="relative">

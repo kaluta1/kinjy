@@ -1185,3 +1185,22 @@ What came from where: replies, the composer's emoji/sticker panel, the redesign 
   previewed with its picture yet** - they share with the generic card. Text
   posts show their own title and description. Clearing the review queue in
   the Trust & Safety console is what turns their previews on.
+
+## Edits that lost the pictures added to them (17/10)
+
+- ~~A picture added while editing was lost.~~ Two causes. (1) Saving while a
+  picture was still uploading saved without it: the editor puts a
+  placeholder down at once, and a placeholder has no media id, so it is not
+  part of what is saved. Save (edit dialog) and Post (composer, articles
+  included) now wait - the button reads "Uploading..." and is disabled until
+  every file is in. (2) An ordinary post's edit dialog had a text box only, so
+  a picture could not be added at all and a pasted one vanished.
+- **Ordinary posts can now change their pictures and clips when edited**: add
+  (button or paste), take off, up to 4. The edit sends the list the post
+  should carry; files already there are kept, new ones are checked as at
+  creation (somebody else's refused), the rest detached, and the format
+  follows (a post with a video becomes a video post; nothing left, text). A
+  new picture sends the post back to human review. `e2e_post_media_edit.py`
+  14/14.
+- The edit answer was signed for an anonymous visitor rather than the author;
+  it is signed for the author now.
