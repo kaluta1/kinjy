@@ -1204,3 +1204,4 @@ What came from where: replies, the composer's emoji/sticker panel, the redesign 
   14/14.
 - The edit answer was signed for an anonymous visitor rather than the author;
   it is signed for the author now.
+- Deployed on kinjy.com 17/10 17:28 (social, web; backups `pre-edit-media-20261017-1727`).
