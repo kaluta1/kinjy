@@ -21,7 +21,7 @@ from sqlalchemy.orm import Session as OrmSession
 import threading
 
 from common import crypto, permissions, settings
-from common.auth import AdminUser, CurrentUser
+from common.auth import AdminUser, ModeratorUser, CurrentUser
 from common.database import SessionLocal, create_all, get_db
 from common.ids import new_id
 from common.security import decode_token, ACCESS
@@ -505,7 +505,7 @@ def accept_conversation(
 
 
 @app.get("/admin/contact-risk", tags=["admin"])
-def contact_risk(_: AdminUser, limit: int = 50, db: OrmSession = Depends(get_db)):
+def contact_risk(_: ModeratorUser, limit: int = 50, db: OrmSession = Depends(get_db)):
     """Accounts whose contact attempts towards minors look like a pattern.
 
     A queue for humans, not a verdict. Ranked by how many *distinct* minors

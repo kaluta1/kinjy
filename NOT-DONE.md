@@ -1243,3 +1243,24 @@ Three causes, all fixed:
 - Deployed on kinjy.com 17/10 22:15 (social, messaging, web; backups
   `pre-share-links-20261017-2214`). Checked with WhatsApp, Facebook and
   browser User-Agents: the same title, description and picture for each.
+
+## The staff team and its roles (17/10)
+
+- ~~Nobody could reach the console~~: no account on kinjy.com had a staff
+  role, and there was no way to give one. Three staff roles now:
+  **moderator** (post review, appeals, memorial death reports, contact risk,
+  age review - no money, no accounts), **admin** (the whole console),
+  **superadmin** (also manages the team). Moderation routes moved from
+  `AdminUser` to `ModeratorUser`; money, KYC, disputes, ads and the ledger
+  stay admin-only.
+- `/team` (left rail "Team" and "Review console" for staff): a superadmin adds
+  somebody by email or @username with a role, changes a role, or takes them
+  off (back to member). Nobody changes their own role and Kinjy always keeps
+  one superadmin. A change reaches the person at their next token refresh,
+  without signing out. `e2e_team.py` 21/21.
+- godsonferdinand7@gmail.com (@ferdinand7) is the first superadmin, set by
+  hand in the database on 17/10 at the owner's request.
+- **Not done:** no audit trail beyond the service log line; a demoted
+  member's current access token keeps its old role until it expires (minutes).
+  `e2e_graveyard.py` mints its admin token with the local JWT secret, so it
+  only runs inside a container - pre-existing.

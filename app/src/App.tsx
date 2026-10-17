@@ -33,6 +33,7 @@ const Connections = lazy(() => import('./pages/app/Connections'))
 const Communities = lazy(() => import('./pages/app/Communities'))
 const Forums = lazy(() => import('./pages/app/Forums'))
 const Messages = lazy(() => import('./pages/app/Messages'))
+const Team = lazy(() => import('./pages/app/Team'))
 const JoinGroup = lazy(() => import('./pages/app/JoinGroup'))
 const FamilyTreeApp = lazy(() => import('./pages/app/FamilyTree'))
 const Graveyard = lazy(() => import('./pages/app/Graveyard'))
@@ -77,7 +78,7 @@ const APP_ROUTE_PREFIXES = [
   '/hub', '/p', '/explore', '/messages', '/communities', '/forums', '/circles',
   '/connections', '/u', '/dashboard', '/market', '/tree', '/graveyard',
   '/memorial', '/live', '/shorts', '/earn', '/supervision', '/settings',
-  '/moderation', '/trust-safety', '/admin', '/stats',
+  '/moderation', '/trust-safety', '/admin', '/stats', '/team',
 ]
 
 function PageFallback() {
@@ -183,6 +184,7 @@ export default function App() {
           {/* Staff console. The service refuses every call behind it to
               anybody who is not staff, so the route itself is not the guard. */}
           <Route path="/trust-safety" element={<TrustSafety />} />
+          <Route path="/team" element={<Team />} />
           {/* Where the appeal notification sends the member. */}
           <Route path="/moderation" element={<Moderation />} />
           {/* Every avatar in the app links here. */}

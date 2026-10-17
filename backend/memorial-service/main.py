@@ -14,7 +14,7 @@ from sqlalchemy.orm import Session as OrmSession
 
 from common import ageclient, classifier, events, mediasign, notify, permissions, settings
 from common.agesafety import engine
-from common.auth import AdminUser, CurrentUser, MaybeUser
+from common.auth import AdminUser, ModeratorUser, CurrentUser, MaybeUser
 from common.database import SessionLocal, get_db
 from common.ids import new_id
 from common.service import create_app
@@ -1390,7 +1390,7 @@ async def report_death(
 
 
 @app.get("/admin/memorials/death-reports", tags=["verification"])
-def death_report_queue(admin: AdminUser, db: OrmSession = Depends(get_db)):
+def death_report_queue(admin: ModeratorUser, db: OrmSession = Depends(get_db)):
     """Memorials waiting for a decision, oldest report first."""
     memorials = db.scalars(
         select(models.Memorial).where(models.Memorial.death_status.in_(("reported", "under_review")))
@@ -1429,7 +1429,7 @@ def death_report_queue(admin: AdminUser, db: OrmSession = Depends(get_db)):
 
 
 @app.post("/admin/memorials/{memorial_id}/review", tags=["verification"])
-def start_review(memorial_id: str, admin: AdminUser, db: OrmSession = Depends(get_db)):
+def start_review(memorial_id: str, admin: ModeratorUser, db: OrmSession = Depends(get_db)):
     """Take a reported death under review, so a second reviewer does not
     duplicate the work and the family sees that someone is looking."""
     memorial = db.get(models.Memorial, memorial_id)
@@ -1443,7 +1443,7 @@ def start_review(memorial_id: str, admin: AdminUser, db: OrmSession = Depends(ge
 
 
 @app.post("/admin/memorials/{memorial_id}/verify-death", tags=["verification"])
-def verify_death(memorial_id: str, outcome: str, admin: AdminUser, db: OrmSession = Depends(get_db)):
+def verify_death(memorial_id: str, outcome: str, admin: ModeratorUser, db: OrmSession = Depends(get_db)):
     if outcome not in ("verified", "rejected"):
         raise HTTPException(status_code=400, detail="outcome must be verified or rejected")
     memorial = db.get(models.Memorial, memorial_id)

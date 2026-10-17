@@ -103,7 +103,8 @@ export default function TrustSafety() {
   const forbidden =
     overview.error?.includes('403') ||
     overview.error?.toLowerCase().includes('forbidden') ||
-    overview.error?.toLowerCase().includes('admin')
+    overview.error?.toLowerCase().includes('admin') ||
+    overview.error?.toLowerCase().includes('access required')
 
   return (
     <AppShell>
@@ -113,7 +114,10 @@ export default function TrustSafety() {
           Review, appeal, correct
         </h1>
         <p className="mt-3 max-w-2xl text-[0.95rem] leading-relaxed text-text-low">
-          The review queue, the appeals queue, and how often we turn out to be wrong.
+          The review queue, the appeals queue, and how often we turn out to be wrong.{' '}
+          <a href="/team" className="font-semibold text-gold-soft hover:underline">
+            The team
+          </a>
         </p>
       </header>
       <div className="space-y-10">

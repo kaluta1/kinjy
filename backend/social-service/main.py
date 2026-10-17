@@ -21,7 +21,7 @@ from sqlalchemy import and_, delete, func, or_, select
 from sqlalchemy.orm import Session as OrmSession
 
 from common import events, notify, settings
-from common.auth import AdminUser, CurrentUser, MaybeUser
+from common.auth import AdminUser, ModeratorUser, CurrentUser, MaybeUser
 from common.database import SessionLocal, get_db
 from common.ids import new_id
 from common.service import create_app
@@ -1602,7 +1602,7 @@ def appeal_decision(
 
 
 @app.get("/admin/moderation/appeals", tags=["admin"])
-def appeal_queue(_: AdminUser, limit: int = 50, db: OrmSession = Depends(get_db)):
+def appeal_queue(_: ModeratorUser, limit: int = 50, db: OrmSession = Depends(get_db)):
     """Open appeals, the late ones first, with the overturn rate beside them.
 
     The rate is here rather than on a separate dashboard on purpose: a reviewer
@@ -1667,7 +1667,7 @@ def appeal_queue(_: AdminUser, limit: int = 50, db: OrmSession = Depends(get_db)
 
 @app.post("/admin/moderation/appeals/{appeal_id}", tags=["admin"])
 def decide_appeal(
-    appeal_id: str, payload: AppealVerdictIn, admin: AdminUser,
+    appeal_id: str, payload: AppealVerdictIn, admin: ModeratorUser,
     db: OrmSession = Depends(get_db),
 ):
     """Uphold or overturn. Not by whoever made the decision being appealed."""
@@ -1716,7 +1716,7 @@ def decide_appeal(
 
 
 @app.get("/admin/classification-queue", tags=["admin"])
-def classification_queue(_: AdminUser, limit: int = 50, db: OrmSession = Depends(get_db)):
+def classification_queue(_: ModeratorUser, limit: int = 50, db: OrmSession = Depends(get_db)):
     """Content the classifier would not settle on its own.
 
     Mostly posts carrying media, which no text pass can see into. Until a
@@ -1806,7 +1806,7 @@ def classification_queue(_: AdminUser, limit: int = 50, db: OrmSession = Depends
 
 
 @app.get("/admin/moderation/overview", tags=["admin"])
-def moderation_overview(_: AdminUser, db: OrmSession = Depends(get_db)):
+def moderation_overview(_: ModeratorUser, db: OrmSession = Depends(get_db)):
     """The real numbers, for a console that used to show invented ones.
 
     Every figure here is a count of rows. That sounds too obvious to say, but
@@ -1849,7 +1849,7 @@ def moderation_overview(_: AdminUser, db: OrmSession = Depends(get_db)):
 
 @app.post("/admin/classification/{post_id}/review", tags=["admin"])
 def review_classification(
-    post_id: str, payload: ClassificationIn, admin: AdminUser, db: OrmSession = Depends(get_db)
+    post_id: str, payload: ClassificationIn, admin: ModeratorUser, db: OrmSession = Depends(get_db)
 ):
     """A human settles a rating. Their answer outranks the classifier's."""
     post = db.get(models.Post, post_id)

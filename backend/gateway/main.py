@@ -33,6 +33,7 @@ log = logging.getLogger("gateway")
 ROUTES: dict[str, str] = {
     "/api/auth": "http://auth-service:8000",
     "/api/admin/users": "http://auth-service:8000",
+    "/api/admin/team": "http://auth-service:8000",
     "/api/users": "http://user-service:8000",
     "/api/circles": "http://user-service:8000",
     "/api/connections": "http://user-service:8000",

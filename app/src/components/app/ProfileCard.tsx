@@ -1,6 +1,6 @@
 import { useEffect } from 'react'
 import { Link } from 'react-router'
-import { Award, Code2, Crown, LayoutGrid, LifeBuoy, MapPin, Medal, Pin, Tag, Users, Wallet } from 'lucide-react'
+import { Award, Code2, Crown, LayoutGrid, LifeBuoy, MapPin, Medal, Pin, ShieldCheck, Tag, Users, Wallet } from 'lucide-react'
 import { VerifiedBadge } from '@/components/ui-kit'
 import { MODULE_ICONS } from '@/components/appdemo/Chrome'
 import { ROUTE_FOR } from './navigation'
@@ -9,7 +9,7 @@ import { useAppTheme } from '@/components/appdemo/theme'
 import MemberAvatar from '@/components/social/MemberAvatar'
 import { useApi } from '@/hooks/useApi'
 import { useAuth } from '@/hooks/useAuth'
-import { kaluta } from '@/lib/api'
+import { isStaff, kaluta } from '@/lib/api'
 import { isRouteAvailable } from '@/lib/features'
 import { onChange } from '@/lib/live'
 import { useMyProfile } from '@/hooks/useMyProfile'
@@ -187,6 +187,29 @@ export default function ProfileCard() {
           Spaces &amp; help
         </p>
         <ul className="space-y-1">
+          {/* Staff get their way into the console here; nobody else sees it. */}
+          {isStaff(user?.role) && (
+            <li>
+              <Link
+                to="/trust-safety"
+                className={cn('flex w-full items-center gap-2 rounded-full px-3 py-1.5 text-xs font-semibold', tok.mid, tok.hoverBg)}
+              >
+                <ShieldCheck size={12} className="text-gold" aria-hidden="true" />
+                Review console
+              </Link>
+            </li>
+          )}
+          {isStaff(user?.role) && (
+            <li>
+              <Link
+                to="/team"
+                className={cn('flex w-full items-center gap-2 rounded-full px-3 py-1.5 text-xs font-semibold', tok.mid, tok.hoverBg)}
+              >
+                <Users size={12} className="text-gold" aria-hidden="true" />
+                Team
+              </Link>
+            </li>
+          )}
           {PUBLIC_PAGES.filter((page) => isRouteAvailable(page.to)).map((page) => (
             <li key={page.to}>
               <Link

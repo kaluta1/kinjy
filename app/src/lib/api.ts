@@ -389,6 +389,14 @@ export interface ProfileEligibility {
   neighborhood: boolean
 }
 
+/** The staff roles, narrowest first. */
+export type StaffRole = 'moderator' | 'admin' | 'superadmin'
+
+/** Whether an account's role is one of the staff's. */
+export function isStaff(role: string | null | undefined): boolean {
+  return role === 'moderator' || role === 'admin' || role === 'superadmin'
+}
+
 export interface PostMedia {
   /** Null when data saver withheld it — the bytes were never sent. */
   url: string | null
@@ -2826,6 +2834,19 @@ export const kaluta = {
   },
 
   /** Trust & Safety. Every call here is staff-only at the service. */
+  /** The staff: who may use the console, and how far. Superadmins change it. */
+  team: {
+    list: () =>
+      api.get<{
+        items: Array<{ user_id: string; email: string; handle: string; display_name: string; role: StaffRole }>
+        can_manage: boolean
+      }>('/admin/team'),
+    add: (who: string, role: StaffRole) => api.post<{ user_id: string; role: StaffRole }>('/admin/team', { who, role }),
+    change: (userId: string, role: StaffRole) =>
+      api.patch<{ user_id: string; role: StaffRole }>(`/admin/team/${userId}`, { role }),
+    remove: (userId: string) => api.delete<{ user_id: string; role: string }>(`/admin/team/${userId}`),
+  },
+
   trustSafety: {
     overview: () => api.get<ModerationOverview>('/admin/moderation/overview'),
     reviewQueue: (limit = 50) =>

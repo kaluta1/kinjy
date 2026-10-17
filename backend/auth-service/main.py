@@ -20,7 +20,7 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session as OrmSession
 
 from common import events, mailer, security, settings
-from common.auth import AdminUser, CurrentUser, MaybeUser
+from common.auth import AdminUser, ModeratorUser, CurrentUser, MaybeUser, SuperAdminUser
 from common.database import get_db
 from common.ids import new_id
 from common.service import create_app
@@ -1122,7 +1122,7 @@ def run_age_transitions(_: AdminUser, db: OrmSession = Depends(get_db)):
 
 @app.get("/admin/age/review-queue", tags=["admin"])
 def age_review_queue(
-    _: AdminUser, status: str = "open", limit: int = 50, db: OrmSession = Depends(get_db)
+    _: ModeratorUser, status: str = "open", limit: int = 50, db: OrmSession = Depends(get_db)
 ):
     rows = db.scalars(
         select(models.AgeReviewCase)
@@ -1256,6 +1256,98 @@ def set_kyc(user_id: str, verified: bool, until: datetime | None = None, db: Orm
 # ---------------------------------------------------------------------------
 # Admin
 # ---------------------------------------------------------------------------
+
+# --- the team ----------------------------------------------------------------
+#
+# Who may use the console, and how far. Only a superadmin changes it. The role
+# travels in the access token and is re-read from here at every refresh, so a
+# change reaches the person within one token lifetime without signing out.
+
+STAFF_ROLES = ("moderator", "admin", "superadmin")
+
+
+class TeamMemberIn(BaseModel):
+    # An email address or a @handle, as the superadmin knows the person.
+    who: str = Field(min_length=2, max_length=320)
+    role: str = Field(pattern="^(moderator|admin|superadmin)$")
+
+
+class TeamRoleIn(BaseModel):
+    role: str = Field(pattern="^(moderator|admin|superadmin)$")
+
+
+def _team_out(user: models.User) -> dict:
+    return {
+        "user_id": user.id,
+        "email": user.email,
+        "handle": user.handle,
+        "display_name": user.display_name,
+        "role": user.role,
+    }
+
+
+def _superadmins(db: OrmSession) -> int:
+    return db.scalar(select(func.count()).select_from(models.User).where(models.User.role == "superadmin")) or 0
+
+
+@app.get("/admin/team", tags=["admin"])
+def team(principal: ModeratorUser, db: OrmSession = Depends(get_db)):
+    """Who is on the staff. Any staff member may see it; only a superadmin changes it."""
+    rows = db.scalars(
+        select(models.User).where(models.User.role.in_(STAFF_ROLES)).order_by(models.User.role, models.User.handle)
+    ).all()
+    return {"items": [_team_out(u) for u in rows], "can_manage": principal.is_superadmin}
+
+
+@app.post("/admin/team", status_code=201, tags=["admin"])
+def add_to_team(payload: TeamMemberIn, principal: SuperAdminUser, db: OrmSession = Depends(get_db)):
+    """Give somebody a staff role, found by email or @handle."""
+    who = payload.who.strip().lstrip("@").lower()
+    user = db.scalar(
+        select(models.User).where(or_(func.lower(models.User.email) == who, func.lower(models.User.handle) == who))
+    )
+    if user is None or user.status != "active":
+        raise HTTPException(status_code=404, detail="No active account with that email or username")
+    if user.id == principal.user_id:
+        raise HTTPException(status_code=400, detail="You cannot change your own role")
+    if user.role == "superadmin" and payload.role != "superadmin" and _superadmins(db) <= 1:
+        raise HTTPException(status_code=400, detail="Kinjy must keep at least one superadmin")
+    user.role = payload.role
+    db.commit()
+    log.info("team: %s set %s to %s", principal.user_id, user.id, payload.role)
+    return _team_out(user)
+
+
+@app.patch("/admin/team/{user_id}", tags=["admin"])
+def change_team_role(user_id: str, payload: TeamRoleIn, principal: SuperAdminUser, db: OrmSession = Depends(get_db)):
+    user = db.get(models.User, user_id)
+    if user is None or user.role not in STAFF_ROLES:
+        raise HTTPException(status_code=404, detail="Not on the team")
+    if user.id == principal.user_id:
+        raise HTTPException(status_code=400, detail="You cannot change your own role")
+    if user.role == "superadmin" and payload.role != "superadmin" and _superadmins(db) <= 1:
+        raise HTTPException(status_code=400, detail="Kinjy must keep at least one superadmin")
+    user.role = payload.role
+    db.commit()
+    log.info("team: %s changed %s to %s", principal.user_id, user.id, payload.role)
+    return _team_out(user)
+
+
+@app.delete("/admin/team/{user_id}", tags=["admin"])
+def remove_from_team(user_id: str, principal: SuperAdminUser, db: OrmSession = Depends(get_db)):
+    """Take somebody off the staff: they are an ordinary member again."""
+    user = db.get(models.User, user_id)
+    if user is None or user.role not in STAFF_ROLES:
+        raise HTTPException(status_code=404, detail="Not on the team")
+    if user.id == principal.user_id:
+        raise HTTPException(status_code=400, detail="You cannot remove yourself")
+    if user.role == "superadmin" and _superadmins(db) <= 1:
+        raise HTTPException(status_code=400, detail="Kinjy must keep at least one superadmin")
+    user.role = "member"
+    db.commit()
+    log.info("team: %s removed %s", principal.user_id, user.id)
+    return {"user_id": user.id, "role": "member"}
+
 
 @app.get("/admin/users", tags=["admin"])
 def admin_users(

@@ -20,9 +20,22 @@ class Principal:
     kyc_verified: bool
     lang: str
 
+    # The staff roles, from narrowest to widest:
+    # - moderator:  review and moderation (posts, appeals, memorial death
+    #               reports, contact risk, age review) - no money, no accounts;
+    # - admin:      the whole console;
+    # - superadmin: the console, and who is on the team.
+    @property
+    def is_moderator(self) -> bool:
+        return self.role in ("moderator", "admin", "superadmin")
+
     @property
     def is_admin(self) -> bool:
         return self.role in ("admin", "superadmin")
+
+    @property
+    def is_superadmin(self) -> bool:
+        return self.role == "superadmin"
 
 
 def _extract(authorization: str | None) -> str | None:
@@ -76,6 +89,18 @@ def require_admin(principal: Annotated[Principal, Depends(current_principal)]) -
     return principal
 
 
+def require_moderator(principal: Annotated[Principal, Depends(current_principal)]) -> Principal:
+    if not principal.is_moderator:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Moderator access required")
+    return principal
+
+
+def require_superadmin(principal: Annotated[Principal, Depends(current_principal)]) -> Principal:
+    if not principal.is_superadmin:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only a superadmin can do that")
+    return principal
+
+
 def require_kyc(principal: Annotated[Principal, Depends(current_principal)]) -> Principal:
     """Gate for anything that pays money out (affiliate participation, cashouts)."""
     if not principal.kyc_verified:
@@ -89,4 +114,6 @@ def require_kyc(principal: Annotated[Principal, Depends(current_principal)]) -> 
 CurrentUser = Annotated[Principal, Depends(current_principal)]
 MaybeUser = Annotated[Principal | None, Depends(optional_principal)]
 AdminUser = Annotated[Principal, Depends(require_admin)]
+ModeratorUser = Annotated[Principal, Depends(require_moderator)]
+SuperAdminUser = Annotated[Principal, Depends(require_superadmin)]
 KycUser = Annotated[Principal, Depends(require_kyc)]
