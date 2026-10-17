@@ -1264,3 +1264,5 @@ Three causes, all fixed:
   member's current access token keeps its old role until it expires (minutes).
   `e2e_graveyard.py` mints its admin token with the local JWT secret, so it
   only runs inside a container - pre-existing.
+- Deployed on kinjy.com 17/10 22:51 (auth, social, messaging, memorial,
+  gateway, web; backups `pre-team-20261017-2250`), with the mention change.
