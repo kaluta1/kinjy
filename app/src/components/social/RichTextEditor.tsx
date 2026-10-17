@@ -204,17 +204,69 @@ export default function RichTextEditor({
     fileRef.current.click()
   }
 
-  const embedVideo = () => {
+  /**
+   * Asking for an address, inside the editor rather than in window.prompt.
+   *
+   * The prompt took the focus out of the page, and with it the selection: the
+   * words a writer had highlighted to turn into a link were gone by the time
+   * the address came back, so the link landed at the start of the article.
+   * The selection is saved before asking and put back before acting.
+   */
+  const [asking, setAsking] = useState<null | 'link' | 'embed'>(null)
+  const [askValue, setAskValue] = useState('')
+
+  const ask = (what: 'link' | 'embed') => {
     saveSelection()
-    const raw = window.prompt('YouTube or Vimeo address')
+    setAskValue('')
+    setMediaError(null)
+    setAsking(what)
+  }
+
+  const restoreSelection = (): Range | null => {
+    const el = editorRef.current
+    const range = savedRange.current
+    if (!el || !range || !el.contains(range.startContainer)) return null
+    el.focus()
+    const selection = window.getSelection()
+    selection?.removeAllRanges()
+    selection?.addRange(range)
+    return range
+  }
+
+  const submitAsk = () => {
+    const raw = askValue.trim()
     if (!raw) return
-    const found = embedFromUrl(raw)
-    if (!found) {
-      setMediaError('That address is not a YouTube or Vimeo video.')
+    if (asking === 'embed') {
+      const found = embedFromUrl(raw)
+      if (!found) {
+        setMediaError('That address is not a YouTube or Vimeo video.')
+        return
+      }
+      setAsking(null)
+      insertFigure({ 'data-embed': found.provider, 'data-id': found.id }, null)
       return
     }
-    setMediaError(null)
-    insertFigure({ 'data-embed': found.provider, 'data-id': found.id }, null)
+    // A bare "kinjy.com/tree" is meant as a web address, not a relative path.
+    const href = /^(https?:|mailto:)/i.test(raw) ? raw : `https://${raw}`
+    setAsking(null)
+    const range = restoreSelection()
+    if (range && !range.collapsed) {
+      // Words were highlighted: they become the link.
+      document.execCommand('createLink', false, href)
+    } else {
+      // Nothing highlighted: the address itself goes in, where the caret was.
+      const anchor = document.createElement('a')
+      anchor.href = href
+      anchor.textContent = raw
+      if (range) {
+        range.insertNode(anchor)
+        range.setStartAfter(anchor)
+        range.collapse(true)
+      } else {
+        editorRef.current?.appendChild(anchor)
+      }
+    }
+    emit()
   }
 
   const refreshActive = () => {
@@ -241,13 +293,8 @@ export default function RichTextEditor({
     emit()
   }
 
-  const addLink = () => {
-    const url = window.prompt('Link address')
-    if (!url) return
-    editorRef.current?.focus()
-    document.execCommand('createLink', false, url)
-    emit()
-  }
+  const addLink = () => ask('link')
+  const embedVideo = () => ask('embed')
 
   /**
    * Paste as plain text: keeping source formatting is how junk markup arrives.
@@ -363,6 +410,50 @@ export default function RichTextEditor({
           </>
         )}
       </div>
+      {asking && (
+        // Not a <form>: the editor sits inside the composer's form, and a form
+        // inside a form is invalid and submits the wrong one.
+        <div className="flex flex-wrap items-center gap-2 border-b border-current/10 px-3 py-2">
+          <input
+            autoFocus
+            value={askValue}
+            onChange={(e) => setAskValue(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') {
+                e.preventDefault()
+                submitAsk()
+              }
+              if (e.key === 'Escape') {
+                e.preventDefault()
+                setAsking(null)
+                restoreSelection()
+              }
+            }}
+            placeholder={asking === 'link' ? 'https://…' : 'YouTube or Vimeo address'}
+            aria-label={asking === 'link' ? 'Link address' : 'Video address'}
+            className={cn('min-w-0 flex-1 rounded-full border border-current/15 bg-transparent px-3 py-1.5 text-sm focus:outline-none', tok.text)}
+          />
+          <button
+            type="button"
+            onMouseDown={(e) => e.preventDefault()}
+            onClick={submitAsk}
+            disabled={!askValue.trim()}
+            className="rounded-full bg-gradient-to-br from-gold-soft to-gold px-3.5 py-1.5 text-xs font-bold text-ink disabled:opacity-40"
+          >
+            {asking === 'link' ? 'Add link' : 'Embed'}
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              setAsking(null)
+              restoreSelection()
+            }}
+            className={cn('text-xs', tok.low)}
+          >
+            Cancel
+          </button>
+        </div>
+      )}
       {mediaError && (
         <p role="alert" className="border-b border-current/10 px-3 py-1.5 text-xs text-red-300">
           {mediaError}

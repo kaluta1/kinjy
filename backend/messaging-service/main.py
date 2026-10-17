@@ -2392,6 +2392,11 @@ async def send_message(
     # must show what they just sent, not only the one that sent it.
     participants = _participant_ids(db, conversation_id)
     frame = {
+            "mentions": (
+                _mention_names([_plain(message)[0]])
+                if not message.encrypted and "@" in (_plain(message)[0] or "")
+                else {}
+            ),
             "type": "message",
             "conversation_id": conversation_id,
             "message_id": message.id,
@@ -2480,25 +2485,40 @@ MENTION_RE = re.compile(r"(?:^|(?<=\s))@([a-z0-9_.]{2,40})", re.IGNORECASE)
 MAX_MENTIONS = 10
 
 
-def _mentioned_ids(text: str) -> dict[str, str]:
-    """{user_id: handle} for the @handles in a message, resolved by user-service."""
-    handles = []
-    for raw in MENTION_RE.findall(text or ""):
-        handle = raw.rstrip(".").lower()
-        if handle and handle not in handles:
-            handles.append(handle)
+def _handles_in(texts, limit: int = 50) -> list[str]:
+    handles: list[str] = []
+    for text in texts:
+        for raw in MENTION_RE.findall(text or ""):
+            handle = raw.rstrip(".").lower()
+            if handle and handle not in handles:
+                handles.append(handle)
+    return handles[:limit]
+
+
+def _profiles_by_handle(handles: list[str]) -> dict[str, dict]:
     if not handles:
         return {}
     try:
-        response = httpx.post(
-            f"{USER_URL}/internal/profiles/by-handle", json={"handles": handles[:MAX_MENTIONS]}, timeout=5
-        )
+        response = httpx.post(f"{USER_URL}/internal/profiles/by-handle", json={"handles": handles}, timeout=5)
         response.raise_for_status()
-        profiles = response.json().get("profiles", {})
+        return response.json().get("profiles", {}) or {}
     except Exception as exc:
         log.warning("could not resolve mentions: %s", exc)
         return {}
+
+
+def _mentioned_ids(text: str) -> dict[str, str]:
+    """{user_id: handle} for the @handles in a message, resolved by user-service."""
+    profiles = _profiles_by_handle(_handles_in([text], MAX_MENTIONS))
     return {p["user_id"]: h for h, p in profiles.items() if p and p.get("user_id")}
+
+
+def _mention_names(texts) -> dict[str, str]:
+    """{handle: display name} for the @handles in some messages, so a thread
+    can show who was named as well as their username. A handle nobody has is
+    absent, and is drawn as typed."""
+    profiles = _profiles_by_handle(_handles_in(texts))
+    return {h: p.get("display_name") for h, p in profiles.items() if p and p.get("display_name")}
 
 
 async def _notify_mentions(
@@ -2712,6 +2732,10 @@ def list_messages(
         # every member of the room - which, for a group that holds the whole
         # platform, is most of the platform. A system line has no sender.
         "profiles": _profiles({r.sender_id for r in rows if r.sender_id}),
+        # handle -> name for everybody @mentioned on this page, in one call.
+        "mentions": _mention_names(
+            _plain(r)[0] for r in rows if not r.encrypted and not r.deleted_at and r.kind != "system"
+        ),
     }
 
 

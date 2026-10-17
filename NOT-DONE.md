@@ -1122,3 +1122,23 @@ What came from where: replies, the composer's emoji/sticker panel, the redesign 
   media_opaque`), verified. `e2e_article_edit.py` 14/14.
 - Still 24 hours to edit, as before. A detached picture's file is not
   deleted from media-service.
+
+## Links on highlighted words, mentions with usernames, the group dialog (17/10)
+
+- ~~A link could not be put on highlighted words in an article~~ (reported by
+  a member: "Open the Kinjy Family Tree" -> kinjy.com/tree landed at the start
+  of the article). `window.prompt` took the focus, the selection went with
+  it, and `createLink` ran on an empty caret at the top. The address is now
+  asked for in a field under the toolbar; the selection is saved before and
+  restored after. Nothing highlighted inserts the address itself where the
+  caret was. A bare `kinjy.com/tree` becomes `https://kinjy.com/tree`. The
+  video-embed address uses the same field. (That member also could not edit
+  the article: fixed by the edit dialog, not yet deployed when reported.)
+- ~~Mentions showed a name or a username, never both.~~ Posts, comments and
+  chat now draw "Name @username" (`MentionLink`). Chat pages and live frames
+  carry `mentions` (handle -> name), resolved in one call per page.
+- ~~Group information replaced the conversation as a side panel.~~ It is a
+  dialog over the thread: cover across the top, the group photo over its
+  edge, name, public/private and member count, description, then cards for
+  sharing and privacy and for members. The large photo/cover pickers only
+  appear in edit mode. Checked in dark and light themes.

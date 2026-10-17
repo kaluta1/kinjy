@@ -558,6 +558,9 @@ export default function Messages() {
    * a handful of people, and they are the only ones a thread has to name.
    */
   const [senders, setSenders] = useState<Record<string, PersonBrief>>({})
+  // handle -> name for the people @mentioned in the open thread, so a mention
+  // shows who it is as well as their username.
+  const [mentionNames, setMentionNames] = useState<Record<string, string>>({})
   const [peer, setPeer] = useState('')
   const [composing, setComposing] = useState(false)
   const [creatingGroup, setCreatingGroup] = useState(false)
@@ -683,6 +686,7 @@ export default function Messages() {
         if (activeIdRef.current !== conversationId) return
         scrollMode.current = 'opened'
         setSenders(page.profiles ?? {})
+        setMentionNames(page.mentions ?? {})
         setMessages(page.items)
         setHasOlder(page.items.length >= PAGE)
         markRead(conversationId)
@@ -736,6 +740,7 @@ export default function Messages() {
       if (activeIdRef.current !== conversationId) return
       // Older history can be from people who have not spoken since.
       setSenders((current) => ({ ...current, ...(page.profiles ?? {}) }))
+      setMentionNames((current) => ({ ...current, ...(page.mentions ?? {}) }))
       const el = listRef.current
       scrollMode.current = { restoreFrom: el ? el.scrollHeight - el.scrollTop : 0 }
       setMessages((current) => mergeMessages(current, page.items))
@@ -1227,6 +1232,9 @@ export default function Messages() {
   const { connected } = useRealtime((event) => {
     switch (event.type) {
       case 'message': {
+        if (event.mentions && Object.keys(event.mentions).length) {
+          setMentionNames((current) => ({ ...current, ...event.mentions }))
+        }
         if (event.conversation_id === activeIdRef.current && event.message_id) {
           setMessages((current) =>
             mergeMessages(current, [
@@ -1905,9 +1913,8 @@ export default function Messages() {
           </div>
         </div>
 
-        {/* The group's own screen, in place of the thread. On a phone there
-            is no room for both, and on a desktop a third column would squeeze
-            the messages - and you are looking at the group, not at them. */}
+        {/* The group's information, as a dialog over the thread (GroupPanel
+            renders itself into document.body). */}
         {showGroup && active?.kind === 'group' && user && (
           <GroupPanel
             conversation={active}
@@ -1921,7 +1928,6 @@ export default function Messages() {
         <div
           className={cn(
             'cloud-card relative flex min-h-0 min-w-0 flex-col overflow-hidden !rounded-none',
-            showGroup && active?.kind === 'group' && 'hidden',
             !showThread && 'hidden',
             dragging && 'ring-2 ring-inset ring-gold/50',
           )}
@@ -2326,7 +2332,7 @@ export default function Messages() {
                                   Encrypted — only your device can read this.
                                 </span>
                               ) : (
-                                formatChatText(message.body ?? '', message.id)
+                                formatChatText(message.body ?? '', message.id, mentionNames)
                               )}
                               {showMeta && (
                                 <>

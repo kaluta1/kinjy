@@ -1,3 +1,4 @@
+import MentionLink from './MentionLink'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { CornerDownRight, Loader2, Send, SmilePlus, ThumbsUp } from 'lucide-react'
 import { useAppTheme } from '@/components/appdemo/theme'
@@ -76,16 +77,9 @@ function withMentions(body: string, names: Record<string, string> = {}) {
           const trailing = part.match(/\.+$/)?.[0] ?? ''
           const token = trailing ? part.slice(0, -trailing.length) : part
           const handle = token.slice(1).toLowerCase()
-          const name = names[handle]
           return (
             <span key={index}>
-              <Link
-                to={`/u/${handle}`}
-                onClick={(event) => event.stopPropagation()}
-                className="font-semibold text-gold-soft hover:underline"
-              >
-                {name || token}
-              </Link>
+              <MentionLink handle={handle} name={names[handle]} className="text-gold-soft" stopPropagation />
               {trailing}
             </span>
           )

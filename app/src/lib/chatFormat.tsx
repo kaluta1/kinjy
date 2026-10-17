@@ -1,4 +1,4 @@
-import { Link } from 'react-router'
+import MentionLink from '@/components/social/MentionLink'
 import type { ReactNode } from 'react'
 
 /**
@@ -141,7 +141,7 @@ function splitTrailing(raw: string): { href: string; text: string; trailing: str
  * Only at the start or after a space, as when typed: an email address has an
  * @ in it and names nobody. A trailing dot is the sentence's full stop.
  */
-function mentionify(text: string, key: string): ReactNode[] {
+function mentionify(text: string, key: string, names: Record<string, string>): ReactNode[] {
   const parts = text.split(/(^|\s)(@[a-z0-9_.]{2,40})/i)
   if (parts.length === 1) return [text]
   return parts.map((part, index) => {
@@ -149,11 +149,10 @@ function mentionify(text: string, key: string): ReactNode[] {
     if (index % 3 !== 2) return part
     const trailing = /\.+$/.exec(part)?.[0] ?? ''
     const token = trailing ? part.slice(0, -trailing.length) : part
+    const handle = token.slice(1).toLowerCase()
     return (
       <span key={`${key}-m${index}`}>
-        <Link to={`/u/${token.slice(1).toLowerCase()}`} className="font-semibold underline-offset-2 hover:underline">
-          {token}
-        </Link>
+        <MentionLink handle={handle} name={names[handle]} className="underline-offset-2" />
         {trailing}
       </span>
     )
@@ -161,12 +160,12 @@ function mentionify(text: string, key: string): ReactNode[] {
 }
 
 /** Addresses inside a run of plain text, as links. */
-function linkify(text: string, key: string): ReactNode[] {
+function linkify(text: string, key: string, names: Record<string, string> = {}): ReactNode[] {
   const parts = text.split(LINK_RE)
-  if (parts.length === 1) return mentionify(text, key)
+  if (parts.length === 1) return mentionify(text, key, names)
   return parts.flatMap((part, index) => {
     if (!part) return null
-    if (!/^(?:https?:\/\/|www\.)/i.test(part)) return mentionify(part, `${key}-t${index}`)
+    if (!/^(?:https?:\/\/|www\.)/i.test(part)) return mentionify(part, `${key}-t${index}`, names)
     const { href, text: label, trailing } = splitTrailing(part)
     if (!label) return part
     return (
@@ -193,14 +192,14 @@ function linkify(text: string, key: string): ReactNode[] {
  * `whitespace-pre-wrap`, so a line break is a line break without a `<br>` per
  * paragraph.
  */
-export function formatChatText(body: string, keyPrefix = 'f'): ReactNode[] {
+export function formatChatText(body: string, keyPrefix = 'f', names: Record<string, string> = {}): ReactNode[] {
   const out: ReactNode[] = []
   let plain = ''
   let index = 0
 
   const flush = () => {
     if (!plain) return
-    out.push(...linkify(plain, `${keyPrefix}-${out.length}`))
+    out.push(...linkify(plain, `${keyPrefix}-${out.length}`, names))
     plain = ''
   }
 
@@ -211,7 +210,7 @@ export function formatChatText(body: string, keyPrefix = 'f'): ReactNode[] {
       const key = `${keyPrefix}-${index}`
       out.push(
         found.mark.render(
-          found.mark.literal ? found.inner : formatChatText(found.inner, `${key}i`),
+          found.mark.literal ? found.inner : formatChatText(found.inner, `${key}i`, names),
           key,
         ),
       )

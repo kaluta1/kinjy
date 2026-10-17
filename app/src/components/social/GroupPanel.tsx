@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { Link } from 'react-router'
-import { Check, Globe, Link2, Lock, LogOut, Pencil, Pin, PinOff, Search, ShieldCheck, UserPlus, X } from 'lucide-react'
+import { Check, Globe, UsersRound, Link2, Lock, LogOut, Pencil, Pin, PinOff, Search, ShieldCheck, UserPlus, X } from 'lucide-react'
 import { copyLink, siteOrigin } from '@/lib/share'
 import MemberAvatar from '@/components/social/MemberAvatar'
 import { useAppTheme } from '@/components/appdemo/theme'
@@ -25,57 +25,6 @@ import { cn } from '@/lib/utils'
  * nobody into a room with a minor in it, comes in by link - the server says
  * so in one sentence that does not say which.
  */
-function GroupAccessDialog({
-  conversation,
-  runs,
-  onChanged,
-  onClose,
-}: {
-  conversation: Conversation
-  runs: boolean
-  onChanged: () => void
-  onClose: () => void
-}) {
-  const { tok } = useAppTheme()
-  useEffect(() => {
-    const onKey = (event: KeyboardEvent) => event.key === 'Escape' && onClose()
-    window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
-  }, [onClose])
-  return createPortal(
-    <div
-      role="dialog"
-      aria-modal="true"
-      aria-label="Share, privacy and pin"
-      className="fixed inset-0 z-[80] flex items-center justify-center bg-black/50 p-4"
-      onClick={onClose}
-    >
-      <div
-        onClick={(event) => event.stopPropagation()}
-        className={cn('max-h-[80svh] w-full max-w-md overflow-hidden rounded-2xl', tok.card)}
-      >
-        <header className="flex items-center justify-between gap-2 border-b border-[var(--cloud-border)] px-4 py-3">
-          <h2 className={cn('min-w-0 truncate text-sm font-semibold', tok.text)}>
-            {conversation.title ?? 'Group'}: share, privacy and pin
-          </h2>
-          <button
-            type="button"
-            onClick={onClose}
-            aria-label="Close"
-            className={cn('rounded-full p-1.5 hover:bg-text-hi/[0.07]', tok.mid)}
-          >
-            <X size={16} aria-hidden="true" />
-          </button>
-        </header>
-        <div className="max-h-[calc(80svh-56px)] overflow-y-auto p-4">
-          <GroupAccess conversation={conversation} runs={runs} onChanged={onChanged} />
-        </div>
-      </div>
-    </div>,
-    document.body,
-  )
-}
-
 function GroupAccess({
   conversation,
   runs,
@@ -297,18 +246,6 @@ export default function GroupPanel({
 
   const runs = conversation.my_role === 'owner' || conversation.my_role === 'admin'
 
-  // Privacy, the link, pins and join requests live in their own dialog; the
-  // panel shows a one-line summary, with the queue size so an admin notices.
-  const [accessOpen, setAccessOpen] = useState(false)
-  const [waiting, setWaiting] = useState(0)
-  const refreshWaiting = useCallback(() => {
-    if (!runs || conversation.is_welcome) return
-    kaluta.messages
-      .requests(conversation.id)
-      .then((page) => setWaiting(page.items.length))
-      .catch(() => setWaiting(0))
-  }, [conversation.id, conversation.is_welcome, runs])
-  useEffect(refreshWaiting, [refreshWaiting])
 
   const load = useCallback(() => {
     kaluta.messages
@@ -384,30 +321,65 @@ export default function GroupPanel({
     }
   }
 
-  return (
-    <aside
+  // A dialog over the conversation, not a panel in place of it: the room
+  // stays where it was, and closing this goes straight back to it.
+  return createPortal(
+    <div
+      role="dialog"
+      aria-modal="true"
       aria-label="Group information"
-      className={cn('flex min-h-0 w-full flex-col overflow-hidden', tok.card)}
+      className="fixed inset-0 z-[80] flex items-end justify-center bg-black/55 backdrop-blur-[2px] sm:items-center sm:p-6"
+      onClick={onClose}
     >
-      <header className="flex items-center gap-2 border-b border-[var(--cloud-border)] px-4 py-3">
-        <h2 className={cn('min-w-0 flex-1 truncate text-sm font-semibold', tok.text)}>
-          Group information
-        </h2>
-        <button
-          type="button"
-          onClick={onClose}
-          aria-label="Close group information"
-          className={cn('rounded-full p-1.5 hover:bg-text-hi/[0.07]', tok.mid)}
-        >
-          <X size={16} aria-hidden="true" />
-        </button>
-      </header>
+    <div
+      onClick={(event) => event.stopPropagation()}
+      className={cn(
+        'flex max-h-[94svh] w-full max-w-2xl flex-col overflow-hidden rounded-t-3xl shadow-2xl sm:max-h-[88svh] sm:rounded-3xl',
+        tok.card,
+      )}
+    >
+      <div className="min-h-0 flex-1 overflow-y-auto">
+        {/* The group's face: its cover across the top, its photo over the
+            edge of it. A group with neither gets the brand gradient rather
+            than an empty grey box. */}
+        <div className="relative">
+          {conversation.cover_url ? (
+            <img src={conversation.cover_url} alt="" className="h-36 w-full object-cover sm:h-48" />
+          ) : (
+            <div
+              aria-hidden="true"
+              className="h-36 w-full bg-gradient-to-r from-[#F0C878] via-[#F6EBD3] to-[#9CC3E6] sm:h-48"
+            />
+          )}
+          <div aria-hidden="true" className="pointer-events-none absolute inset-x-0 bottom-0 h-16 bg-gradient-to-t from-black/35 to-transparent" />
+          <button
+            type="button"
+            onClick={onClose}
+            aria-label="Close group information"
+            className="absolute end-3 top-3 grid h-9 w-9 place-items-center rounded-full bg-black/45 text-white backdrop-blur hover:bg-black/60"
+          >
+            <X size={17} aria-hidden="true" />
+          </button>
+          <div className="absolute -bottom-11 start-5 sm:start-7">
+            {conversation.avatar_url ? (
+              <img
+                src={conversation.avatar_url}
+                alt=""
+                className="h-24 w-24 rounded-full object-cover shadow-lg ring-4 ring-[var(--cloud)]"
+              />
+            ) : (
+              <span className="grid h-24 w-24 place-items-center rounded-full bg-gold/25 text-gold-soft shadow-lg ring-4 ring-[var(--cloud)]">
+                <UsersRound size={38} aria-hidden="true" />
+              </span>
+            )}
+          </div>
+        </div>
 
-      <div className="min-h-0 flex-1 overflow-y-auto p-4">
+        <div className="px-5 pb-5 pt-14 sm:px-7">
         {/* The group's own face. Above the name because that is the order it
             is read in, and shown to everybody - only an admin gets the
             pickers, because only an admin can change them. */}
-        {runs ? (
+        {editing && runs ? (
           <div className="mb-5 space-y-5">
             <ProfileImagePicker
               purpose="avatar"
@@ -422,29 +394,7 @@ export default function GroupPanel({
               onChange={changeImage('cover_asset_id')}
             />
           </div>
-        ) : (
-          (conversation.cover_url || conversation.avatar_url) && (
-            <div className="mb-4">
-              {conversation.cover_url && (
-                <img
-                  src={conversation.cover_url}
-                  alt=""
-                  className="h-24 w-full rounded-xl object-cover"
-                />
-              )}
-              {conversation.avatar_url && (
-                <img
-                  src={conversation.avatar_url}
-                  alt=""
-                  className={cn(
-                    'h-16 w-16 rounded-full border-2 border-[var(--cloud-border)] object-cover',
-                    conversation.cover_url ? '-mt-8 ms-3' : '',
-                  )}
-                />
-              )}
-            </div>
-          )
-        )}
+        ) : null}
 
         {editing ? (
           <form
@@ -511,61 +461,79 @@ export default function GroupPanel({
         ) : (
           <div>
             <div className="flex items-start gap-2">
-              <h3 className={cn('min-w-0 flex-1 text-[1.05rem] font-bold', tok.text)}>
+              <h3 className={cn('min-w-0 flex-1 text-[1.6rem] font-bold leading-tight tracking-[-0.02em]', tok.text)}>
                 {conversation.title ?? 'Group'}
               </h3>
-              {runs && (
-                <button
-                  type="button"
-                  onClick={() => setEditing(true)}
-                  aria-label="Edit the group"
-                  className={cn('shrink-0 rounded-full p-1.5 hover:bg-text-hi/[0.07]', tok.mid)}
-                >
-                  <Pencil size={14} aria-hidden="true" />
-                </button>
-              )}
             </div>
-            <p className={cn('mt-1 whitespace-pre-wrap text-[0.85rem]', tok.low)}>
+            <p className={cn('mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs', tok.low)}>
+              <span className="inline-flex items-center gap-1">
+                {(conversation.privacy ?? 'private') === 'public' || conversation.is_welcome ? (
+                  <Globe size={12} aria-hidden="true" />
+                ) : (
+                  <Lock size={12} aria-hidden="true" />
+                )}
+                {conversation.is_welcome
+                  ? 'Everybody on Kinjy'
+                  : (conversation.privacy ?? 'private') === 'public'
+                    ? 'Public group'
+                    : 'Private group'}
+              </span>
+              <span aria-hidden="true">·</span>
+              <span>
+                {total || conversation.participant_count || 0}{' '}
+                {(total || conversation.participant_count) === 1 ? 'member' : 'members'}
+              </span>
+              {conversation.pinned && (
+                <>
+                  <span aria-hidden="true">·</span>
+                  <span className="inline-flex items-center gap-1 text-gold-soft">
+                    <Pin size={11} aria-hidden="true" />
+                    Pinned
+                  </span>
+                </>
+              )}
+            </p>
+            <p className={cn('mt-3 whitespace-pre-wrap text-[0.95rem] leading-relaxed', tok.mid)}>
               {conversation.description || 'No description yet.'}
             </p>
+            {runs && (
+              <button
+                type="button"
+                onClick={() => setEditing(true)}
+                className={cn(
+                  'mt-3 inline-flex items-center gap-1.5 rounded-full border border-[var(--cloud-border)] px-3 py-1 text-xs font-semibold hover:border-gold/40',
+                  tok.mid,
+                )}
+              >
+                <Pencil size={12} aria-hidden="true" />
+                Edit name, description and pictures
+              </button>
+            )}
           </div>
         )}
 
+        {/* Sharing, privacy, the pin and the queue, in this dialog rather
+            than a second one stacked on it. */}
         {!conversation.is_welcome && (
-          <button
-            type="button"
-            onClick={() => setAccessOpen(true)}
-            className="mt-5 flex w-full items-center gap-2.5 rounded-xl border border-[var(--cloud-border)] px-3 py-2.5 text-start hover:bg-text-hi/[0.04]"
-          >
-            <Link2 size={16} className="shrink-0 text-gold-soft" aria-hidden="true" />
-            <span className="min-w-0 flex-1">
-              <span className={cn('block text-sm font-semibold', tok.text)}>Share, privacy and pin</span>
-              <span className={cn('block text-xs', tok.low)}>
-                {(conversation.privacy ?? 'private') === 'public' ? 'Public' : 'Private'}
-                {conversation.pinned ? ' · Pinned' : ''}
-                {runs && waiting > 0 ? ` · ${waiting} waiting to join` : ''}
-              </span>
-            </span>
-          </button>
-        )}
-        {accessOpen && (
-          <GroupAccessDialog
-            conversation={conversation}
-            runs={runs}
-            onClose={() => {
-              setAccessOpen(false)
-              refreshWaiting()
-            }}
-            onChanged={() => {
-              load()
-              onChanged()
-              refreshWaiting()
-            }}
-          />
+          <section className="mt-6 rounded-2xl border border-[var(--cloud-border)] bg-text-hi/[0.025] p-4">
+            <h3 className={cn('mb-3 flex items-center gap-2 text-sm font-semibold', tok.text)}>
+              <Link2 size={15} className="text-gold-soft" aria-hidden="true" />
+              Sharing and privacy
+            </h3>
+            <GroupAccess
+              conversation={conversation}
+              runs={runs}
+              onChanged={() => {
+                load()
+                onChanged()
+              }}
+            />
+          </section>
         )}
 
-        <div className="mt-5 flex items-center justify-between gap-2">
-          <h3 className={cn('text-[0.8rem] font-semibold', tok.low)}>
+        <section className="mt-4 rounded-2xl border border-[var(--cloud-border)] bg-text-hi/[0.025] p-4">
+        <div className="flex items-center justify-between gap-2">
+          <h3 className={cn('text-sm font-semibold', tok.text)}>
             {members ? `${total} ${total === 1 ? 'member' : 'members'}` : 'Members'}
           </h3>
           {runs && (
@@ -730,10 +698,13 @@ export default function GroupPanel({
           </button>
         )}
 
+        </section>
+
         {note && <p className="mt-3 text-xs text-amber-200">{note}</p>}
+        </div>
       </div>
 
-      <footer className="border-t border-[var(--cloud-border)] p-3">
+      <footer className="border-t border-[var(--cloud-border)] px-5 py-3 sm:px-7">
         <button
           type="button"
           disabled={busy === 'leave'}
@@ -753,7 +724,9 @@ export default function GroupPanel({
           Leave this group
         </button>
       </footer>
-    </aside>
+    </div>
+    </div>,
+    document.body,
   )
 }
 

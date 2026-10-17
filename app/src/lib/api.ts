@@ -2295,7 +2295,7 @@ export const kaluta = {
       if (options.after) query.set('after', options.after)
       if (options.before) query.set('before', options.before)
       const qs = query.toString()
-      return api.get<{ items: Message[]; profiles?: Record<string, PersonBrief> }>(
+      return api.get<{ items: Message[]; profiles?: Record<string, PersonBrief>; mentions?: Record<string, string> }>(
         `/conversations/${conversationId}/messages${qs ? `?${qs}` : ''}`,
       )
     },

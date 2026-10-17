@@ -1,3 +1,4 @@
+import MentionLink from './MentionLink'
 import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Check, Columns2, Eye, EyeOff, Flag, HelpCircle, Languages, Link2, Lock, MapPin, MessageCircle, Pencil, Repeat2, Share2, SlidersHorizontal, Trash2 } from 'lucide-react'
@@ -119,15 +120,9 @@ function withHashtags(text: string, mentions: Record<string, string> = {}) {
         const trailing = part.match(/\.+$/)?.[0] ?? ''
         const token = trailing ? part.slice(0, -trailing.length) : part
         const handle = token.slice(1).toLowerCase()
-        const named = mentions[handle]
         return (
           <span key={index}>
-            <Link
-              to={`/u/${handle}`}
-              className="font-semibold text-gold-soft hover:underline"
-            >
-              {named || token}
-            </Link>
+            <MentionLink handle={handle} name={mentions[handle]} className="text-gold-soft" />
             {trailing}
           </span>
         )
