@@ -10,7 +10,7 @@ Rules for this file:
 - Anything that cannot be verified in the current environment is marked
   **unverified** rather than assumed good.
 
-Last reviewed: 2026-08-19 (live on kinjy.com; notifications, governance, One-to-Many, disappearing messages)
+Last reviewed: 2026-10-18 (open communities that publish publicly)
 
 ---
 
@@ -242,6 +242,12 @@ Checked on production 2026-08-20, promise by promise.
   Labelled as such in the UI.
 - **Family tree**: relationship labels stop at "cousin (degree N), M removed" and
   otherwise say "related through N steps" rather than inventing a term.
+- **Open communities**: somebody reading one they have not joined is stopped
+  before reacting — the button says "Join this community to take part" instead
+  of acting. The *comment box inside the post dialog* is still offered and
+  refused by the server after they type, with the same sentence. Correct, and
+  one step later than it should be. Reading, the share preview and every
+  server-side refusal are verified in `backend/tests/e2e_open_community.py`.
 
 ## 6. Unverified in this environment
 

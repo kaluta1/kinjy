@@ -120,8 +120,29 @@ r = c.get("/feed?mode=new", headers=auth(outsider))
 check("somebody who never joined does not", r.status_code == 200 and not any(
     i["id"] == post_id for i in r.json().get("items", [])), (r.status_code, r.text[:200]))
 
+# An open community publishes publicly by default, so a link to one of its
+# posts opens for somebody who never joined - the same answer its page has
+# always given a visitor. This file used to assert the opposite two lines
+# after asserting the page was readable, which is the inconsistency the
+# setting exists to end. What is *not* open is taking part.
 r = c.get(f"/posts/{post_id}", headers=auth(outsider))
-check("nor by asking for the post directly", r.status_code == 404, (r.status_code, r.text[:160]))
+check("and a link to the post opens, as its page already did",
+      r.status_code == 200, (r.status_code, r.text[:160]))
+r = c.post(f"/posts/{post_id}/like", headers=auth(outsider))
+check("but somebody who never joined cannot like it",
+      r.status_code == 403, (r.status_code, r.text[:160]))
+r = c.post(f"/posts/{post_id}/comments", headers=auth(outsider), json={"body": "hello"})
+check("nor comment on it", r.status_code == 403, (r.status_code, r.text[:160]))
+
+# Closed, the link closes with the page. Both halves of the switch are
+# covered in full by tests/e2e_open_community.py.
+r = c.patch(f"/communities/{community}/public-content", headers=auth(owner),
+            json={"public_content": False})
+check("the owner can close the content", r.status_code == 200, (r.status_code, r.text[:160]))
+r = c.get(f"/posts/{post_id}", headers=auth(outsider))
+check("and then the link answers 404 again", r.status_code == 404, (r.status_code, r.text[:160]))
+c.patch(f"/communities/{community}/public-content", headers=auth(owner),
+        json={"public_content": True})
 
 print("\n== leaving takes the posts away again")
 r = c.post(f"/communities/{community}/leave", headers=auth(member))

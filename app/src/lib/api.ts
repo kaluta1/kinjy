@@ -2065,6 +2065,12 @@ export const kaluta = {
         name: string
         description: string
         kind: string
+        /**
+         * An open community whose content anybody may read: its page, a link
+         * to one of its posts, and a preview when that link is shared off
+         * Kinjy. Reading only — taking part still needs joining.
+         */
+        public_content?: boolean
         price_usd: string | null
         members_count: number
         my_role: string | null
@@ -2114,6 +2120,16 @@ export const kaluta = {
     setPrivacy: (id: string, kind: 'public' | 'private' | 'secret') =>
       api.patch<{ kind: string; changed: boolean; admitted: number }>(`/communities/${id}/privacy`, { kind }),
     /**
+     * Whether an open community's content can be read without joining.
+     * Owner and moderators, and only on an open community — the server
+     * answers 409 for any other kind.
+     */
+    setPublicContent: (id: string, publicContent: boolean) =>
+      api.patch<{ public_content: boolean; changed: boolean }>(
+        `/communities/${id}/public-content`,
+        { public_content: publicContent },
+      ),
+    /**
      * The path to send somebody. For a secret community it carries the access
      * code that lets the page open for them, and only a member can get it.
      */
@@ -2131,7 +2147,20 @@ export const kaluta = {
      */
     feed: (id: string, limit = 20, offset = 0) =>
       api.get<{
-        community: { id: string; name: string; slug: string; kind: string; members_count: number }
+        community: {
+          id: string
+          name: string
+          slug: string
+          kind: string
+          members_count: number
+          public_content?: boolean
+        }
+        /**
+         * Whether this reader may take part in what they are reading. False
+         * for anybody who has not joined an open community that publishes
+         * publicly — they can read every word and write none of it.
+         */
+        can_engage?: boolean
         total: number
         items: Post[]
       }>(`/feed/community/${id}?limit=${limit}&offset=${offset}`, { auth: false }),

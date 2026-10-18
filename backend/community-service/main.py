@@ -95,6 +95,10 @@ MIGRATIONS = [
     f"CREATE INDEX IF NOT EXISTS ix_communities_invite_code ON {models.SCHEMA}.communities (invite_code)",
     # Groups pinned to a member's sidebar. Additive and nullable.
     f"ALTER TABLE {models.SCHEMA}.memberships ADD COLUMN IF NOT EXISTS pinned_at TIMESTAMPTZ",
+    # Whether an open community's content may be read without joining. TRUE for
+    # every row that already exists, which is what they already did.
+    f"ALTER TABLE {models.SCHEMA}.communities "
+    "ADD COLUMN IF NOT EXISTS public_content BOOLEAN NOT NULL DEFAULT TRUE",
 ]
 
 app = create_app(
@@ -663,6 +667,10 @@ def get_community(
         "name": community.name,
         "description": community.description,
         "kind": community.kind,
+        # Only an open community can publish publicly, so the flag is reported
+        # as the answer rather than as the stored value: a private community
+        # that happens to carry a stale TRUE must not read as public anywhere.
+        "public_content": bool(community.public_content) and community.kind == "public",
         "price_usd": str(community.price_usd) if community.price_usd is not None else None,
         "country": community.country,
         "city": community.city,
@@ -818,6 +826,52 @@ def set_privacy(
         )
     _live(f"community:{community.id}", "community.privacy", kind=community.kind)
     return {"kind": community.kind, "changed": True, "admitted": len(admitted)}
+
+
+class PublicContentIn(BaseModel):
+    public_content: bool
+
+
+@app.patch("/communities/{community_id}/public-content", tags=["governance"])
+def set_public_content(
+    community_id: str,
+    payload: PublicContentIn,
+    principal: CurrentUser,
+    db: OrmSession = Depends(get_db),
+):
+    """Whether an open community's content can be read without joining.
+
+    On, what is posted here opens for anybody: its page, a link to one of its
+    posts, and a preview when that link is shared off Kinjy. That is what most
+    open communities want - a group nobody can read before joining cannot be
+    judged worth joining, and a link that answers "not found" is a link nobody
+    shares twice.
+
+    Off, the content is for members, and the page closes with it. Reading is
+    the only thing this governs: liking, commenting and posting have always
+    been for members, whichever way this is set.
+
+    Only for an open community. A private, secret or paid one is defined by
+    its content being for members, so there is nothing here to choose - and
+    offering the switch would suggest otherwise.
+    """
+    community = _require_steward(db, community_id, principal.user_id)
+    if community.kind != "public":
+        raise HTTPException(
+            status_code=409,
+            detail="Only an open community can publish publicly. Make it public first.",
+        )
+
+    if bool(community.public_content) == payload.public_content:
+        return {"public_content": payload.public_content, "changed": False}
+
+    community.public_content = payload.public_content
+    db.commit()
+    # Everybody reading the page hears, because what they may do there has
+    # just changed underneath them.
+    _live(f"community:{community.id}", "community.public_content",
+          public_content=community.public_content)
+    return {"public_content": community.public_content, "changed": True}
 
 
 @app.post("/communities/{community_id}/share-link", tags=["communities"])
@@ -1749,6 +1803,10 @@ def community_summary(community_id: str, db: OrmSession = Depends(get_db)):
         "slug": community.slug,
         "name": community.name,
         "kind": community.kind,
+        # Whether somebody who has not joined may read what is posted here.
+        # Only ever true for an open community: closing a community has to
+        # close its content with it, or "private" would mean nothing.
+        "public_content": bool(community.public_content) and community.kind == "public",
         "owner_id": community.owner_id,
         "members_count": community.members_count,
     }

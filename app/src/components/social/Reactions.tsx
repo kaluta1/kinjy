@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { Heart, Lightbulb, PartyPopper, ThumbsUp, HandHeart } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
 import { useAppTheme } from '@/components/appdemo/theme'
-import { kaluta, type ReactionSummary } from '@/lib/api'
+import { ApiError, kaluta, type ReactionSummary } from '@/lib/api'
 import ReactorList from './ReactorList'
 import { cn } from '@/lib/utils'
 
@@ -30,12 +30,22 @@ export default function Reactions({
   summary,
   onChange,
   isAuthor = false,
+  canEngage = true,
+  onRefused,
 }: {
   postId: string
   summary: ReactionSummary
   onChange: (next: ReactionSummary) => void
   /** Whether the viewer wrote this post: only they may see who reacted. */
   isAuthor?: boolean
+  /**
+   * Whether this viewer may react at all. False for somebody reading an open
+   * community they have not joined: every word is theirs to read and none of
+   * it is theirs to answer.
+   */
+  canEngage?: boolean
+  /** Why a reaction did not happen, for the caller to show where it makes sense. */
+  onRefused?: (reason: string) => void
 }) {
   const { tok } = useAppTheme()
   const [open, setOpen] = useState(false)
@@ -60,6 +70,13 @@ export default function Reactions({
 
   const react = async (kind: string) => {
     if (busy) return
+    // Said before the tap rather than undone after it: an optimistic count
+    // that appears and vanishes reads as the page breaking.
+    if (!canEngage) {
+      setOpen(false)
+      onRefused?.('Join this community to take part in it.')
+      return
+    }
     setBusy(true)
     setOpen(false)
     // Optimistic: reflect the tap now, reconcile with the server's counts after.
@@ -76,8 +93,12 @@ export default function Reactions({
     try {
       const result = await kaluta.posts.react(postId, kind)
       onChange(result.reactions)
-    } catch {
+    } catch (err) {
       onChange(summary) // roll back
+      // And say why. A reaction that silently undoes itself looks like the
+      // page is broken, and the server's refusal is usually something the
+      // reader can act on - "join this community" most of all.
+      onRefused?.(err instanceof ApiError ? err.message : 'That reaction did not go through.')
     } finally {
       setBusy(false)
     }

@@ -37,6 +37,18 @@ class Community(Base):
     description: Mapped[str] = mapped_column(Text, default="")
     owner_id: Mapped[str] = mapped_column(String(40), index=True)
     kind: Mapped[str] = mapped_column(String(20), default="public")  # public|private|secret|paid
+    # An open community's content is readable by anybody, including people who
+    # have not joined and visitors who are not signed in: its page opens, a
+    # link to one of its posts opens, and a preview is drawn when that link is
+    # shared off Kinjy. Reading only - joining is still what lets somebody
+    # like, comment or post.
+    #
+    # Defaults to True because that is already what an open community does: its
+    # page has always been readable by anyone, and a default of False would
+    # quietly close a door every existing public community already has open.
+    # Only meaningful for kind == "public"; a private, secret or paid community
+    # ignores it, since its whole promise is that content is for members.
+    public_content: Mapped[bool] = mapped_column(Boolean, default=True)
     price_usd: Mapped[float | None] = mapped_column(Numeric(18, 2))
     lang: Mapped[str] = mapped_column(String(5), default="en")
     country: Mapped[str | None] = mapped_column(String(2), index=True)

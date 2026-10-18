@@ -251,6 +251,8 @@ export default function PostCard({
   onChangeAlgorithm,
   commentsAlwaysOpen = false,
   onOpen,
+  canEngage = true,
+  onRefused,
 }: {
   post: Post
   algorithmId: string
@@ -262,6 +264,14 @@ export default function PostCard({
   onChangeAlgorithm: () => void
   /** In the post dialog the comments are the point: open, and no toggle. */
   commentsAlwaysOpen?: boolean
+  /**
+   * Whether this viewer may answer the post. False on an open community the
+   * reader has not joined, where the posts are theirs to read and not to
+   * answer.
+   */
+  canEngage?: boolean
+  /** Why an action did not happen, for the page to show. */
+  onRefused?: (reason: string) => void
   /**
    * Open this post in a dialog. Given by the feed; absent inside the dialog
    * itself, where the card must not be able to open another copy of itself.
@@ -748,6 +758,8 @@ export default function PostCard({
           // Only the author is offered the list of who reacted, and the
           // server refuses it to anyone else regardless of this.
           isAuthor={isOwn}
+          canEngage={canEngage}
+          onRefused={onRefused}
         />
 
         <button

@@ -75,6 +75,12 @@ export default function CommunityView({
 
   const community = detail.data
   const isMember = community?.my_status === 'active'
+  // Whether this community hands its content to anybody, and whether this
+  // reader may answer it. The server decides both; the page only draws them,
+  // and `can_engage` is the server's own answer rather than a guess from the
+  // membership fields.
+  const publishesPublicly = Boolean(community?.public_content ?? feed.data?.community?.public_content)
+  const canEngage = feed.data?.can_engage ?? isMember
   const isPending = community?.my_status === 'pending'
   const isOwner = community?.my_role === 'owner'
   const isSteward = isMember && (isOwner || community?.my_role === 'moderator')
@@ -162,6 +168,27 @@ export default function CommunityView({
       // 402: three pins are used and the KYC fee is not paid this year.
       if (err instanceof ApiError && err.status === 402) setPinNeedsKyc(true)
       setNote(err instanceof ApiError ? err.message : 'Could not change the pin')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const changePublicContent = async (next: boolean) => {
+    if (!community) return
+    setBusy(true)
+    setNote(null)
+    try {
+      await kaluta.communities.setPublicContent(community.id, next)
+      setNote(
+        next
+          ? 'Anyone can read this community now. Only members can post, like and comment.'
+          : 'This community is for its members now. Links to its posts no longer open for anybody else.',
+      )
+      detail.reload()
+      feed.reload()
+      onChanged?.()
+    } catch (err) {
+      setNote(err instanceof ApiError ? err.message : 'Could not change who can read this')
     } finally {
       setBusy(false)
     }
@@ -355,6 +382,31 @@ export default function CommunityView({
                 <p className="mt-2 text-xs text-text-low">
                   {PRIVACY_CHOICES.find((c) => c.kind === community.kind)?.hint}
                 </p>
+
+                {/* Only on an open community: the other kinds are defined by
+                    their content being for members, so there is nothing here
+                    to choose and offering it would suggest otherwise. */}
+                {community.kind === 'public' && (
+                  <label className="mt-4 flex items-start gap-2.5">
+                    <input
+                      type="checkbox"
+                      checked={publishesPublicly}
+                      disabled={busy}
+                      onChange={(event) => void changePublicContent(event.target.checked)}
+                      className="mt-0.5 h-4 w-4 shrink-0 accent-[var(--gold)]"
+                    />
+                    <span className="min-w-0">
+                      <span className="block text-sm font-semibold text-text-hi">
+                        Anyone can read this community
+                      </span>
+                      <span className="mt-0.5 block text-xs text-text-low">
+                        Its posts open for people who have not joined, and a link to one
+                        shows a preview when it is shared outside Kinjy. Joining is still
+                        what lets somebody post, like or comment.
+                      </span>
+                    </span>
+                  </label>
+                )}
               </fieldset>
             )}
 
@@ -387,11 +439,20 @@ export default function CommunityView({
             />
           ) : (
             <p className="cloud-card p-4 text-sm text-text-mid">
-              {!user
-                ? 'Sign in and join to post in this community.'
-                : isPending
-                  ? 'You can post here once your request is approved.'
-                  : 'Join this community to post in it.'}
+              {/* Said before anything is tapped. Somebody reading an open
+                  community can see every post and answer none of them, and
+                  being told that up front is kinder than a refusal after. */}
+              {publishesPublicly
+                ? user
+                  ? isPending
+                    ? 'You can read this community while your request is answered. Joining is what lets you post, like and comment.'
+                    : 'This community is open — anyone can read it. Join to post, like and comment.'
+                  : 'This community is open, so you can read it without an account. Sign in and join to take part.'
+                : !user
+                  ? 'Sign in and join to post in this community.'
+                  : isPending
+                    ? 'You can post here once your request is approved.'
+                    : 'Join this community to post in it.'}
             </p>
           )}
 
@@ -425,6 +486,8 @@ export default function CommunityView({
                   currentUserId={user?.id ?? ''}
                   onHidden={(id) => setFresh((c) => c.filter((p) => p.id !== id))}
                   onChangeAlgorithm={() => {}}
+                  canEngage={canEngage}
+                  onRefused={setNote}
                 />
               ))}
             </div>

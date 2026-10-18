@@ -1504,6 +1504,13 @@ def toggle_comment_like(
     if comment is None or comment.status != "published":
         raise HTTPException(status_code=404, detail="Comment not found")
 
+    # The post this belongs to, which this route never asked about: a comment
+    # id was enough to react to a comment on a post the caller could not read.
+    # Narrow while comment ids were hard to come by, and no longer narrow at
+    # all now that an open community hands them to anybody who opens the page.
+    post = _readable_post(db, comment.post_id, principal.user_id)
+    _require_engagement(post, principal.user_id)
+
     sticker_id = (payload.sticker_id if payload else None) or None
     # Checked against the catalogue, never stored as given: an id the server
     # does not recognise would be drawn as a blank by every client that reads
@@ -2642,7 +2649,19 @@ def _can_see(post: models.Post, audience: Audience) -> bool:
 
 
 def _audience_clause(audience: Audience):
-    """The SQL form of :func:`_can_see`."""
+    """The SQL form of :func:`_can_see`.
+
+    With one deliberate difference, which is the only place these two are
+    allowed to disagree: an open community that publishes publicly opens a
+    *link* to its posts, and does not put them in everybody's feed. A group
+    choosing to be readable is not a group asking to be broadcast, and the
+    public feed is not a place to pour every open community into.
+
+    The clause stays narrower than `_can_see`, never wider - it hides things a
+    viewer could reach by other means, and reveals nothing they could not.
+    That direction is the safe one, and it is the invariant to keep if either
+    of these is ever edited again.
+    """
     if audience.viewer is None:
         return models.Post.visibility == "public"
     clauses = [models.Post.visibility == "public", models.Post.author_id == audience.viewer]
@@ -2721,6 +2740,24 @@ def _require_own_circle(author_id: str, circle_id: str | None) -> None:
         raise HTTPException(status_code=404, detail="Circle not found")
 
 
+def _publishes_publicly(community_id: str | None) -> bool:
+    """Whether this community's content may be read without joining.
+
+    Asked of community-service, which owns the setting, and answered False on
+    any failure: an outage must close a door, never open one.
+
+    One call per post opened, which is what this costs - it is only reached
+    for a community post the viewer is not in, and only on routes that take a
+    single post id. The feed never asks: see the note in `_audience_clause`.
+    """
+    if not community_id:
+        return False
+    try:
+        return bool(_community_summary(community_id).get("public_content"))
+    except HTTPException:
+        return False
+
+
 def _readable_post(db: OrmSession, post_id: str, viewer: str | None) -> models.Post:
     """A post this viewer may read, or a 404.
 
@@ -2729,13 +2766,45 @@ def _readable_post(db: OrmSession, post_id: str, viewer: str | None) -> models.P
     reachable by a side door just because the feed hides it: an id copied from
     a screenshot is still an id. 404 rather than 403, so the answer does not
     confirm that a restricted post exists.
+
+    An open community that publishes publicly is the one case where a post
+    addressed to a group opens for somebody outside it. Its page has always
+    been readable by anybody; this is what makes a *link* to one of its posts
+    behave the same, and what lets a preview be drawn when that link is shared
+    off Kinjy. Reading only - `_require_engagement` still asks for membership
+    before anybody likes, comments or reposts.
     """
     post = db.get(models.Post, post_id)
     if post is None or post.status in ("removed", "draft"):
         raise HTTPException(status_code=404, detail="Post not found")
-    if not _can_see(post, _viewer_audience(viewer)):
-        raise HTTPException(status_code=404, detail="Post not found")
-    return post
+    if _can_see(post, _viewer_audience(viewer)):
+        return post
+    if post.visibility == "community" and _publishes_publicly(post.community_id):
+        return post
+    raise HTTPException(status_code=404, detail="Post not found")
+
+
+def _require_engagement(post: models.Post, viewer: str) -> None:
+    """Joining is what lets somebody take part. Reading is not.
+
+    An open community that publishes publicly hands its content to anybody,
+    which is the point - but a group whose posts strangers can like and
+    comment on is not a group, it is a comment section. So every route that
+    *writes* something onto a community post asks for membership, even though
+    the route that reads it did not.
+
+    403 rather than 404 here, deliberately: the post is not a secret - they
+    are looking at it - and "join to take part" is an answer somebody can act
+    on, where "not found" about a thing on their screen is a bug report.
+    """
+    if post.visibility != "community" or not post.community_id:
+        return
+    if post.community_id in _viewer_communities(viewer):
+        return
+    raise HTTPException(
+        status_code=403,
+        detail="Join this community to take part in it.",
+    )
 
 
 def _visible_posts(principal, age, audience: Audience):
@@ -2777,11 +2846,18 @@ def community_feed(
     Who may read it follows the kind of community, which is the promise its
     members joined under:
 
-    * **public** - anyone, signed in or not. That is what public means, and a
-      public group nobody can read before joining cannot be judged worth
-      joining.
+    * **open, publishing publicly** - anyone, signed in or not. That is what
+      most open communities want, and a group nobody can read before joining
+      cannot be judged worth joining.
+    * **open, content for members** - active members only. The owner turned
+      that off, and the page closes with the posts: leaving the page open
+      while a link to the same post answers "not found" is the inconsistency
+      this setting exists to end.
     * **private, secret, paid** - active members only. A pending request is not
       membership, which is the one thing a private community has.
+
+    Reading, in every case. Taking part is `_require_engagement`, and it asks
+    for membership whatever this says.
 
     Age filtering is applied exactly as on every other surface, before paging.
     A community is not a way around it.
@@ -2789,7 +2865,7 @@ def community_feed(
     viewer = principal.user_id if principal else None
     community = _community_summary(community_id)
 
-    if community["kind"] != "public":
+    if not community.get("public_content"):
         if viewer is None:
             # 404, not 403: for a secret community, "you may not read this"
             # confirms it exists to whoever guessed the id.
@@ -2819,7 +2895,12 @@ def community_feed(
     return {
         "community": {"id": community["id"], "name": community["name"],
                       "slug": community["slug"], "kind": community["kind"],
+                      "public_content": bool(community.get("public_content")),
                       "members_count": community["members_count"]},
+        # Whether this reader may take part in what they are reading. The page
+        # needs it to draw "Join to take part" instead of controls that would
+        # answer 403.
+        "can_engage": bool(viewer and community_id in _viewer_communities(viewer)),
         "total": total,
         "items": agefilter.filter_items(db, age, items),
     }
@@ -3424,6 +3505,7 @@ def react(post_id: str, payload: ReactIn, principal: CurrentUser, db: OrmSession
         raise HTTPException(status_code=400, detail=f"Unknown reaction. Available: {', '.join(REACTION_KINDS)}")
 
     post = _readable_post(db, post_id, principal.user_id)
+    _require_engagement(post, principal.user_id)
 
     existing = db.scalar(
         select(models.Reaction).where(
@@ -3555,6 +3637,7 @@ def _broadcast_reactions(db: OrmSession, post: models.Post, actor: str) -> None:
 @app.post("/posts/{post_id}/like", tags=["engagement"])
 def like(post_id: str, principal: CurrentUser, db: OrmSession = Depends(get_db)):
     post = _readable_post(db, post_id, principal.user_id)
+    _require_engagement(post, principal.user_id)
     existing = db.scalar(
         select(models.Reaction).where(
             models.Reaction.post_id == post_id, models.Reaction.user_id == principal.user_id
@@ -3599,6 +3682,10 @@ def repost(post_id: str, payload: RepostIn, principal: CurrentUser, db: OrmSessi
     # A repost carries the original inside it, so sharing a followers-only or
     # circle post would hand it to the resharer's whole audience. Only what the
     # author made public may travel further.
+    # No membership check above this line, deliberately. A community post
+    # cannot be reposted by anybody, member or not, so answering a non-member
+    # with "join this community to take part" would promise something joining
+    # does not give them. The honest refusal is the next one.
     if target.visibility != "public":
         raise HTTPException(status_code=400, detail="Only public posts can be shared.")
     if payload.visibility == "circle":
@@ -3739,6 +3826,7 @@ def _authors(ids: set[str]) -> dict[str, dict]:
 @app.post("/posts/{post_id}/comments", status_code=201, tags=["engagement"])
 def add_comment(post_id: str, payload: CommentIn, principal: CurrentUser, db: OrmSession = Depends(get_db)):
     post = _readable_post(db, post_id, principal.user_id)
+    _require_engagement(post, principal.user_id)
 
     # You cannot comment on what you are not allowed to read. Without this a
     # minor could write on an adult post by posting the id directly, and the
