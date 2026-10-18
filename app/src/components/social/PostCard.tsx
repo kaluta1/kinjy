@@ -482,7 +482,7 @@ export default function PostCard({
     setBusy(true)
     try {
       await kaluta.feeds.signal({ kind: 'less_like_this', target_type: 'post', target_id: post.id })
-      setNote('Noted — you will see less like this from the next refresh.')
+      setNote('Hidden from your feeds. You will also see less from this author and these topics.')
       setTimeout(() => onHidden(post.id), 1200)
     } catch (err) {
       setNote(err instanceof ApiError ? err.message : 'Could not record that')

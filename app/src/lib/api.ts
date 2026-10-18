@@ -899,6 +899,10 @@ export interface Community {
   members_count: number
   country: string | null
   city: string | null
+  /** The viewer's role when they are a member (member|moderator|owner), else null. */
+  my_role?: string | null
+  /** pending (request sent), active, banned - or null when not a member. */
+  my_status?: string | null
 }
 
 export interface Forum {
@@ -1001,6 +1005,8 @@ export interface Conversation {
   my_role?: 'owner' | 'admin' | 'member'
   /** Groups: what the share link does. Public lets people in, private asks an admin. */
   privacy?: 'public' | 'private' | null
+  /** Groups: whether members added later read the earlier messages. */
+  history_for_new?: 'all' | 'from_join' | null
   /** Pinned to the top of the viewer's list. */
   pinned?: boolean
   /** False while this is a request the viewer has not answered. */
@@ -2244,7 +2250,8 @@ export const kaluta = {
       if (params.q) query.set('q', params.q)
       if (params.country) query.set('country', params.country)
       query.set('limit', String(params.limit ?? 30))
-      return api.get<{ total: number; items: Community[] }>(`/communities?${query}`, { auth: false })
+      // Signed in when there is a session, so each card can say Joined / Request sent.
+      return api.get<{ total: number; items: Community[] }>(`/communities?${query}`)
     },
     create: (input: { name: string; description?: string; kind?: string; price_usd?: number; country?: string }) =>
       api.post<{ id: string; slug: string; kind: string }>('/communities', { kind: 'public', ...input }),
@@ -2425,6 +2432,9 @@ export const kaluta = {
         `/conversations/${conversationId}/privacy`,
         { privacy },
       ),
+    /** Whether members added later read the earlier messages. Admins only. */
+    setHistory: (conversationId: string, history: 'all' | 'from_join') =>
+      api.patch<{ history: string; changed: boolean }>(`/conversations/${conversationId}/history`, { history }),
     /** Answer a conversation request: yes. Replying does the same. */
     accept: (conversationId: string) => api.post<unknown>(`/conversations/${conversationId}/accept`),
     /** The group's link, for any member to send. */

@@ -577,6 +577,28 @@ def search_people(
         handle.like(f"%.{term}%", escape="\\"),
         handle.like(f"%\\_{term}%", escape="\\"),
     )
+    # Turning `discoverable` off hides a member from strangers, not from the
+    # people they already know. Before, a member who switched it off could not
+    # even be @mentioned by their own connections - the mention picker is this
+    # search. Known means: connected either way, or following either way.
+    known = set(
+        db.scalars(
+            select(models.Connection.addressee_id).where(
+                models.Connection.requester_id == principal.user_id, models.Connection.status == "accepted"
+            )
+        ).all()
+    ) | set(
+        db.scalars(
+            select(models.Connection.requester_id).where(
+                models.Connection.addressee_id == principal.user_id, models.Connection.status == "accepted"
+            )
+        ).all()
+    ) | set(
+        db.scalars(select(models.Follow.followee_id).where(models.Follow.follower_id == principal.user_id)).all()
+    ) | set(
+        db.scalars(select(models.Follow.follower_id).where(models.Follow.followee_id == principal.user_id)).all()
+    )
+
     # `discoverable` lives on Preferences, not Profile, so this is an outer join:
     # a member whose preferences row was never materialised must still be
     # findable, and an inner join would silently hide them.
@@ -584,7 +606,11 @@ def search_people(
         select(models.Profile)
         .outerjoin(models.Preferences, models.Preferences.user_id == models.Profile.user_id)
         .where(
-            or_(models.Preferences.discoverable.is_(True), models.Preferences.user_id.is_(None)),
+            or_(
+                models.Preferences.discoverable.is_(True),
+                models.Preferences.user_id.is_(None),
+                models.Profile.user_id.in_(known or {""}),
+            ),
             models.Profile.user_id.not_in(excluded),
             or_(starts, word_starts),
         )

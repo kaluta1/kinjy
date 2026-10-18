@@ -159,7 +159,7 @@ export default function ProfileCard() {
           "nothing pinned" is furniture. Pinning is done from a group's page. */}
       {(pinned.data?.items ?? []).length > 0 && (
         <div className={cn('rounded-card-lg p-3.5', tok.card)}>
-          <p className={cn('mb-2 text-xs font-bold', tok.low)}>Pinned groups</p>
+          <p className={cn('mb-2 text-xs font-bold', tok.low)}>Pinned communities</p>
           <ul className="space-y-1">
             {(pinned.data?.items ?? []).map((group) => (
               <li key={group.id}>

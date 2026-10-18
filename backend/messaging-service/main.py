@@ -95,6 +95,7 @@ MIGRATIONS = [
     f"ALTER TABLE {models.SCHEMA}.conversations ADD COLUMN IF NOT EXISTS avatar_asset_id VARCHAR(40)",
     f"ALTER TABLE {models.SCHEMA}.conversations ADD COLUMN IF NOT EXISTS cover_url VARCHAR(500)",
     f"ALTER TABLE {models.SCHEMA}.conversations ADD COLUMN IF NOT EXISTS cover_asset_id VARCHAR(40)",
+    f"ALTER TABLE {models.SCHEMA}.conversations ADD COLUMN IF NOT EXISTS history_for_new VARCHAR(10) DEFAULT 'all'",
     # Conversations that already exist predate the request model, so everyone
     # in them is treated as having accepted. Retro-fitting a request state onto
     # live threads would silently block attachments between people who have
@@ -1072,6 +1073,10 @@ class PrivacyIn(BaseModel):
     privacy: str = Field(pattern="^(public|private)$")
 
 
+class HistoryIn(BaseModel):
+    history: str = Field(pattern="^(all|from_join)$")
+
+
 class RequestActionIn(BaseModel):
     action: str = Field(pattern="^(approve|reject)$")
 
@@ -1124,6 +1129,35 @@ def _admit(db: OrmSession, conversation_id: str, user_id: str) -> None:
             models.JoinRequest.user_id == user_id,
         )
     )
+
+
+@app.patch("/conversations/{conversation_id}/history", tags=["groups"])
+async def set_group_history(
+    conversation_id: str, payload: HistoryIn, principal: CurrentUser, db: OrmSession = Depends(get_db)
+):
+    """Whether members added from now on read the earlier messages. Admins only.
+
+    Applies to everybody who is not an admin, by the date they joined - so
+    turning it on also hides from a member the messages from before they came.
+    """
+    conversation = _group(db, conversation_id, principal.user_id)
+    _runs_group(db, conversation_id, principal.user_id)
+    if (conversation.history_for_new or "all") == payload.history:
+        return {"history": payload.history, "changed": False}
+    conversation.history_for_new = payload.history
+    who = _display_names({principal.user_id})[principal.user_id]
+    _system_message(
+        db,
+        conversation_id,
+        who + (" set the group so new members see the earlier messages."
+               if payload.history == "all"
+               else " set the group so new members only see messages from when they join."),
+    )
+    db.commit()
+    await _publish_to_users(
+        _participant_ids(db, conversation_id), {"type": "conversation", "conversation_id": conversation_id}
+    )
+    return {"history": conversation.history_for_new, "changed": True}
 
 
 @app.patch("/conversations/{conversation_id}/privacy", tags=["groups"])
@@ -1375,18 +1409,30 @@ def _kyc_fee_paid(user_id: str) -> tuple[bool, str]:
 
 @app.post("/conversations/{conversation_id}/pin", tags=["groups"])
 async def pin_group(conversation_id: str, principal: CurrentUser, db: OrmSession = Depends(get_db)):
-    """Pin a group to the top of your list. Three are free; more ask for the KYC fee."""
-    _group(db, conversation_id, principal.user_id)
+    """Pin a conversation to the top of your list - a favourite.
+
+    Any conversation, a one-to-one chat as much as a group. Three *groups*
+    are free and more ask for the KYC fee; a pinned one-to-one chat does not
+    count towards that, since it is what members asked for a favourites list
+    to hold.
+    """
     me = _member(db, conversation_id, principal.user_id)
+    conversation = db.get(models.Conversation, conversation_id)
+    if conversation is None:
+        raise HTTPException(status_code=404, detail="Conversation not found")
     if me.pinned_at is not None:
         return {"pinned": True, "already": True}
     count = db.scalar(
-        select(func.count()).select_from(models.Participant).where(
+        select(func.count())
+        .select_from(models.Participant)
+        .join(models.Conversation, models.Conversation.id == models.Participant.conversation_id)
+        .where(
             models.Participant.user_id == principal.user_id,
             models.Participant.pinned_at.is_not(None),
+            models.Conversation.kind == "group",
         )
     ) or 0
-    if count >= FREE_PINS:
+    if conversation.kind == "group" and count >= FREE_PINS:
         paid, fee = _kyc_fee_paid(principal.user_id)
         if not paid:
             price = f"${fee} " if fee else ""
@@ -1831,6 +1877,7 @@ def list_conversations(principal: CurrentUser, db: OrmSession = Depends(get_db))
                 "kind": r.kind,
                 "title": r.title,
                 "privacy": (r.privacy or "private") if r.kind == "group" else None,
+                "history_for_new": (r.history_for_new or "all") if r.kind == "group" else None,
                 "pinned": r.id in my_pin,
                 # False while this is a request the viewer has not answered.
                 "accepted": my_accepted.get(r.id, True),
@@ -2667,6 +2714,17 @@ def list_messages(
     # Before serving, not after: an expired message must never be in a response.
     _purge_expired(db, conversation_id)
     stmt = select(models.Message).where(models.Message.conversation_id == conversation_id)
+    # A group that keeps its history from newcomers: what was said before this
+    # member joined is not theirs to read. Admins read everything.
+    room = db.get(models.Conversation, conversation_id)
+    if (
+        room is not None
+        and room.kind == "group"
+        and (room.history_for_new or "all") == "from_join"
+        and me.role not in ("owner", "admin")
+        and me.joined_at is not None
+    ):
+        stmt = stmt.where(models.Message.created_at >= me.joined_at)
     if before:
         stmt = stmt.where(models.Message.id < before)
     if after:

@@ -1,3 +1,4 @@
+import { announce } from '@/lib/live'
 import { useEffect, useRef, useState } from 'react'
 import { Link } from 'react-router'
 import { Bell } from 'lucide-react'
@@ -59,6 +60,10 @@ export default function NotificationBell({ userId }: { userId?: string }) {
   useTopic(userId ? `user:${userId}` : null, (event) => {
     if (event.type !== 'notification') return
     if (typeof event.unread === 'number') setUnread(event.unread)
+    // Somebody followed or connected: the counts in the profile card are
+    // stale from this moment, and used to stay so until a reload.
+    if (event.kind === 'follow') announce('profile')
+    if (event.kind === 'connection_request' || event.kind === 'connection_accepted') announce('connections')
     setItems((current) => [
       {
         id: Number(event.id ?? Date.now()),
@@ -128,7 +133,7 @@ export default function NotificationBell({ userId }: { userId?: string }) {
               Nothing yet. Replies, follows and invitations land here.
             </p>
           ) : (
-            <ul className="max-h-96 space-y-0.5 overflow-y-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+            <ul className="max-h-96 space-y-0.5 overflow-y-auto pr-1 [scrollbar-width:thin]">
               {items.slice(0, 30).map((item) => {
                 const inner = (
                   <>

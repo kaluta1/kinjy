@@ -60,6 +60,7 @@ export default function VideoPlayer({
   const [waiting, setWaiting] = useState(false)
   const [ended, setEnded] = useState(false)
   const [muted, setMuted] = useState(startMuted)
+  const [volume, setVolume] = useState(1)
   const [progress, setProgress] = useState(0)
   const [buffered, setBuffered] = useState(0)
   const [duration, setDuration] = useState(0)
@@ -141,7 +142,7 @@ export default function VideoPlayer({
       ['progress', readBuffer],
       ['loadedmetadata', () => setDuration(video.duration)],
       ['durationchange', () => setDuration(video.duration)],
-      ['volumechange', () => setMuted(video.muted)],
+      ['volumechange', () => { setMuted(video.muted); setVolume(video.volume) }],
     ]
     for (const [name, fn] of handlers) video.addEventListener(name, fn)
     return () => {
@@ -185,12 +186,20 @@ export default function VideoPlayer({
     seekTo(ratio * duration)
   }
 
+  /** Hand over to the viewer's own player, stopping this one first. */
+  const openViewer = () => {
+    if (!onExpand) return
+    pausedByHand.current = true
+    ref.current?.pause()
+    onExpand()
+  }
+
   const toggleFull = () => {
     const wrap = wrapRef.current
     if (!wrap) return
     if (document.fullscreenElement) void document.exitFullscreen()
-    else if (wrap.requestFullscreen) void wrap.requestFullscreen().catch(() => onExpand?.())
-    else onExpand?.()
+    else if (wrap.requestFullscreen) void wrap.requestFullscreen().catch(openViewer)
+    else openViewer()
   }
 
   const toggleMute = () => {
@@ -397,10 +406,31 @@ export default function VideoPlayer({
           >
             {muted ? <VolumeX size={18} aria-hidden="true" /> : <Volume2 size={18} aria-hidden="true" />}
           </button>
+          {/* Volume, not just on/off. From a tablet up: on a phone the
+              buttons on its side already do this, and the bar has no room. */}
+          <input
+            type="range"
+            min={0}
+            max={1}
+            step={0.05}
+            value={muted ? 0 : volume}
+            onChange={(e) => {
+              const video = ref.current
+              if (!video) return
+              const next = Number(e.target.value)
+              video.volume = next
+              video.muted = next === 0
+              wake()
+            }}
+            aria-label="Volume"
+            className="hidden h-1 w-20 cursor-pointer accent-[#E5B556] sm:block"
+          />
           {onExpand && !full && (
             <button
               type="button"
-              onClick={onExpand}
+              // The viewer opens its own player: this one stops first, or both
+              // play and the sound comes twice.
+              onClick={openViewer}
               aria-label="Open in the viewer"
               className="opacity-90 hover:opacity-100"
             >

@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 import { preview } from '@/lib/mediaurl'
 import { cn } from '@/lib/utils'
 import { createPortal } from 'react-dom'
-import { ChevronLeft, ChevronRight, MessageCircle, X } from 'lucide-react'
+import { ChevronLeft, ChevronRight, Download, MessageCircle, X } from 'lucide-react'
 import type { PostMedia } from '@/lib/api'
 import VideoPlayer from './VideoPlayer'
 
@@ -122,6 +122,21 @@ export default function MediaLightbox({
       >
         <X size={18} />
       </button>
+      {/* The original file, in its own format. Right-click "Save image as"
+          saves the display copy, which is WEBP - not what anybody expects a
+          saved photo to be. */}
+      {item && item.kind === 'image' && item.url && (
+        <a
+          href={item.url}
+          download
+          onClick={(event) => event.stopPropagation()}
+          aria-label="Download the original picture"
+          title="Download"
+          className="absolute start-16 top-4 z-20 rounded-full bg-white/10 p-2.5 text-white hover:bg-white/20"
+        >
+          <Download size={18} />
+        </a>
+      )}
 
 
       {/* The picture's half. flex-1 so it takes whatever the panel leaves,

@@ -156,8 +156,16 @@ const ALL_MODULES: ModuleInfo[] = [
     name: 'Commission & Earnings',
     tagline: 'Growth that pays its people.',
     description:
-      'One level: your sponsor earns 20% of Kinjy’s revenue on what you do. Plus Kinjy Leaders and KYC-gated payouts, on an immutable ledger you can audit.',
-    bullets: ['One level · 20% of our revenue', 'Kinjy Leaders snapshots', 'KYC-gated payouts'],
+      'Every way to earn on Kinjy, in one wallet: 20% of Kinjy’s revenue on everything the members you invited do, 40% of the ad revenue your content brings in, your own sales in the marketplace, paid access to your community, a seat in the referral pool, and the monthly Kinjy Leaders share. Withdrawn in USDT once your identity is verified, on a ledger you can audit.',
+    bullets: [
+      'Invite · 20% of our revenue on your members',
+      'Create · 40% of the ad revenue on your content',
+      'Sell · products and services, held in escrow',
+      'Communities · paid access to yours',
+      'Referral pool · new sign-ups assigned to you',
+      'Kinjy Leaders · 5% of monthly revenue',
+      'Withdraw in USDT after KYC',
+    ],
     connections: ['A', 'G', 'K'],
   },
   {

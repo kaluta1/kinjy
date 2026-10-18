@@ -170,6 +170,26 @@ export function AppTopBar() {
         })}
       </div>
 
+      {/* On a phone the three buttons do not fit: one button, showing the
+          current mode, that moves to the next. Without it a member on a phone
+          could only change the display mode before signing in. */}
+      {(() => {
+        const order = Object.keys(MODE_ICONS) as DisplayMode[]
+        const next = order[(order.indexOf(mode) + 1) % order.length]
+        const Icon = MODE_ICONS[mode]
+        return (
+          <button
+            type="button"
+            onClick={() => setMode(next)}
+            aria-label={`Display mode: ${MODE_LABELS[mode]}. Switch to ${MODE_LABELS[next]}`}
+            title={`${MODE_LABELS[mode]} - tap for ${MODE_LABELS[next]}`}
+            className={cn('flex h-9 w-9 shrink-0 items-center justify-center rounded-full md:hidden', tok.input, tok.mid)}
+          >
+            <Icon size={16} aria-hidden="true" />
+          </button>
+        )
+      })()}
+
       <NotificationBell userId={user?.id} />
 
       <Link to="/dashboard" aria-label="Your profile" className="shrink-0 rounded-full">

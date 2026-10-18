@@ -98,11 +98,18 @@ up = c.post("/media/upload", headers=H(me_t), files={"file": ("p.png", png(), "i
 q = c.post("/posts", headers=H(me_t), json={"body": "", "format": "image", "visibility": "public",
                                              "media": [{"media_id": up["id"], "url": up["url"], "kind": "image"}]}).json()
 r, meta = og(q["id"])
-check("a picture still waiting for review is previewed by its author's name", meta.get("title") == "Test Sharer on Kinjy", meta)
+check("a photo post is previewed by its author's name", meta.get("title") == "Test Sharer on Kinjy", meta)
 check("and says what it is", meta.get("description") == "A photo by Test Sharer", meta)
-check("but not with the picture itself", "/api/og/image/" not in meta.get("image", ""), meta)
+# UNREVIEWED_MEDIA_RATING=text (18/10): an ordinary photo is for everybody,
+# so its link is previewed with the photo straight away - not the author's
+# avatar, which is what members saw when it waited for a review.
+check("with the photo itself, at once", meta.get("image", "").endswith(f"/api/og/image/{q['id']}"), meta)
 im = httpx.get(f"{BASE}/og/image/{q['id']}", follow_redirects=False)
-check("and its preview picture is the generic card", im.status_code == 302 and im.headers["location"].endswith("/og-image.png"), im.status_code)
+check("and that picture is served", im.status_code == 200 and im.headers.get("content-type") == "image/jpeg", im.status_code)
+adult = c.post("/posts", headers=H(me_t), json={"body": "", "format": "image", "visibility": "public", "mature": True,
+                                                 "media": [{"media_id": up["id"], "url": up["url"], "kind": "image"}]}).json()
+r, meta = og(adult["id"])
+check("a photo marked adult is not shown in a preview", "/api/og/image/" not in meta.get("image", ""), meta)
 approve(q["id"])
 r, meta = og(q["id"])
 check("once reviewed it is previewed", meta.get("image", "").endswith(f"/api/og/image/{q['id']}"), meta)

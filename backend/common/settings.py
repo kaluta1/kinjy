@@ -181,6 +181,14 @@ KALUTA_KYC_WEBHOOK_SECRET = _str("KALUTA_KYC_WEBHOOK_SECRET")
 # --- AI ---------------------------------------------------------------------
 AI_DEFAULT_PROVIDER = _str("AI_DEFAULT_PROVIDER", "mock")
 
+# A picture or a video no model has looked at (none is configured). "text"
+# (decided 18/10): rated like its words, and 18+ when the author ticks
+# "Adult content" - so a holiday photo is visible to everybody and its link
+# can be shared. "restricted": held back from minors and signed-out
+# visitors until a human reviews it, which hid every photo post from shared
+# links. A minor's media stays "restricted" whatever this says.
+UNREVIEWED_MEDIA_RATING = _str("UNREVIEWED_MEDIA_RATING", "text")
+
 # --- Media ------------------------------------------------------------------
 MEDIA_ROOT = _str("MEDIA_ROOT", "/data/media")
 MEDIA_PUBLIC_BASE = _str("MEDIA_PUBLIC_BASE", "http://localhost:8200/media")

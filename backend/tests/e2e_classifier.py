@@ -133,17 +133,23 @@ check("a 17-year-old can read 16+ content with no blocked category",
 r = c.get(f"/posts/{sixteen}", headers=auth(teen_tok))
 check("a 14-year-old cannot", r.status_code == 404, f"{r.status_code}")
 
-print("\n== a caption never clears a picture ==")
+print("\n== a picture is rated by its words and its author's adult box ==")
 sunrise = real_image(adult_tok)
 r = post(adult_tok, "Lovely sunrise this morning", format="image",
          media=[{"media_id": sunrise["id"], "url": sunrise["url"], "kind": "image"}])
 with_media = r.json().get("id") if r.status_code in (200, 201) else None
 check("the post publishes", with_media is not None, r.text[:140])
-check("but it is NOT cleared by the caption",
-      rating_of(with_media) == "UNCLASSIFIED", rating_of(with_media))
+# UNREVIEWED_MEDIA_RATING=text (18/10): no model sees the picture, so its
+# words and its author's "Adult content" box decide.
+check("an ordinary photo is general", rating_of(with_media) == "GENERAL", rating_of(with_media))
 r = c.get(f"/posts/{with_media}", headers=auth(teen_tok))
-check("a 14-year-old cannot see it until a human rates it", r.status_code == 404,
-      f"{r.status_code}")
+check("so a 14-year-old sees it", r.status_code == 200, f"{r.status_code}")
+r = post(adult_tok, "Lovely sunrise this morning", format="image", mature=True,
+         media=[{"media_id": sunrise["id"], "url": sunrise["url"], "kind": "image"}])
+marked = r.json().get("id") if r.status_code in (200, 201) else None
+check("the same photo marked adult is 18+", rating_of(marked) == "ADULT_18_PLUS", rating_of(marked))
+r = c.get(f"/posts/{marked}", headers=auth(teen_tok))
+check("and a 14-year-old cannot see that one", r.status_code == 404, f"{r.status_code}")
 
 print("\n== a minor posting sexual content is blocked, not rated adult ==")
 r = post(teen_tok, "here are my nudes, dm me")
@@ -171,7 +177,7 @@ if r.status_code == 200:
     check("it is not empty", len(ids) > 0, f"{len(ids)} items")
     check("the explicit post is absent", explicit not in ids)
     check("the gambling post is absent", gambling not in ids)
-    check("the unrated media post is absent", with_media not in ids)
+    check("the adult-marked photo is absent", marked not in ids)
     print(f"   a 14-year-old sees {len(ids)} posts")
 
 r = c.get("/feed?mode=new&limit=30", headers=auth(adult_tok))

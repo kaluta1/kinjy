@@ -74,9 +74,10 @@ browser = httpx.get(f"{BASE}/og/p/{pending['id']}", timeout=30)
 check("the crawler route answers", crawler.status_code == 200, crawler.status_code)
 check("with the same tags as the other route", meta(crawler.text) == meta(browser.text), (meta(crawler.text), meta(browser.text)))
 m = meta(crawler.text)
-check("a post waiting for review still shows its words", m.get("description") == "Our family picnic by the river", m)
+check("a photo post shows its words", m.get("description") == "Our family picnic by the river", m)
 check("and is titled after its author", m.get("title") == "Test Author on Kinjy", m)
-check("but not its picture yet", "/api/og/image/" not in m.get("image", ""), m)
+# UNREVIEWED_MEDIA_RATING=text (18/10): an ordinary photo is for everybody.
+check("and its picture, at once", "/api/og/image/" in m.get("image", ""), m)
 
 print("Inside: a link to a post, for the member looking")
 link = f"https://kinjy.com/p/{pending['id']}"
@@ -94,8 +95,11 @@ teen = c.post("/auth/register", json={
     "email": f"{t}@example.com", "handle": f"u{t}", "display_name": "Test Teen",
     "password": "Sup3rStrong!Pass", "date_of_birth": date(d.year - 15, 1, 1).isoformat(), "country": "UG",
 }).json()["tokens"]["access_token"]
-r3 = c.get("/link-preview", params={"url": link}, headers=H(teen))
-check("a minor gets a card that says they cannot see it", r3.json().get("description") == "You cannot see this post.", r3.json())
+adult = c.post("/posts", headers=H(author_t), json={
+    "body": "Our family picnic by the river", "format": "image", "visibility": "public", "mature": True,
+    "media": [{"media_id": up["id"], "url": up["url"], "kind": "image"}]}).json()
+r3 = c.get("/link-preview", params={"url": f"https://kinjy.com/p/{adult['id']}"}, headers=H(teen))
+check("a minor gets a card that says they cannot see a photo marked adult", r3.json().get("description") == "You cannot see this post.", r3.json())
 check("with no picture", not r3.json().get("image"), r3.json())
 
 text_post = c.post("/posts", headers=H(author_t), json={"body": "Plain words for everyone", "format": "text", "visibility": "public"}).json()

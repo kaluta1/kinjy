@@ -146,6 +146,25 @@ function GroupAccess({
           ))}
         </div>
       ) : null}
+      {runs && !conversation.is_welcome && (
+        <label className={cn('flex items-start gap-2 text-xs', tok.mid)}>
+          <input
+            type="checkbox"
+            className="mt-0.5 accent-[#E5B556]"
+            checked={(conversation.history_for_new ?? 'all') === 'all'}
+            disabled={busy}
+            onChange={(e) =>
+              void act(async () => {
+                await kaluta.messages.setHistory(conversation.id, e.target.checked ? 'all' : 'from_join')
+                return e.target.checked
+                  ? 'New members will see the earlier messages.'
+                  : 'New members will only see messages from when they join.'
+              }, 'Could not change this setting')
+            }
+          />
+          <span>New members can read the messages from before they joined</span>
+        </label>
+      )}
       <p className={cn('flex items-center gap-1.5 text-xs', tok.low)}>
         {privacy === 'public' ? <Globe size={12} aria-hidden="true" /> : <Lock size={12} aria-hidden="true" />}
         {privacy === 'public'

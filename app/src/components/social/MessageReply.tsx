@@ -48,6 +48,8 @@ export type QuoteTarget =
   | { state: 'deleted' }
 
 const EDGE = 'border-s-[3px] border-gold'
+// Gold on a gold bubble does not show; ink does.
+const EDGE_MINE = 'border-s-[3px] border-ink/40'
 
 /** The quote inside a bubble. Clicking it jumps to the original when it is on screen. */
 export function ReplyQuote({
@@ -59,18 +61,16 @@ export function ReplyQuote({
   mine: boolean
   onJump?: () => void
 }) {
-  // On my own bubble everything is drawn on Messenger blue, so the quote is
-  // white at reduced opacity: gold on blue is both poor contrast and the wrong
-  // palette, and the grey used on their bubble disappears entirely. A white
-  // wash also reads as "inside this bubble", where a black one read as a hole
-  // punched through it.
-  const surface = mine ? 'bg-white/20' : 'bg-black/20'
-  const nameTone = mine ? 'text-white' : 'text-gold-soft'
-  const bodyTone = mine ? 'text-white/80' : 'text-text-mid'
-  const hover = mine ? 'hover:bg-white/30' : 'hover:bg-black/25'
+  // My own bubble is gold with dark text, so the quote inside it is dark ink
+  // on a light ink wash. It was white, from when the bubble was blue: white on
+  // gold was the faint, hard-to-read quote members reported.
+  const surface = mine ? 'bg-ink/10' : 'bg-black/20'
+  const nameTone = mine ? 'text-ink' : 'text-gold-soft'
+  const bodyTone = mine ? 'text-ink/75' : 'text-text-mid'
+  const hover = mine ? 'hover:bg-ink/15' : 'hover:bg-black/25'
   if (target.state !== 'found') {
     return (
-      <div className={cn('mb-1 rounded-card-sm px-2.5 py-1.5 text-xs italic', bodyTone, EDGE, surface)}>
+      <div className={cn('mb-1 rounded-card-sm px-2.5 py-1.5 text-xs italic', bodyTone, mine ? EDGE_MINE : EDGE, surface)}>
         {target.state === 'deleted' ? 'Message deleted' : 'Older message'}
       </div>
     )
@@ -84,7 +84,7 @@ export function ReplyQuote({
       className={cn(
         'mb-1 block w-full rounded-card-sm px-2.5 py-1.5 text-start focus-visible:outline focus-visible:outline-2 focus-visible:outline-gold/60',
         hover,
-        EDGE,
+        mine ? EDGE_MINE : EDGE,
         surface,
       )}
     >

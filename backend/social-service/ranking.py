@@ -29,6 +29,9 @@ class Context:
     penalties: dict[str, float] = field(default_factory=dict)   # "author:usr_x" / "topic:ai" -> weight
     muted_authors: set[str] = field(default_factory=set)
     muted_topics: set[str] = field(default_factory=set)
+    # Posts the member said "show less like this" about: gone from every feed
+    # of theirs, whatever the mode, not merely ranked lower.
+    hidden_posts: set[str] = field(default_factory=set)
     # Topics the member asked for in their settings. The counterweight to
     # `penalties`: until now the ranker could only be told what to show less of,
     # which meant a new member had no way to shape the feed except by waiting

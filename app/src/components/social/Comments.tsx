@@ -325,7 +325,15 @@ export default function Comments({
               inline-block with a max width, not a full-width card. 18px of
               radius is what gives it its shape; the card radius read as a
               panel. */}
-          <div className={cn('inline-block max-w-full rounded-[18px] px-3 py-2', tok.subtleBg)}>
+          <div
+            className={cn(
+              'max-w-full rounded-[18px] px-3 py-2',
+              // Wrapped to the text when read; the whole row when edited, so
+              // the text being changed has room instead of a narrow column.
+              editing?.id === node.id ? 'block w-full' : 'inline-block',
+              tok.subtleBg,
+            )}
+          >
             <p className="text-[0.8125rem] font-semibold leading-tight">
               {node.author?.handle ? (
                 <Link to={`/u/${node.author.handle}`} className={cn(tok.text, 'hover:underline')}>
@@ -377,7 +385,6 @@ export default function Comments({
                   <button type="button" onClick={() => setEditing(null)} className={tok.low}>
                     Cancel
                   </button>
-                  <span className={tok.low}>Escape to cancel</span>
                 </div>
               </form>
             ) : (

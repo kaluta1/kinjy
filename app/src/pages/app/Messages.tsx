@@ -14,6 +14,7 @@ import {
   Mic,
   Pencil,
   Pin,
+  Star,
   Plus,
   Search,
   Send,
@@ -579,6 +580,20 @@ export default function Messages() {
   // Narrowing the list you already have: nothing is fetched.
   const [chatQuery, setChatQuery] = useState('')
   const [unreadOnly, setUnreadOnly] = useState(false)
+  // Favourites: the pinned conversations only.
+  const [pinnedOnly, setPinnedOnly] = useState(false)
+  const [pinNote, setPinNote] = useState<string | null>(null)
+  const togglePin = async (conversation: { id: string; pinned?: boolean }) => {
+    setPinNote(null)
+    try {
+      if (conversation.pinned) await kaluta.messages.unpin(conversation.id)
+      else await kaluta.messages.pin(conversation.id)
+      conversations.reload()
+    } catch (err) {
+      // The fourth group asks for the KYC fee: say so where it was clicked.
+      setPinNote(err instanceof ApiError ? err.message : 'Could not pin this conversation')
+    }
+  }
   const [results, setResults] = useState<Array<PersonBrief & { user_id: string }>>([])
   const [searched, setSearched] = useState(false)
   // Kept apart from `error`, which renders in the thread pane on the right —
@@ -1645,21 +1660,34 @@ export default function Messages() {
             </label>
 
             <div className="flex gap-2" role="group" aria-label="Filter conversations">
-              {([['All', false], ['Unread', true]] as const).map(([label, value]) => (
-                <button
-                  key={label}
-                  type="button"
-                  onClick={() => setUnreadOnly(value)}
-                  aria-pressed={unreadOnly === value}
-                  className={cn(
-                    'rounded-full px-3.5 py-1.5 text-[0.82rem] font-semibold transition-colors',
-                    unreadOnly === value ? 'bg-gold/20 text-gold-soft' : 'text-text-mid hover:bg-text-hi/[0.07]',
-                  )}
-                >
-                  {label}
-                </button>
-              ))}
+              {([['All', false, false], ['Unread', true, false], ['Pinned', false, true]] as const).map(
+                ([label, unreadValue, pinnedValue]) => {
+                  const on = unreadOnly === unreadValue && pinnedOnly === pinnedValue
+                  return (
+                    <button
+                      key={label}
+                      type="button"
+                      onClick={() => {
+                        setUnreadOnly(unreadValue)
+                        setPinnedOnly(pinnedValue)
+                      }}
+                      aria-pressed={on}
+                      className={cn(
+                        'rounded-full px-3.5 py-1.5 text-[0.82rem] font-semibold transition-colors',
+                        on ? 'bg-gold/20 text-gold-soft' : 'text-text-mid hover:bg-text-hi/[0.07]',
+                      )}
+                    >
+                      {label}
+                    </button>
+                  )
+                },
+              )}
             </div>
+            {pinNote && (
+              <p role="alert" className="text-xs text-amber-200">
+                {pinNote}
+              </p>
+            )}
           </div>
 
           <div className="min-h-0 flex-1 space-y-4 overflow-y-auto px-2 pb-3">
@@ -1786,6 +1814,7 @@ export default function Messages() {
               const needle = chatQuery.trim().toLowerCase()
               const shown = (conversations.data?.items ?? []).filter((conversation) => {
                 if (unreadOnly && !((conversation.unread ?? 0) > 0)) return false
+                if (pinnedOnly && !conversation.pinned) return false
                 if (!needle) return true
                 const others = conversation.participants.filter((p) => p !== user?.id)
                 return (
@@ -1796,7 +1825,11 @@ export default function Messages() {
               if (conversations.data && conversations.data.items.length > 0 && shown.length === 0) {
                 return (
                   <p className="px-2 py-3 text-sm text-text-low">
-                    {unreadOnly && !needle ? 'Nothing unread.' : 'No conversation matches.'}
+                    {pinnedOnly && !needle
+                      ? 'Nothing pinned yet. Use the star on a conversation to keep it at the top.'
+                      : unreadOnly && !needle
+                        ? 'Nothing unread.'
+                        : 'No conversation matches.'}
                   </p>
                 )
               }
@@ -1809,7 +1842,24 @@ export default function Messages() {
                     )
                     const unread = (conversation.unread ?? 0) > 0
                     return (
-                      <li key={conversation.id}>
+                      <li key={conversation.id} className="group/row relative">
+                        {/* The star: pin to the top, or unpin. Beside the row,
+                            not inside it - a button cannot hold a button. */}
+                        <button
+                          type="button"
+                          onClick={() => void togglePin(conversation)}
+                          aria-pressed={Boolean(conversation.pinned)}
+                          aria-label={conversation.pinned ? 'Unpin this conversation' : 'Pin this conversation to the top'}
+                          title={conversation.pinned ? 'Unpin' : 'Pin to the top'}
+                          className={cn(
+                            'absolute end-2 top-2 z-10 rounded-full p-1.5 transition-opacity hover:bg-text-hi/[0.08]',
+                            conversation.pinned
+                              ? 'text-gold opacity-100'
+                              : 'text-text-low opacity-0 focus-visible:opacity-100 group-hover/row:opacity-100',
+                          )}
+                        >
+                          <Star size={14} fill={conversation.pinned ? 'currentColor' : 'none'} aria-hidden="true" />
+                        </button>
                         <button
                           type="button"
                           onClick={() => void openThread(conversation.id)}
@@ -2280,7 +2330,7 @@ export default function Messages() {
                             />
                           )}
                           {message.deleted && (
-                            <p className={cn('text-[15px] italic leading-snug', mine ? 'text-white/70' : 'text-text-low')}>
+                            <p className={cn('text-[15px] italic leading-snug', mine ? 'text-ink/60' : 'text-text-low')}>
                               This message was deleted
                             </p>
                           )}
@@ -2294,7 +2344,7 @@ export default function Messages() {
                             </span>
                           )}
                           {isSticker && !sticker && (
-                            <p className={cn('text-[15px] italic leading-snug', mine ? 'text-white/70' : 'text-text-low')}>
+                            <p className={cn('text-[15px] italic leading-snug', mine ? 'text-ink/60' : 'text-text-low')}>
                               Sticker no longer available
                             </p>
                           )}

@@ -38,6 +38,8 @@ from dataclasses import dataclass, field
 
 import httpx
 
+from common import settings
+
 from common.agesafety import ContentRating
 
 log = logging.getLogger("social-service.classifier")
@@ -219,7 +221,13 @@ def classify(
 
     # 4. Media this module cannot see into.
     opaque = [k for k in media_kinds if k in _OPAQUE_MEDIA]
-    if opaque and not model_available():
+    media_by_text = (
+        opaque
+        and not model_available()
+        and not author_is_minor
+        and (settings.UNREVIEWED_MEDIA_RATING or "text").lower() == "text"
+    )
+    if opaque and not model_available() and not media_by_text:
         # Not GENERAL, not ADULT — simply not settled. It stays restricted and
         # a human decides. Reading the caption tells you nothing about the
         # picture, and guessing here is the one mistake worth never making.
@@ -245,6 +253,12 @@ def classify(
     # Honest confidence. High for "nothing matched in text we could fully
     # read", lower when a pattern fired, because patterns mis-fire.
     result.classifier_confidence = 0.75 if not levels else 0.45
+    if media_by_text:
+        # Rated by its words and its author's declaration; nobody has seen the
+        # picture. Said so, so a later review knows which ones to look at.
+        result.classifier_source = "heuristic:media_by_text"
+        result.classifier_confidence = 0.5 if not levels else 0.4
+        result.reasons.append("media_rated_by_text")
     if levels:
         result.human_review_status = "pending"
     return result

@@ -142,10 +142,10 @@ if post_id:
           f"{r.status_code} {r.text[:100]}")
 
 print("\n== unclassified content is withheld from minors ==")
-# Plain text no longer produces an unclassified post: publication classifies
-# inline, and ordinary prose clears to GENERAL. The state this asserts is now
-# reached by a post carrying media, which no text pass can see into and which
-# therefore stays unrated until a human or a vision model settles it.
+# A picture no model has looked at is rated by its words and its author's
+# "Adult content" box (UNREVIEWED_MEDIA_RATING=text, decided 18/10): an
+# ordinary photo is for everybody. What stays out of a teenager's reach is a
+# picture its author marked adult - checked just below.
 picture = real_image(adult_tok)
 r = c.post("/posts", headers=auth(adult_tok),
            json={"body": "A picture from this morning.", "visibility": "public",
@@ -156,11 +156,16 @@ if fresh:
     rating = httpx.get(
         f"http://localhost:8203/internal/classification/{fresh}", timeout=10
     ).json()
-    check("a media post is left unrated rather than guessed at",
-          rating.get("age_rating") == "UNCLASSIFIED", rating)
+    check("an ordinary photo is rated by its words: general",
+          rating.get("age_rating") == "GENERAL" and rating.get("classifier_source") == "heuristic:media_by_text", rating)
     r = c.get(f"/posts/{fresh}", headers=auth(teen_tok))
-    check("a 14-year-old cannot read an unclassified post", r.status_code == 404,
-          f"{r.status_code} {r.text[:100]}")
+    check("so a 14-year-old can read it", r.status_code == 200, f"{r.status_code} {r.text[:100]}")
+    marked = c.post("/posts", headers=auth(adult_tok),
+                    json={"body": "Adults only.", "visibility": "public", "format": "image", "mature": True,
+                          "media": [{"media_id": picture["id"], "url": picture["url"], "kind": "image"}]})
+    if marked.status_code in (200, 201):
+        r = c.get(f"/posts/{marked.json()['id']}", headers=auth(teen_tok))
+        check("but not a photo its author marked adult", r.status_code == 404, f"{r.status_code} {r.text[:100]}")
     r = c.get(f"/posts/{fresh}", headers=auth(adult_tok))
     check("an adult can, because unrated means adult-only not invisible",
           r.status_code == 200, f"{r.status_code}")

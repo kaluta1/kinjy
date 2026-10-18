@@ -216,10 +216,26 @@ def list_communities(
     rows = db.scalars(
         stmt.order_by(models.Community.members_count.desc()).limit(min(limit, 100)).offset(offset)
     ).all()
+    # Where the viewer stands in each, so a card can say "Joined" or "Request
+    # sent" instead of offering Join forever, and show Manage only to those
+    # who can manage.
+    mine: dict[str, models.Membership] = {}
+    if principal and rows:
+        mine = {
+            m.community_id: m
+            for m in db.scalars(
+                select(models.Membership).where(
+                    models.Membership.user_id == principal.user_id,
+                    models.Membership.community_id.in_([r.id for r in rows]),
+                )
+            ).all()
+        }
     return {
         "total": total,
         "items": [
             {
+                "my_role": mine[r.id].role if r.id in mine and mine[r.id].status == "active" else None,
+                "my_status": mine[r.id].status if r.id in mine else None,
                 "id": r.id,
                 "slug": r.slug,
                 "name": r.name,

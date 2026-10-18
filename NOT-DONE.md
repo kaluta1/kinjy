@@ -1323,3 +1323,41 @@ Three causes, all fixed:
   (social, web; backup `pre-only-me-20261018-1421`).
 - **Not done:** editing a post never changes its audience, so an existing
   post cannot be switched to "Only me" afterwards.
+
+## The bug group's list, 18/10 (User-Input & Dev-Space)
+
+Checked one by one against the code on 18/10; what was already fixed is not
+repeated here. Fixed now (`e2e_bugs_1810.py` 24/24):
+
+- **Photo posts hidden from shared links.** Every post with a picture stayed
+  UNCLASSIFIED ("pending review"), so a signed-out visitor - and a minor - got
+  "This post is not available", and WhatsApp previews showed the author's
+  avatar. Decided 18/10 (option 1): a picture no model has seen is rated by
+  its words and the author's "Adult content" box (`UNREVIEWED_MEDIA_RATING=text`;
+  `restricted` brings the old rule back). A minor's pictures stay held for
+  review. Existing posts re-rated once by `/internal/classification-media-refresh`.
+- Expanding a video stops the post's own player (two sounds at once).
+- A volume slider in the video player (tablet and up; phones use their keys).
+- Community cards say Joined / Request sent / Your community; Leave on hover;
+  the answer shows on the card; Manage only for owners and moderators.
+- "Show less like this" hides the post from every feed of the member,
+  chronological ones included; the author penalty never matched before (its
+  key was lowercased). Muted authors now apply in New and Following too.
+- The display mode switch on phones (one button cycling Cloud/Light/System).
+- Notification list and candle list show their scrollbar.
+- Download the original picture from the viewer (right-click saved the WEBP copy).
+- The profile card's follower count refreshes when somebody follows you.
+- A single video no longer leaves a black band under its player.
+- Quoted replies in your own (gold) bubble are dark and readable.
+- `discoverable` off hides a member from strangers only: connections and
+  follows still find - and @mention - them.
+- One-to-one chats can be pinned (star on the row) and a Pinned filter; only
+  group pins count towards the three free ones.
+- Group admins choose whether new members read the earlier messages.
+- Comment editing uses the full width; "Escape to cancel" removed; "Pinned
+  communities" instead of "Pinned groups"; the Commission & Earnings text lists
+  every way to earn.
+
+**Not done:** editing a post still cannot change its audience; a photo post's
+pictures still go below the text (only articles place pictures inline) - by
+design, to explain to Rabson.

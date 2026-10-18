@@ -171,7 +171,7 @@ export default function LightCandleModal({
                   />
                 </label>
 
-                <ul className="mt-3 max-h-56 space-y-1 overflow-y-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+                <ul className="mt-3 max-h-56 space-y-1 overflow-y-auto pr-1 [scrollbar-width:thin]">
                   {q.length >= 2 && results === null && <li className="px-1 text-xs text-text-mid">Looking…</li>}
                   {results?.length === 0 && (
                     <li className="px-1 text-xs text-text-mid">

@@ -49,6 +49,10 @@ class Conversation(Base):
     # The code a group's link carries. Random rather than the group's id, so a
     # link cannot be guessed from another one. Minted on the first share.
     invite_code: Mapped[str | None] = mapped_column(String(32), index=True)
+    # What somebody added later reads: "all" - the whole conversation so far -
+    # or "from_join", only what is said after they arrive. A group's admins
+    # choose; admins themselves always read everything.
+    history_for_new: Mapped[str] = mapped_column(String(10), default="all")
     last_message_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 

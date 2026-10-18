@@ -121,7 +121,12 @@ export default function MediaGrid({
       <div
         className="relative -mx-5 mt-3 overflow-hidden border-y border-white/8 bg-black/40"
         style={
-          ratio
+          only.kind === 'video'
+            ? // The player sets its own height (16:9, the frame letterboxed
+              // inside it). A box shaped like the file - a portrait clip -
+              // was taller than the player and left a black band under it.
+              { width: 'calc(100% + 2.5rem)' }
+            : ratio
             ? {
                 // Width is set explicitly, not left to auto: a block with
                 // aspect-ratio *and* max-height shrinks itself sideways to keep
@@ -145,7 +150,7 @@ export default function MediaGrid({
           item={only}
           index={0}
           single
-          boxed={Boolean(ratio)}
+          boxed={Boolean(ratio) && only.kind !== 'video'}
           className=""
           onOpen={onOpen}
           onLoadDeferred={onLoadDeferred}

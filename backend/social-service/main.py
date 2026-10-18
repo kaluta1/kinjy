@@ -952,8 +952,17 @@ def _context(db: OrmSession, principal) -> ranking.Context:
             ctx.muted_authors.add(signal.target_id)
         elif signal.kind == "mute_topic":
             ctx.muted_topics.add(signal.target_id.lower())
+        elif signal.target_type == "post":
+            if signal.kind == "less_like_this":
+                ctx.hidden_posts.add(signal.target_id)
+        elif signal.target_type == "author":
+            # The id as it is stored. It used to be lowercased here while the
+            # ranker looked it up as written ("usr_01M..."), so "less of this
+            # author" never matched anything.
+            key = f"author:{signal.target_id}"
+            ctx.penalties[key] = ctx.penalties.get(key, 0.0) + signal.weight
         else:
-            key = f"{'author' if signal.target_type == 'author' else 'topic'}:{signal.target_id.lower()}"
+            key = f"topic:{signal.target_id.lower()}"
             ctx.penalties[key] = ctx.penalties.get(key, 0.0) + signal.weight
     return ctx
 
@@ -1894,6 +1903,35 @@ def review_classification(
 # Not /internal/classify/backfill: that path is swallowed by
 # /internal/classify/{post_id}, which matched "backfill" as an id and
 # then demanded a classification body.
+@app.post("/internal/classification-media-refresh", tags=["internal"])
+def refresh_media_classifications(db: OrmSession = Depends(get_db)):
+    """Re-rate the posts held as unclassified only because they carry media.
+
+    Under UNREVIEWED_MEDIA_RATING=text such a post is rated by its words and
+    its author's "Adult content" box. The posts written before that rule are
+    re-rated once, the same way a new one would be. A minor's posts come out
+    as they went in. Safe to run again: what is left is what still needs a
+    human.
+    """
+    held = db.scalars(
+        select(models.ContentSafetyClassification).where(
+            models.ContentSafetyClassification.content_kind == "post",
+            models.ContentSafetyClassification.classifier_source == "heuristic:media_opaque",
+            models.ContentSafetyClassification.age_rating == "UNCLASSIFIED",
+        )
+    ).all()
+    changed = 0
+    for row in held:
+        post = db.get(models.Post, row.content_id)
+        if post is None:
+            continue
+        kinds = db.scalars(select(models.PostMedia.kind).where(models.PostMedia.post_id == post.id)).all()
+        result = _classify_and_store(db, post, list(kinds), _viewer_age(post.author_id).is_minor)
+        changed += 1 if result.age_rating != "UNCLASSIFIED" else 0
+    db.commit()
+    return {"held": len(held), "rerated": changed}
+
+
 @app.post("/internal/classification-backfill", tags=["internal"])
 def backfill_classifications(limit: int = 500, db: OrmSession = Depends(get_db)):
     """Classify posts that predate the classifier.
@@ -3026,6 +3064,12 @@ def feed(
     # must not see should never be selected, never serialised and never sent.
     audience = _viewer_audience(viewer)
     stmt = _visible_posts(principal, age, audience)
+    # What the member asked not to see, in every mode. The ranked feed already
+    # dropped muted authors while scoring; the date-ordered ones did not.
+    if ctx.hidden_posts:
+        stmt = stmt.where(models.Post.id.not_in(ctx.hidden_posts))
+    if ctx.muted_authors:
+        stmt = stmt.where(models.Post.author_id.not_in(ctx.muted_authors))
 
     # Who the viewer follows came with the rest of their graph in _context().
     # It used to be fetched here from /users/me/following with an empty bearer
@@ -3342,7 +3386,19 @@ def add_signal(payload: SignalIn, principal: CurrentUser, db: OrmSession = Depen
         post = db.get(models.Post, target_id)
         if post is None:
             raise HTTPException(status_code=404, detail="Post not found")
-        # Penalise the author and the topics, not the (already-seen) post.
+        # The post itself leaves this member's feeds, in every mode - the
+        # chronological ones too, where nothing is ranked and a penalty alone
+        # changed nothing: the same post came back on the next refresh.
+        db.add(
+            models.FeedSignal(
+                user_id=principal.user_id,
+                kind=payload.kind,
+                target_type="post",
+                target_id=post.id,
+                weight=0.0,
+            )
+        )
+        # And the author and the topics weigh less in the ranked feeds.
         db.add(
             models.FeedSignal(
                 user_id=principal.user_id,

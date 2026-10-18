@@ -36,7 +36,6 @@ export default function Communities() {
   const [kind, setKind] = useState('public')
   const [creating, setCreating] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  const [note, setNote] = useState<string | null>(null)
   const [managing, setManaging] = useState<string | null>(null)
   // Which community is open comes from the URL, not from state: a group you
   // cannot link to is a group you cannot share, and the back button has to
@@ -61,19 +60,44 @@ export default function Communities() {
     }
   }
 
+  // The answer is shown on the card that was clicked. At the top of the page
+  // it was out of sight, and with the button still reading "Join" the click
+  // looked like it had done nothing.
+  const [cardNote, setCardNote] = useState<{ id: string; text: string } | null>(null)
+  const [busyId, setBusyId] = useState<string | null>(null)
+
   const join = async (community: Community) => {
-    setNote(null)
+    setCardNote(null)
+    setBusyId(community.id)
     try {
       const result = await kaluta.communities.join(community.id)
-      setNote(
-        result.status === 'pending'
-          ? `Request sent to ${community.name} — a moderator has to approve it.`
-          : `You joined ${community.name}.`,
-      )
+      setCardNote({
+        id: community.id,
+        text:
+          result.status === 'pending'
+            ? 'Request sent. A moderator has to approve it.'
+            : `You joined ${community.name}.`,
+      })
       list.reload()
     } catch (err) {
       // A paid community answers 402; that is information, not a failure.
-      setNote(err instanceof ApiError ? err.message : 'Could not join')
+      setCardNote({ id: community.id, text: err instanceof ApiError ? err.message : 'Could not join' })
+    } finally {
+      setBusyId(null)
+    }
+  }
+
+  const leave = async (community: Community) => {
+    setCardNote(null)
+    setBusyId(community.id)
+    try {
+      await kaluta.communities.leave(community.id)
+      setCardNote({ id: community.id, text: `You left ${community.name}.` })
+      list.reload()
+    } catch (err) {
+      setCardNote({ id: community.id, text: err instanceof ApiError ? err.message : 'Could not leave' })
+    } finally {
+      setBusyId(null)
     }
   }
 
@@ -169,7 +193,6 @@ export default function Communities() {
         )}
       </form>
 
-      {note && <p className="mt-4 text-sm text-gold-soft">{note}</p>}
 
       <div className="mt-6 grid gap-5 md:grid-cols-2">
         {list.loading && <p className="text-sm text-text-low">Loading communities…</p>}
@@ -216,21 +239,56 @@ export default function Communities() {
                 >
                   Open
                 </Link>
-                <button
-                  type="button"
-                  onClick={() => join(community)}
-                  className="rounded-full border border-[var(--cloud-border)] px-5 py-2.5 text-sm font-semibold text-text-mid hover:border-gold/50 hover:text-gold-soft"
-                >
-                  {community.kind === 'private' ? 'Request to join' : community.kind === 'paid' ? 'Buy access' : 'Join'}
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setManaging(managing === community.id ? null : community.id)}
-                  className="rounded-full px-4 py-2.5 text-sm font-semibold text-text-low hover:bg-text-hi/[0.07] hover:text-sky"
-                >
-                  {managing === community.id ? 'Close' : 'Manage'}
-                </button>
+                {community.my_status === 'active' ? (
+                  community.my_role === 'owner' ? (
+                    <span className="inline-flex items-center rounded-full bg-success/10 px-4 py-2.5 text-sm font-semibold text-success">
+                      Your community
+                    </span>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={() => leave(community)}
+                      disabled={busyId === community.id}
+                      title="Leave this community"
+                      className="group rounded-full bg-success/10 px-5 py-2.5 text-sm font-semibold text-success hover:bg-red-400/10 hover:text-red-200 disabled:opacity-40"
+                    >
+                      <span className="group-hover:hidden">Joined</span>
+                      <span className="hidden group-hover:inline">Leave</span>
+                    </button>
+                  )
+                ) : community.my_status === 'pending' ? (
+                  <span className="inline-flex items-center rounded-full bg-amber-400/10 px-4 py-2.5 text-sm font-semibold text-amber-200">
+                    Request sent
+                  </span>
+                ) : community.my_status === 'banned' ? null : (
+                  <button
+                    type="button"
+                    onClick={() => join(community)}
+                    disabled={busyId === community.id}
+                    className="rounded-full border border-[var(--cloud-border)] px-5 py-2.5 text-sm font-semibold text-text-mid hover:border-gold/50 hover:text-gold-soft disabled:opacity-40"
+                  >
+                    {busyId === community.id
+                      ? 'Joining…'
+                      : community.kind === 'private' ? 'Request to join' : community.kind === 'paid' ? 'Buy access' : 'Join'}
+                  </button>
+                )}
+                {/* Only those who can manage see Manage: for anybody else it
+                    opened an empty desk. */}
+                {(community.my_role === 'owner' || community.my_role === 'moderator') && (
+                  <button
+                    type="button"
+                    onClick={() => setManaging(managing === community.id ? null : community.id)}
+                    className="rounded-full px-4 py-2.5 text-sm font-semibold text-text-low hover:bg-text-hi/[0.07] hover:text-sky"
+                  >
+                    {managing === community.id ? 'Close' : 'Manage'}
+                  </button>
+                )}
               </div>
+              {cardNote?.id === community.id && (
+                <p role="status" className="mt-3 text-sm text-gold-soft">
+                  {cardNote.text}
+                </p>
+              )}
 
               {/* The queue is only fetched when opened, and the panel hides
                   itself if the API says you are not a steward — a governance
