@@ -1315,3 +1315,11 @@ Three causes, all fixed:
   calls: USDT:BSC fee $0.23, Sonco Pay minimum $1, so a $1.23 minimum
   withdrawal. **The Sonco Pay balance was empty**: withdrawals are refused
   (and the amount given back to the member) until it holds USDT BSC.
+
+## "Only me" posts (18/10)
+
+- New audience `private`: the author alone (profile, link, feeds, no mention
+  notification, no repost). `e2e_private_post.py`. Deployed 18/10 14:2x
+  (social, web; backup `pre-only-me-20261018-1421`).
+- **Not done:** editing a post never changes its audience, so an existing
+  post cannot be switched to "Only me" afterwards.
