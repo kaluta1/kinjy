@@ -155,8 +155,9 @@ MANGOPAY_BASE_URL = _str("MANGOPAY_BASE_URL", "https://api.sandbox.mangopay.com"
 # there or every call comes back 403.
 SONCOPAY_API_KEY = _str("SONCOPAY_API_KEY")
 SONCOPAY_WEBHOOK_SECRET = _str("SONCOPAY_WEBHOOK_SECRET")
-# Only set to point at something other than Sonco Pay itself - a test double.
-SONCOPAY_BASE_URL = _str("SONCOPAY_BASE_URL")
+# Sonco Pay itself unless pointed at a test double. Never left to the SDK: its
+# own default is a placeholder host that does not exist.
+SONCOPAY_BASE_URL = _str("SONCOPAY_BASE_URL", "https://soncopay.com")
 # Commissions are paid in USDT on BNB Smart Chain, to an address the member
 # saved and an admin approved.
 PAYOUT_ASSET = _str("PAYOUT_ASSET", "USDT")

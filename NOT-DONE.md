@@ -1295,7 +1295,7 @@ Three causes, all fixed:
   payout `reference` = the same id. Refusal or failed payout gives the money
   back once; a timeout keeps it reserved and a reconciler (every 5 min, or
   `/admin/payouts/withdrawals/reconcile`) finishes it.
-- Minimum withdrawal = Sonco Pay's `min_payout_usd` ($5 today) plus the
+- Minimum withdrawal = Sonco Pay's `min_payout_usd` ($1 live, 18/10) plus the
   network fee, because the **fee is paid by the member**
   (`PAYOUT_FEE_PAID_BY=member`; `platform` makes Kinjy pay it). Withdrawals
   are paid **from Kinjy's own Sonco Pay balance**: it must hold USDT BSC.
@@ -1308,6 +1308,10 @@ Three causes, all fixed:
   - no screen for the admin withdrawal list (the route exists);
   - the old `/payments/destinations` and payout batch are refused while
     Sonco Pay is on, not removed;
-  - not tried against the real Sonco Pay and Kaluta: the live key only
-    answers from the server's declared IP. The first real payment and the
-    first real withdrawal are the test.
+  - no real payment, KYC session or withdrawal made yet: the first real
+    ones are the test (a Kaluta session is billed, so none was opened to try).
+- **Deployed on kinjy.com 18/10** (ledger, auth, payment, web; backup
+  `backups/pre-soncopay-*`). Live key checked from the server with read-only
+  calls: USDT:BSC fee $0.23, Sonco Pay minimum $1, so a $1.23 minimum
+  withdrawal. **The Sonco Pay balance was empty**: withdrawals are refused
+  (and the amount given back to the member) until it holds USDT BSC.

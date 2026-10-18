@@ -58,10 +58,8 @@ def _client():
 
     if not enabled():
         raise SoncoError("Sonco Pay is not configured", definite=True, code="not_configured")
-    kwargs: dict[str, Any] = {"timeout": 25, "max_retries": 2}
-    if settings.SONCOPAY_BASE_URL:
-        kwargs["base_url"] = settings.SONCOPAY_BASE_URL.rstrip("/")
-    return SoncoPay(settings.SONCOPAY_API_KEY.strip(), **kwargs)
+    base_url = (settings.SONCOPAY_BASE_URL or "https://soncopay.com").rstrip("/")
+    return SoncoPay(settings.SONCOPAY_API_KEY.strip(), base_url=base_url, timeout=25, max_retries=2)
 
 
 def _call(fn, *args, **kwargs):
