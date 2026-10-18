@@ -1361,3 +1361,7 @@ repeated here. Fixed now (`e2e_bugs_1810.py` 24/24):
 **Not done:** editing a post still cannot change its audience; a photo post's
 pictures still go below the text (only articles place pictures inline) - by
 design, to explain to Rabson.
+
+Deployed on kinjy.com 18/10 19:4x (user, community, messaging, social, web;
+backup `pre-bugfix-1810-20261018-1940`); 46 held photo posts re-rated, the
+reported links open signed out with their own photo as preview.
