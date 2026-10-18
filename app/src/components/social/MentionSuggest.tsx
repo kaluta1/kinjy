@@ -262,14 +262,13 @@ export function MentionList({
               avatarUrl={person.avatar_url}
               size={32}
             />
-            <span className="min-w-0 flex-1">
+            {/* The name, like everywhere else; the handle on hover. Two people
+                can share a name, and the photo beside it is what tells them
+                apart here. */}
+            <span className="min-w-0 flex-1" title={`@${person.handle}`}>
               <span className={cn('block truncate text-sm font-semibold', tok.text)}>
                 {person.display_name}
               </span>
-              {/* The handle, here and only here: this is the one moment it is
-                  what the member is actually choosing between. Two people can
-                  share a name; they cannot share a handle. */}
-              <span className={cn('block truncate text-xs', tok.low)}>@{person.handle}</span>
             </span>
           </button>
         </li>
