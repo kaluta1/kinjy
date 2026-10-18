@@ -225,9 +225,11 @@ export default function Earn() {
                   <span className="grid h-8 w-8 shrink-0 place-items-center rounded-full bg-text-hi/[0.07] text-text-low">
                     <Users size={14} aria-hidden="true" />
                   </span>
-                  <span className="min-w-0 flex-1 truncate text-sm text-text-mid">
-                    {row.display_name ?? row.member_id.slice(0, 16)}
-                    {row.handle && <span className="text-text-low"> @{row.handle}</span>}
+                  <span
+                    className="min-w-0 flex-1 truncate text-sm text-text-mid"
+                    title={row.handle ? `@${row.handle}` : undefined}
+                  >
+                    {row.display_name ?? 'Member'}
                   </span>
                   <span className="caption shrink-0">
                     {new Date(row.assigned_at).toLocaleDateString(undefined, {

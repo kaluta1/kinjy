@@ -275,14 +275,14 @@ export default function Explore() {
                   >
                     <MemberAvatar handle={m.handle} displayName={m.display_name} avatarUrl={m.avatar_url} size={48} />
                     <span className="min-w-0 flex-1">
-                      <span className="flex items-center gap-1 text-[0.95rem] font-semibold text-text-hi group-hover:text-gold-soft">
+                      <span
+                        className="flex items-center gap-1 text-[0.95rem] font-semibold text-text-hi group-hover:text-gold-soft"
+                        title={`@${m.handle}`}
+                      >
                         <span className="truncate">{m.display_name}</span>
                         {m.verified && <BadgeCheck size={14} className="shrink-0 text-gold" aria-label="Verified" />}
                       </span>
-                      <span className="block truncate text-xs text-text-low">
-                        @{m.handle}
-                        {m.city ? ` · ${m.city}` : ''}
-                      </span>
+                      {m.city && <span className="block truncate text-xs text-text-low">{m.city}</span>}
                     </span>
                   </Link>
                 </li>

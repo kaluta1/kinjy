@@ -71,7 +71,17 @@ export default function SignIn() {
   const { user, signIn, signUp } = useAuth()
   const { theme } = useLandingTheme()
 
-  const [mode, setMode] = useState<Mode>(params.get('mode') === 'signup' ? 'signup' : 'signin')
+  // Sign-up when asked for - and when the link carries an invitation code
+  // without saying either way. An invitation is by definition for somebody who
+  // has no account, and the invite links members have been sending for weeks
+  // are `/join?ref=CODE` with no mode: every one of them opened on "Welcome
+  // back" and a password field. An explicit `mode=signin` still wins.
+  const [mode, setMode] = useState<Mode>(() => {
+    const asked = params.get('mode')
+    if (asked === 'signup') return 'signup'
+    if (asked === 'signin') return 'signin'
+    return params.get('ref') ? 'signup' : 'signin'
+  })
   const [email, setEmail] = useState(params.get('email') ?? '')
   const [password, setPassword] = useState('')
   const [displayName, setDisplayName] = useState('')

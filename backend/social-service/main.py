@@ -295,7 +295,7 @@ def _notify_mentions(body: str, actor_id: str, post_id: str, where: str) -> None
         return
 
     actor = _authors({actor_id}).get(actor_id) or {}
-    who = actor.get("display_name") or actor.get("handle") or "Someone"
+    who = actor.get("display_name") or "Someone"
     # The excerpt is shown to a reader, not stored, so the handles in it are
     # drawn as names - the same substitution the post itself gets. A
     # notification saying '@k_mbeki3 look at this' tells you nothing about who

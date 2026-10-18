@@ -2202,34 +2202,16 @@ export default function Messages() {
                       <div
                         id={`msg-${message.id}`}
                         /*
-                         * Right-click opens the message's own menu instead of
-                         * the browser's, which knows nothing about messages.
+                         * No onContextMenu here, on purpose: a right-click on
+                         * a message opens the browser's own menu - Copy, Look
+                         * up, Search, Translate, Inspect - which is what people
+                         * expect from a right-click on text, and which a custom
+                         * menu could only ever imitate badly.
                          *
-                         * On the whole row, not on the bubble: the bubble is
-                         * only as wide as its words, so on a two-word message
-                         * it was a target barely larger than the text, and a
-                         * click a few pixels off did nothing at all. Every
-                         * desktop messenger answers anywhere on the line.
+                         * The message's own actions are not lost: they are on
+                         * the button beside the bubble on a desktop, and on a
+                         * long press on a phone, where there is no right-click.
                          */
-                        onContextMenu={(event) => {
-                          if (message.deleted || message.status || message.id.startsWith('local_')) return
-                          // Only when the selection is in *this* message: the
-                          // native menu is where Copy lives for selected text.
-                          // It used to check for a selection anywhere on the
-                          // page, so one left over from earlier - in the
-                          // search box, in another message - silently killed
-                          // the right-click everywhere until it was cleared.
-                          const selection = window.getSelection()
-                          if (
-                            selection &&
-                            !selection.isCollapsed &&
-                            event.currentTarget.contains(selection.anchorNode)
-                          ) {
-                            return
-                          }
-                          event.preventDefault()
-                          setMenuFor(message.id)
-                        }}
                         className={cn(
                           'flex flex-col rounded-card-md',
                           mine ? 'items-end' : 'items-start',

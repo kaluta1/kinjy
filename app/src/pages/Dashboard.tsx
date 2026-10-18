@@ -10,6 +10,7 @@ import Experience from '@/components/dashboard/Experience'
 import Privacy from '@/components/dashboard/Privacy'
 import ProfileEditor from '@/components/dashboard/ProfileEditor'
 import { Badge, Panel } from '@/components/dashboard/primitives'
+import LinkQr from '@/components/ui-kit/LinkQr'
 import AppShell from '@/components/app/AppShell'
 import MemberAvatar from '@/components/social/MemberAvatar'
 import { useMyProfile } from '@/hooks/useMyProfile'
@@ -27,13 +28,41 @@ const TABS: ReadonlyArray<{ id: string; label: string; icon: LucideIcon }> = [
 
 type TabId = 'earnings' | 'profile' | 'verification' | 'privacy' | 'experience' | 'security' | 'account'
 
-function InviteCard({ code }: { code: string }) {
+/**
+ * The two addresses an invitation can carry.
+ *
+ * The sign-up link opens the form in sign-up mode. It used to be `/join?ref=`
+ * alone, and `/join` opens on *sign in* unless told otherwise - so the person
+ * being invited, who by definition has no account, landed on "Welcome back"
+ * and a password field. The home-page link is for an invitation that should
+ * show what Kinjy is before asking anything; the code rides along on both, and
+ * ReferralWatch keeps hold of it from whichever page it arrives on.
+ */
+function inviteLinks(code: string) {
+  const origin = window.location.origin
+  const ref = encodeURIComponent(code)
+  return [
+    {
+      id: 'signup',
+      label: 'Sign-up link',
+      hint: 'Opens straight on the sign-up form.',
+      url: `${origin}/join?mode=signup&ref=${ref}`,
+    },
+    {
+      id: 'home',
+      label: 'Home page link',
+      hint: 'Shows what Kinjy is first. Still credited to you.',
+      url: `${origin}/?ref=${ref}`,
+    },
+  ] as const
+}
+
+function InviteLinkRow({ label, hint, url }: { label: string; hint: string; url: string }) {
   const [copied, setCopied] = useState(false)
-  const link = `${window.location.origin}/join?ref=${code}`
 
   const copy = async () => {
     try {
-      await navigator.clipboard.writeText(link)
+      await navigator.clipboard.writeText(url)
       setCopied(true)
       setTimeout(() => setCopied(false), 2000)
     } catch {
@@ -42,6 +71,37 @@ function InviteCard({ code }: { code: string }) {
     }
   }
 
+  return (
+    <div className="flex flex-col gap-4 rounded-2xl bg-text-hi/[0.04] p-4 sm:flex-row sm:items-center">
+      <div className="min-w-0 flex-1">
+        <p className="text-sm font-semibold text-text-hi">{label}</p>
+        <p className="mt-0.5 text-xs text-text-low">{hint}</p>
+        <div className="mt-3 flex gap-2">
+          <input
+            readOnly
+            value={url}
+            onFocus={(e) => e.currentTarget.select()}
+            className="w-full min-w-0 rounded-full border border-transparent bg-text-hi/[0.07] px-4 py-2.5 text-sm text-text-mid focus:border-gold/50 focus:outline-none"
+            aria-label={label}
+          />
+          <button
+            type="button"
+            onClick={copy}
+            className="inline-flex shrink-0 items-center gap-1.5 rounded-full bg-gradient-to-br from-gold-soft to-gold px-5 py-2.5 text-sm font-bold text-ink"
+          >
+            {copied ? <Check size={14} aria-hidden="true" /> : <Copy size={14} aria-hidden="true" />}
+            {copied ? 'Copied' : 'Copy'}
+          </button>
+        </div>
+      </div>
+      {/* For the person standing next to you, a poster or a slide - places
+          where nobody is going to type an address. */}
+      <LinkQr url={url} label={label.toLowerCase()} filename={`kinjy-invite-${label.split(' ')[0].toLowerCase()}`} size={112} />
+    </div>
+  )
+}
+
+function InviteCard({ code }: { code: string }) {
   return (
     <section className="cloud-card relative overflow-hidden !border-gold/50 p-6 md:p-7">
       <span aria-hidden="true" className="absolute -right-16 -top-16 h-52 w-52 rounded-full bg-gold/20 blur-3xl" />
@@ -61,22 +121,10 @@ function InviteCard({ code }: { code: string }) {
         </div>
       </div>
 
-      <div className="relative mt-6 flex gap-2">
-        <input
-          readOnly
-          value={link}
-          onFocus={(e) => e.currentTarget.select()}
-          className="w-full min-w-0 rounded-full border border-transparent bg-text-hi/[0.07] px-5 py-3 text-sm text-text-mid focus:border-gold/50 focus:outline-none"
-          aria-label="Your invitation link"
-        />
-        <button
-          type="button"
-          onClick={copy}
-          className="inline-flex shrink-0 items-center gap-1.5 rounded-full bg-gradient-to-br from-gold-soft to-gold px-6 py-3 text-sm font-bold text-ink"
-        >
-          {copied ? <Check size={14} aria-hidden="true" /> : <Copy size={14} aria-hidden="true" />}
-          {copied ? 'Copied' : 'Copy'}
-        </button>
+      <div className="relative mt-6 space-y-3">
+        {inviteLinks(code).map((link) => (
+          <InviteLinkRow key={link.id} label={link.label} hint={link.hint} url={link.url} />
+        ))}
       </div>
 
       <p className="relative mt-4 text-sm leading-relaxed text-text-low">
@@ -150,7 +198,6 @@ export default function Dashboard() {
           </div>
         </div>
         <div className="flex flex-wrap items-center gap-2 border-t border-[var(--cloud-border)] px-6 py-4 md:px-8">
-          <span className="mono-data text-sm text-text-mid">@{user.handle}</span>
           <Badge tone={user.kyc_verified ? 'good' : 'neutral'}>
             {user.kyc_verified ? (
               <>

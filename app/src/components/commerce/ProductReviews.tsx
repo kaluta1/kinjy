@@ -66,7 +66,7 @@ export default function ProductReviews({ productId }: { productId: string }) {
             {data.items.map((review) => {
               const name =
                 review.reviewer?.display_name ||
-                (review.reviewer?.handle ? `@${review.reviewer.handle}` : 'Verified buyer')
+                'Verified buyer'
               return (
                 <li key={review.id} className="py-3">
                   <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1">

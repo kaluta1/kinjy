@@ -243,9 +243,8 @@ function AddPeople({ circle, onAdded }: { circle: CircleDetail; onAdded: () => v
           {results.map((person) => (
             <li key={person.user_id} className="flex items-center gap-3 rounded-xl px-2 py-2 hover:bg-text-hi/[0.05]">
               <MemberAvatar handle={person.handle} displayName={person.display_name} avatarUrl={person.avatar_url} size={40} />
-              <span className="min-w-0 flex-1">
+              <span className="min-w-0 flex-1" title={`@${person.handle}`}>
                 <span className="block truncate text-sm text-text-hi">{person.display_name}</span>
-                <span className="caption block truncate">@{person.handle}</span>
               </span>
               {inCircle.has(person.user_id) ? (
                 <span className="inline-flex items-center gap-1 text-xs text-text-mid">
@@ -477,17 +476,18 @@ function CirclePanel({ id, onChanged, onDeleted }: { id: string; onChanged: () =
               <MemberAvatar handle={m.handle} displayName={m.display_name} avatarUrl={m.avatar_url} size={44} />
               <div className="min-w-0 flex-1">
                 {m.handle ? (
-                  <Link to={`/u/${m.handle}`} className="flex items-center gap-1 text-sm font-semibold text-text-hi underline-offset-2 hover:underline">
-                    <span className="truncate">{m.display_name ?? m.handle}</span>
+                  <Link
+                    to={`/u/${m.handle}`}
+                    title={`@${m.handle}`}
+                    className="flex items-center gap-1 text-sm font-semibold text-text-hi underline-offset-2 hover:underline"
+                  >
+                    <span className="truncate">{m.display_name ?? 'Member'}</span>
                     {m.verified && <BadgeCheck size={13} className="shrink-0 text-gold" aria-label="Verified" />}
                   </Link>
                 ) : (
                   <span className="text-sm text-text-mid">A former member</span>
                 )}
-                <span className="caption block truncate">
-                  {m.handle ? `@${m.handle}` : ''}
-                  {m.city ? ` · ${m.city}` : ''}
-                </span>
+                {m.city && <span className="caption block truncate">{m.city}</span>}
               </div>
               {!m.active && (
                 <span

@@ -76,7 +76,7 @@ export default function MarketVendor() {
   }
 
   const vendor = shop?.vendor
-  const name = vendor?.display_name ?? vendor?.handle ?? 'Shop'
+  const name = vendor?.display_name ?? 'Shop'
   const since = shop?.since
     ? new Date(shop.since).toLocaleDateString(undefined, { month: 'long', year: 'numeric' })
     : null
@@ -101,8 +101,12 @@ export default function MarketVendor() {
                 </span>
               )}
               <div className="min-w-0">
-                <h1 className="truncate text-lg font-semibold text-text-hi">{name}</h1>
-                {vendor.handle && <p className="caption truncate">@{vendor.handle}</p>}
+                <h1
+                  className="truncate text-lg font-semibold text-text-hi"
+                  title={vendor.handle ? `@${vendor.handle}` : undefined}
+                >
+                  {name}
+                </h1>
                 {since && <p className="caption">Member since {since}</p>}
               </div>
             </div>

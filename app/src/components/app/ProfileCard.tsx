@@ -78,14 +78,17 @@ export default function ProfileCard() {
           <MemberAvatar handle={user?.handle} displayName={displayName} avatarUrl={data?.avatar_url} size={80} ring />
         </div>
 
-        <p className={cn('mt-3 flex items-center justify-center gap-1.5 text-sm font-bold', tok.text)}>
+        {/* The name, with the handle on hover. A person is their name; the
+            handle is an address, and it was drawn here as a gold badge -
+            the most prominent thing on the card after the name itself. */}
+        <p
+          className={cn('mt-3 flex items-center justify-center gap-1.5 text-sm font-bold', tok.text)}
+          title={user?.handle ? `@${user.handle}` : undefined}
+        >
           {displayName}
           {user?.kyc_verified && <VerifiedBadge size={15} />}
         </p>
         <div className="mt-1 flex flex-col items-center gap-1.5">
-          <span className="rounded-full bg-gold/10 px-2 py-0.5 text-xs font-medium text-gold-soft">
-            @{user?.handle}
-          </span>
           {place && (
             <span className={cn('flex items-center gap-1 text-[0.7rem]', tok.low)}>
               <MapPin size={10} aria-hidden="true" />

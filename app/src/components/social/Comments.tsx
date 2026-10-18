@@ -343,7 +343,7 @@ export default function Comments({
                   {/* Their name. The handle was what the server happened to
                       send first, not what a reader is looking for. */}
                   <span className="font-semibold text-gold-soft">
-                    {node.reply_to_user.display_name || node.reply_to_user.handle}
+                    {node.reply_to_user.display_name || 'Member'}
                   </span>
                 </span>
               )}

@@ -612,12 +612,12 @@ export default function Forums() {
                               size={28}
                             />
                             <div className="flex items-center gap-1.5 truncate text-xs">
-                              <span className="font-medium text-text-hi truncate">
-                                {thread.author?.display_name || thread.author?.handle || `@${thread.author_id.slice(0, 10)}`}
+                              <span
+                                className="font-medium text-text-hi truncate"
+                                title={thread.author?.handle ? `@${thread.author.handle}` : undefined}
+                              >
+                                {thread.author?.display_name || 'Member'}
                               </span>
-                              {thread.author?.handle && (
-                                <span className="caption text-text-low truncate">@{thread.author.handle}</span>
-                              )}
                               <span className="caption text-text-low">·</span>
                               <span className="caption text-text-low shrink-0">
                                 {ago(thread.created_at || thread.last_activity_at)}
@@ -708,12 +708,12 @@ export default function Forums() {
                     />
                     <div>
                       <div className="flex items-center gap-2">
-                        <span className="text-sm font-semibold text-text-hi">
-                          {open.author?.display_name || open.author?.handle || `@${open.author_id.slice(0, 10)}`}
+                        <span
+                          className="text-sm font-semibold text-text-hi"
+                          title={open.author?.handle ? `@${open.author.handle}` : undefined}
+                        >
+                          {open.author?.display_name || 'Member'}
                         </span>
-                        {open.author?.handle && (
-                          <span className="caption text-text-low">@{open.author.handle}</span>
-                        )}
                       </div>
                       <p className="caption text-text-low">{ago(open.created_at)}</p>
                     </div>
@@ -786,12 +786,12 @@ export default function Forums() {
                               size={32}
                             />
                             <div className="flex items-center gap-1.5 truncate text-xs">
-                              <span className="font-medium text-text-hi truncate">
-                                {r.author?.display_name || r.author?.handle || `@${r.author_id.slice(0, 10)}`}
+                              <span
+                                className="font-medium text-text-hi truncate"
+                                title={r.author?.handle ? `@${r.author.handle}` : undefined}
+                              >
+                                {r.author?.display_name || 'Member'}
                               </span>
-                              {r.author?.handle && (
-                                <span className="caption text-text-low truncate">@{r.author.handle}</span>
-                              )}
                               <span className="caption text-text-low">·</span>
                               <span className="caption text-text-low shrink-0">{ago(r.created_at)}</span>
                             </div>

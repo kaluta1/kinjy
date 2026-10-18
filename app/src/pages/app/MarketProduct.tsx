@@ -86,7 +86,7 @@ export default function MarketProduct() {
   const lowStock = !unlimited && item.stock! > 0 && item.stock! < 5
   const unavailable = soldOut || item.status !== 'active'
   const place = [item.city, item.country].filter(Boolean).join(', ')
-  const sellerName = item.vendor.display_name || (item.vendor.handle ? `@${item.vendor.handle}` : 'Seller')
+  const sellerName = item.vendor.display_name || 'Seller'
 
   const action = item.is_owner ? (
     <p className="flex-1 text-center text-sm text-text-mid">This is your listing</p>
@@ -157,10 +157,12 @@ export default function MarketProduct() {
             <Link to={`/market/vendors/${item.vendor.user_id}`} className="flex items-center gap-3">
               <SellerAvatar vendor={item.vendor} />
               <span className="min-w-0">
-                <span className="block truncate text-sm font-semibold text-text-hi">{sellerName}</span>
-                {item.vendor.handle && item.vendor.display_name && (
-                  <span className="block truncate text-xs text-text-low">@{item.vendor.handle}</span>
-                )}
+                <span
+                  className="block truncate text-sm font-semibold text-text-hi"
+                  title={item.vendor.handle ? `@${item.vendor.handle}` : undefined}
+                >
+                  {sellerName}
+                </span>
                 {item.vendor_since && (
                   <span className="block text-xs text-text-low">
                     Member since {new Date(item.vendor_since).toLocaleDateString(undefined, { month: 'long', year: 'numeric' })}

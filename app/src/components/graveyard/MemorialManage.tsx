@@ -661,7 +661,7 @@ function Admins({ memorial }: { memorial: Memorial }) {
             <span className="mono-data w-5 text-xs text-text-mid">{a.succession_order}</span>
             <MemberAvatar handle={a.handle} displayName={a.display_name} avatarUrl={a.avatar_url} size={30} />
             <span className="min-w-0 flex-1 truncate text-sm text-text-hi">
-              {a.display_name ?? a.handle ?? 'A member'}
+              {a.display_name ?? 'A member'}
               {a.user_id === user?.id && <span className="text-text-mid"> (you)</span>}
             </span>
             {items.length > 1 && (a.user_id === user?.id || a.succession_order > myRank) && (

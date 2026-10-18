@@ -9,7 +9,7 @@ import type { Order } from '@/lib/api'
 
 export function counterpartName(order: Order): string {
   const c = order.counterpart
-  return c?.display_name || (c?.handle ? `@${c.handle}` : '')
+  return c?.display_name || ''
 }
 
 export function OrderCardSkeleton() {

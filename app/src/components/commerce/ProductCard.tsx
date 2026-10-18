@@ -38,7 +38,7 @@ export default function ProductCard({
   mine?: boolean
 }) {
   const place = [product.city, product.country].filter(Boolean).join(', ')
-  const seller = product.vendor?.display_name || (product.vendor?.handle ? `@${product.vendor.handle}` : null)
+  const seller = product.vendor?.display_name || null
   const rated = (product.rating_count ?? 0) > 0 && product.rating_average != null
 
   return (

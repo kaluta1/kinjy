@@ -3,6 +3,7 @@ import { createPortal } from 'react-dom'
 import { Link } from 'react-router'
 import { Check, Globe, UsersRound, Link2, Lock, LogOut, Pencil, Pin, PinOff, Search, ShieldCheck, UserPlus, X } from 'lucide-react'
 import { copyLink, siteOrigin } from '@/lib/share'
+import LinkQr from '@/components/ui-kit/LinkQr'
 import MemberAvatar from '@/components/social/MemberAvatar'
 import { useAppTheme } from '@/components/appdemo/theme'
 import { ApiError, kaluta, type Conversation, type GroupMember, type PersonBrief } from '@/lib/api'
@@ -39,6 +40,8 @@ function GroupAccess({
   const [note, setNote] = useState<string | null>(null)
   const [needsKyc, setNeedsKyc] = useState(false)
   const [busy, setBusy] = useState(false)
+  // The group's address once it has been asked for, so it can be drawn as a code.
+  const [sharedUrl, setSharedUrl] = useState<string | null>(null)
   const [requests, setRequests] = useState<Array<GroupMember & { created_at: string }>>([])
 
   const loadRequests = useCallback(() => {
@@ -71,6 +74,7 @@ function GroupAccess({
     act(async () => {
       const { path } = await kaluta.messages.shareLink(conversation.id)
       const url = new URL(path, siteOrigin()).toString()
+      setSharedUrl(url)
       return (await copyLink(url)) === 'copied' ? 'Link copied.' : `Copy this link: ${url}`
     }, 'Could not get the link')
 
@@ -161,6 +165,16 @@ function GroupAccess({
             </>
           )}
         </p>
+      )}
+
+      {sharedUrl && (
+        <LinkQr
+          url={sharedUrl}
+          label={`the group ${conversation.title ?? ''}`.trim()}
+          filename="kinjy-group"
+          size={104}
+          caption="Scan to open the group"
+        />
       )}
 
       {runs && requests.length > 0 && (

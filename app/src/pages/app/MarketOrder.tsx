@@ -259,10 +259,12 @@ export default function MarketOrder() {
             >
               <SellerAvatar who={seller} />
               <span className="min-w-0">
-                <span className="block truncate text-sm font-semibold text-text-hi">
-                  {seller.display_name || seller.handle || 'Seller'}
+                <span
+                  className="block truncate text-sm font-semibold text-text-hi"
+                  title={seller.handle ? `@${seller.handle}` : undefined}
+                >
+                  {seller.display_name || 'Seller'}
                 </span>
-                {seller.handle && <span className="caption block truncate">@{seller.handle}</span>}
               </span>
             </Link>
           </Section>

@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { Link, useLocation } from 'react-router'
 import { ArrowLeft, Globe, Link2, Lock, LogOut, Pin, PinOff, UsersRound } from 'lucide-react'
 import Composer from '@/components/social/Composer'
+import LinkQr from '@/components/ui-kit/LinkQr'
 import PostCard from '@/components/social/PostCard'
 import MemberQueue from '@/components/community/MemberQueue'
 import { useApi } from '@/hooks/useApi'
@@ -69,6 +70,8 @@ export default function CommunityView({
   const [fresh, setFresh] = useState<Post[]>([])
   const [managing, setManaging] = useState(false)
   const [shareNote, setShareNote] = useState<string | null>(null)
+  // The address just copied, kept so it can also be drawn as a code.
+  const [sharedUrl, setSharedUrl] = useState<string | null>(null)
   // Whether the fee is what stands between this member and another pin, so
   // the refusal can carry the way to pay it.
   const [pinNeedsKyc, setPinNeedsKyc] = useState(false)
@@ -143,6 +146,7 @@ export default function CommunityView({
       const url = new URL(path, siteOrigin())
       if (user?.referral_code) url.searchParams.set('ref', user.referral_code)
       const result = await copyLink(url.toString())
+      setSharedUrl(url.toString())
       setShareNote(result === 'copied' ? 'Link copied.' : `Copy this link: ${url.toString()}`)
     } catch (err) {
       setShareNote(err instanceof ApiError ? err.message : 'Could not get the link')
@@ -350,9 +354,17 @@ export default function CommunityView({
             </div>
 
             {shareNote && (
-              <p role="status" className="mt-3 break-all text-sm text-text-mid">
-                {shareNote}
-              </p>
+              <div className="mt-3 flex flex-wrap items-center gap-4">
+                <p role="status" className="min-w-0 flex-1 break-all text-sm text-text-mid">
+                  {shareNote}
+                </p>
+                {/* The address that was just copied, as a code for somebody
+                    in the room. For a secret community it carries the access
+                    code too, exactly as the link does. */}
+                {sharedUrl && (
+                  <LinkQr url={sharedUrl} label={`the ${community.name} community`} filename={`kinjy-${community.slug}`} size={104} />
+                )}
+              </div>
             )}
 
             {isSteward && community.kind !== 'paid' && (

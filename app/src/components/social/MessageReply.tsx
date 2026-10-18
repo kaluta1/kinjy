@@ -174,6 +174,10 @@ export function SwipeToReply({
   const start = useRef<{ x: number; y: number; dir: 1 | -1; locked: boolean | null } | null>(null)
   const armed = useRef(false)
   const hold = useRef<number | undefined>(undefined)
+  // What the last press was made with. The context-menu event that follows a
+  // long press on a phone and the one a mouse's right button raises are the
+  // same event; only the press before it says which one it was.
+  const lastPointer = useRef<string | null>(null)
 
   const stopHold = () => {
     window.clearTimeout(hold.current)
@@ -187,6 +191,7 @@ export function SwipeToReply({
     <div
       className="relative min-w-0 touch-pan-y"
       onPointerDown={(e) => {
+        lastPointer.current = e.pointerType
         // Touch only: a mouse has the reply arrow, and must keep text selection.
         if (e.pointerType !== 'touch') return
         const direction = getComputedStyle(e.currentTarget).direction === 'rtl' ? -1 : 1
@@ -233,8 +238,16 @@ export function SwipeToReply({
         setDx(0)
       }}
       onContextMenu={(e) => {
-        // A long press raises this on Android; the hold above already handled it.
-        if (hold.current !== undefined || start.current === null) e.preventDefault()
+        // A long press raises this on Android, and the hold above has already
+        // opened the message's own menu, so the browser's would be a second
+        // menu on top of the first. Suppressed for a finger and only for a
+        // finger.
+        //
+        // It used to test `start.current === null`, which is also true for
+        // every mouse - a mouse never sets `start` - so a right-click on any
+        // message was swallowed and nothing at all appeared. A right-click is
+        // the browser's, and it gets the browser's menu.
+        if (lastPointer.current === 'touch') e.preventDefault()
       }}
     >
       {dx !== 0 && (

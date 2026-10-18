@@ -13,6 +13,7 @@ import { isLink, LINK_RE, splitTrailing, TAG_OR_MENTION } from '@/lib/linkify'
 import { copyLink, postUrl, SHARE_TARGETS } from '@/lib/share'
 import { cn } from '@/lib/utils'
 import Comments from './Comments'
+import LinkQr from '@/components/ui-kit/LinkQr'
 import MemberAvatar from './MemberAvatar'
 import KnownActors from './KnownActors'
 import Expandable from './Expandable'
@@ -927,9 +928,15 @@ export default function PostCard({
           {/* The link is shown rather than only copied. A member about to put
               their name on something in a group chat should be able to read
               what they are about to send, including the code on the end. */}
-          <p className="mt-1 break-all rounded-lg bg-ink-2/50 px-2.5 py-2 text-[0.7rem] text-text-mid">
-            {shareUrl}
-          </p>
+          <div className="mt-1 flex items-center gap-3">
+            <p className="min-w-0 flex-1 break-all rounded-lg bg-ink-2/50 px-2.5 py-2 text-[0.7rem] text-text-mid">
+              {shareUrl}
+            </p>
+            {/* The same address as a code, built from the exact string above -
+                so with the invitation box ticked, scanning credits the member
+                exactly as the link would. */}
+            <LinkQr url={shareUrl} label="this post" filename="kinjy-post" size={96} />
+          </div>
 
           {me?.referral_code && (
             <label className="flex items-start gap-2 text-xs text-text-mid">

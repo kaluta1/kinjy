@@ -215,13 +215,13 @@ export default function Connections() {
                   <Link
                     to={`/u/${entry.profile.handle}`}
                     className="block truncate text-[1.05rem] font-bold tracking-[-0.015em] text-text-hi hover:text-gold-soft"
+                    title={`@${entry.profile.handle}`}
                   >
                     {entry.profile.display_name}
                   </Link>
                 ) : (
                   <p className="truncate text-[1.05rem] font-bold text-text-hi">Unknown member</p>
                 )}
-                {entry.profile && <p className="mono-data truncate text-xs text-text-low">@{entry.profile.handle}</p>}
                 {tab === 'incoming' && entry.message && (
                   <p className="mt-2 line-clamp-2 rounded-xl bg-text-hi/[0.05] px-3 py-2 text-sm leading-relaxed text-text-mid">
                     “{entry.message}”

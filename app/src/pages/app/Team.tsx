@@ -159,13 +159,14 @@ export default function Team() {
               return (
                 <div key={member.user_id} className="flex flex-wrap items-center gap-3 p-4">
                   <div className="min-w-0 flex-1">
-                    <p className="truncate text-sm font-semibold text-text-hi">
+                    <p
+                      className="truncate text-sm font-semibold text-text-hi"
+                      title={member.handle ? `@${member.handle}` : undefined}
+                    >
                       {member.display_name}
                       {self && <span className="ms-2 text-xs font-normal text-text-low">(you)</span>}
                     </p>
-                    <p className="truncate text-xs text-text-low">
-                      @{member.handle} · {member.email}
-                    </p>
+                    <p className="truncate text-xs text-text-low">{member.email}</p>
                   </div>
                   {canManage && !self ? (
                     <>

@@ -73,10 +73,13 @@ export default function MemberQueue({
   const Row = ({ member, children }: { member: Member; children: React.ReactNode }) => (
     <li className="flex items-center gap-2 py-1.5">
       <span className="min-w-0 flex-1">
-        <span className={cn('block truncate text-sm', tok.text)}>{name(member)}</span>
-        {member.profile?.handle && (
-          <span className={cn('block text-[0.68rem]', tok.low)}>@{member.profile.handle}</span>
-        )}
+        {/* Name only; the handle on hover. */}
+        <span
+          className={cn('block truncate text-sm', tok.text)}
+          title={member.profile?.handle ? `@${member.profile.handle}` : undefined}
+        >
+          {name(member)}
+        </span>
       </span>
       {member.role !== 'member' && (
         <span className="rounded-full bg-gold/15 px-2 py-0.5 text-[0.62rem] font-bold text-gold-soft">

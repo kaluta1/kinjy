@@ -27,7 +27,7 @@ function SaleCard({ sale, disputed, onShip }: { sale: Sale; disputed: boolean; o
         <div className="min-w-0">
           <p className="line-clamp-2 text-sm font-semibold text-text-hi">{sale.product_title ?? 'Listing'}</p>
           <p className="caption mt-1">
-            {sale.buyer.display_name ?? sale.buyer.handle ?? 'Buyer'} · qty {sale.quantity}
+            {sale.buyer.display_name ?? 'Buyer'} · qty {sale.quantity}
           </p>
         </div>
         <p className="mono-data shrink-0 text-sm text-text-hi">${sale.vendor_price}</p>
