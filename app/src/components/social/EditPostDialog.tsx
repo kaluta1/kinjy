@@ -132,6 +132,26 @@ export default function EditPostDialog({
     [],
   )
 
+  // Pictures that arrived with a pasted article. Offered to the server on
+  // Save like the ones uploaded here, so the post carries them - except any
+  // the post already has, which are attached already.
+  const adopt = useCallback(
+    (items: Array<{ id: string; kind: string; url: string }>) => {
+      for (const item of items) {
+        if (mediaFor(item.id)) continue
+        added.current.set(item.id, {
+          id: item.id,
+          url: item.url,
+          kind: item.kind,
+          size_bytes: 0,
+          provenance: 'original',
+          provenance_signed: false,
+        })
+      }
+    },
+    [mediaFor],
+  )
+
   const save = async () => {
     setError(null)
     if (isArticle && !headline.trim()) {
@@ -206,6 +226,7 @@ export default function EditPostDialog({
                 value={html}
                 onChange={setHtml}
                 onUploadMedia={upload}
+                onAdoptMedia={adopt}
                 mediaFor={mediaFor}
                 onUploadingChange={setEditorUploading}
                 minHeight={320}

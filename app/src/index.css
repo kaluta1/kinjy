@@ -560,6 +560,17 @@
   .prose-article .article-figure-note {
     @apply m-0 px-3 py-2 text-sm text-text-low;
   }
+  /* A picture the writer has clicked in the editor, ready to be deleted.
+     An attribute rather than a class: what the editor saves is rebuilt from
+     clean markers, so nothing about being selected can leak into an article. */
+  .prose-article figure.article-figure[data-selected] {
+    outline: 3px solid rgb(var(--gold-rgb));
+    outline-offset: 2px;
+  }
+  /* In the editor a picture is something to click, not text to type into. */
+  [contenteditable] figure.article-figure {
+    cursor: pointer;
+  }
   .prose-article h3 {
     @apply mt-3 mb-1.5 font-display text-lg font-semibold;
   }

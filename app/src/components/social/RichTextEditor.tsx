@@ -13,10 +13,13 @@ import {
   ImagePlus,
   Clapperboard,
   Youtube,
+  Trash2,
 } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
 import { useAppTheme } from '@/components/appdemo/theme'
 import { embedFromUrl, hydrateArticle, sanitizeHtml, type InlineMedia } from '@/lib/richtext'
+import { kaluta } from '@/lib/api'
+import FloatingPanel from './FloatingPanel'
 import { cn } from '@/lib/utils'
 
 interface Tool {
@@ -59,6 +62,7 @@ export default function RichTextEditor({
   onUploadMedia,
   mediaFor,
   onUploadingChange,
+  onAdoptMedia,
 }: {
   value: string
   onChange: (html: string) => void
@@ -77,6 +81,15 @@ export default function RichTextEditor({
    * lost - its placeholder has no id and is not part of what is saved.
    */
   onUploadingChange?: (uploading: boolean) => void
+  /**
+   * Told when an article copied from Kinjy is pasted in and brings the
+   * writer's own pictures with it. They are files that already exist, so
+   * nothing is uploaded - but the form around has to attach them to the post
+   * when it is saved, exactly as it does the ones it uploaded itself, or the
+   * text would point at pictures the post does not carry and readers would
+   * see nothing where they were.
+   */
+  onAdoptMedia?: (items: Array<{ id: string; kind: string; url: string }>) => void
 }) {
   const { tok } = useAppTheme()
   const editorRef = useRef<HTMLDivElement>(null)
@@ -93,6 +106,12 @@ export default function RichTextEditor({
   // Uploaded in this session, so a figure keeps its preview when the text is
   // seeded again or re-rendered.
   const uploaded = useRef(new Map<string, InlineMedia>())
+  // The picture the writer clicked, and whether its menu is open. A figure is
+  // not text - the caret cannot go into it - so without this the only way to
+  // delete one was to put the caret just after it and press Backspace, which
+  // nobody discovers.
+  const selected = useRef<HTMLElement | null>(null)
+  const [figureMenu, setFigureMenu] = useState(false)
 
   // Seed the DOM once. Re-writing innerHTML on every keystroke would move the
   // caret to the start on each character.
@@ -301,6 +320,50 @@ export default function RichTextEditor({
     emit()
   }
 
+  /** Mark one figure as chosen, or none. */
+  const selectFigure = (figure: HTMLElement | null) => {
+    if (selected.current && selected.current !== figure) {
+      selected.current.removeAttribute('data-selected')
+      selected.current.removeAttribute('id')
+    }
+    selected.current = figure
+    if (figure) {
+      figure.setAttribute('data-selected', '')
+      // An id so the menu can stay over the picture while the page scrolls.
+      // Only in the live editor: what is saved is rebuilt from clean markers.
+      figure.id = 'rte-selected-figure'
+    } else {
+      setFigureMenu(false)
+    }
+  }
+
+  /** Take the chosen picture out of the article. */
+  const deleteSelected = () => {
+    const figure = selected.current
+    if (!figure) return
+    // Leave the caret where the picture was, so writing can carry on there.
+    const next = figure.nextElementSibling
+    selectFigure(null)
+    figure.remove()
+    if (next && editorRef.current?.contains(next)) {
+      const caret = document.createRange()
+      caret.setStart(next, 0)
+      caret.collapse(true)
+      const selection = window.getSelection()
+      selection?.removeAllRanges()
+      selection?.addRange(caret)
+      savedRange.current = caret
+    }
+    editorRef.current?.focus()
+    emit()
+  }
+
+  /** The figure under a click or a right-click, if it is one of ours. */
+  const figureAt = (target: EventTarget | null): HTMLElement | null => {
+    const node = target instanceof Element ? target.closest('figure') : null
+    return node instanceof HTMLElement && editorRef.current?.contains(node) ? node : null
+  }
+
   const addLink = () => ask('link')
   const embedVideo = () => ask('embed')
 
@@ -310,8 +373,104 @@ export default function RichTextEditor({
    * and placed where the caret is; a pasted YouTube or Vimeo address on its
    * own becomes the video.
    */
+  /**
+   * Paste an article copied from Kinjy, pictures included.
+   *
+   * What travels on the clipboard is the article's HTML, and its pictures are
+   * markers naming files - not the files. A post may only carry its author's
+   * own post media, so each named file is asked about first: the writer's own
+   * come along as they are, with nothing uploaded twice, and anybody else's
+   * are left out rather than turning Save into an error. Videos from YouTube
+   * and Vimeo are a provider and an id, and come along regardless.
+   *
+   * The preview is the address the picture had where it was copied from,
+   * which is one the writer was looking at a moment ago. What is saved is the
+   * marker; the reader's address is signed for them when they open the post.
+   */
+  const pasteArticle = async (html: string) => {
+    const doc = new DOMParser().parseFromString(`<body>${html}</body>`, 'text/html')
+    const previews = new Map<string, InlineMedia>()
+    for (const figure of Array.from(doc.body.querySelectorAll('figure[data-media-id]'))) {
+      const id = figure.getAttribute('data-media-id') ?? ''
+      const media = figure.querySelector('img, video')
+      // The reading view mounts its own video player into a slot and keeps
+      // the address on it rather than on a <video>.
+      const src =
+        media?.getAttribute('src') || figure.querySelector('[data-src]')?.getAttribute('data-src') || ''
+      const kind = figure.getAttribute('data-kind') || (media?.tagName === 'VIDEO' ? 'video' : 'image')
+      previews.set(id, { url: src, kind, alt_text: media?.getAttribute('alt') ?? null })
+    }
+
+    let mine = new Set<string>()
+    if (previews.size) {
+      try {
+        const answer = await kaluta.media.attachable([...previews.keys()])
+        mine = new Set(answer.attachable.map((item) => item.id))
+      } catch {
+        // Not confirmed is not allowed: leaving a picture out costs the
+        // writer a re-upload, keeping one that is not theirs costs them the
+        // whole post at Save.
+        mine = new Set()
+      }
+    }
+
+    let left = 0
+    for (const figure of Array.from(doc.body.querySelectorAll('figure[data-media-id]'))) {
+      if (!mine.has(figure.getAttribute('data-media-id') ?? '')) {
+        figure.remove()
+        left += 1
+      }
+    }
+    for (const id of mine) {
+      const preview = previews.get(id)
+      if (preview) uploaded.current.set(id, preview)
+    }
+
+    const clean = hydrateArticle(
+      sanitizeHtml(doc.body.innerHTML),
+      (id) => uploaded.current.get(id) ?? mediaFor?.(id) ?? null,
+    )
+    const el = editorRef.current
+    if (!el) return
+    el.focus()
+    // Back where the writer pasted: asking the server took a moment, and the
+    // article belongs there, not wherever the caret has drifted to since.
+    const selection = window.getSelection()
+    if (savedRange.current && el.contains(savedRange.current.startContainer)) {
+      selection?.removeAllRanges()
+      selection?.addRange(savedRange.current)
+    }
+    document.execCommand('insertHTML', false, clean)
+    emit()
+
+    if (mine.size) {
+      onAdoptMedia?.(
+        [...mine].map((id) => ({
+          id,
+          kind: previews.get(id)?.kind ?? 'image',
+          url: previews.get(id)?.url ?? '',
+        })),
+      )
+    }
+    setMediaError(
+      left
+        ? `${left} ${left === 1 ? 'picture belongs' : 'pictures belong'} to somebody else and ${left === 1 ? 'was' : 'were'} left out.`
+        : null,
+    )
+  }
+
   const onPaste = (event: React.ClipboardEvent) => {
     event.preventDefault()
+    // An article copied from Kinjy: its words, its formatting and its
+    // pictures, rather than the words alone. Recognised by its markers, so a
+    // paste from anywhere else still arrives as plain text - keeping a
+    // stranger's formatting is how junk markup gets in.
+    const html = event.clipboardData.getData('text/html')
+    if (html && /data-media-id=|data-embed=/.test(html)) {
+      saveSelection()
+      void pasteArticle(html)
+      return
+    }
     const files = Array.from(event.clipboardData.files)
     if (files.length && onUploadMedia) {
       saveSelection()
@@ -485,6 +644,32 @@ export default function RichTextEditor({
           onBlur={emit}
           onPaste={onPaste}
           onDrop={onDrop}
+          // A click on a picture chooses it; a click anywhere else lets it go.
+          onClick={(event) => selectFigure(figureAt(event.target))}
+          // A chosen picture goes with Delete or Backspace, as in any editor.
+          // Escape lets it go without deleting it.
+          onKeyDown={(event) => {
+            if (!selected.current) return
+            if (event.key === 'Delete' || event.key === 'Backspace') {
+              event.preventDefault()
+              deleteSelected()
+            } else if (event.key === 'Escape') {
+              event.preventDefault()
+              selectFigure(null)
+            } else if (event.key.length === 1 || event.key === 'Enter') {
+              // Typing moves on from the picture rather than replacing it.
+              selectFigure(null)
+            }
+          }}
+          // Right-click on a picture opens its own menu; on text, the
+          // browser's - which is where Copy and Paste live for the words.
+          onContextMenu={(event) => {
+            const figure = figureAt(event.target)
+            if (!figure) return
+            event.preventDefault()
+            selectFigure(figure)
+            setFigureMenu(true)
+          }}
           onKeyUp={() => {
             refreshActive()
             saveSelection()
@@ -499,6 +684,25 @@ export default function RichTextEditor({
             tok.text,
           )}
         />
+        {figureMenu && selected.current && (
+          <FloatingPanel
+            anchor="rte-selected-figure"
+            label="Picture options"
+            onClose={() => setFigureMenu(false)}
+          >
+            <button
+              type="button"
+              onClick={() => {
+                setFigureMenu(false)
+                deleteSelected()
+              }}
+              className="flex w-full items-center gap-2.5 rounded-card-sm px-3 py-2 text-sm text-red-300 hover:bg-white/10"
+            >
+              <Trash2 size={14} aria-hidden="true" />
+              Delete
+            </button>
+          </FloatingPanel>
+        )}
       </div>
     </div>
   )

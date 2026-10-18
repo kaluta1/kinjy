@@ -1907,6 +1907,15 @@ export const kaluta = {
 
   media: {
     /**
+     * Which of these files the signed-in member may put in a post of their
+     * own - the same rule the server applies when the post is saved. Asked by
+     * the article editor before it pastes an article copied from Kinjy, so
+     * the writer's own pictures come along and anybody else's are left out.
+     * Ids that are not the caller's are simply absent from the answer.
+     */
+    attachable: (ids: string[]) =>
+      api.post<{ attachable: Array<{ id: string; kind: string }> }>('/media/attachable', { ids }),
+    /**
      * Upload a file and get back its public URL.
      *
      * The provenance label travels with the upload, not with the post: the

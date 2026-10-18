@@ -1054,6 +1054,45 @@ def backfill_previews(limit: int = 50, dry_run: bool = True, db: OrmSession = De
     }
 
 
+class AttachableIn(BaseModel):
+    ids: list[str] = Field(default_factory=list, max_length=50)
+
+
+@app.post("/media/attachable", tags=["media"])
+def attachable(payload: AttachableIn, principal: CurrentUser, db: OrmSession = Depends(get_db)):
+    """Which of these files the caller may put in a post of their own.
+
+    Asked by the article editor when something is pasted into it. An article
+    copied from Kinjy carries its pictures as references to files, not as the
+    files themselves, and a post may only carry its author's own post media -
+    social-service refuses the whole post otherwise. So the editor asks before
+    it pastes: references to the writer's own pictures are kept as they are,
+    with nothing uploaded twice, and anybody else's are left out instead of
+    turning the Save button into an error.
+
+    The same four conditions social-service checks when the post is saved,
+    asked in the same order, so this can never say yes to something the save
+    will refuse. Only the caller's own files are named in the answer: an id
+    that belongs to somebody else and an id that does not exist are both
+    simply absent, so the route cannot be used to learn which ids are real.
+    """
+    wanted = [i for i in dict.fromkeys(payload.ids) if isinstance(i, str) and i]
+    if not wanted:
+        return {"attachable": []}
+    rows = db.scalars(select(models.Asset).where(models.Asset.id.in_(wanted))).all()
+    return {
+        "attachable": [
+            {"id": a.id, "kind": a.kind}
+            for a in rows
+            if a.owner_id == principal.user_id
+            and a.purpose is None
+            and not a.private
+            and a.status == "ready"
+            and a.url
+        ]
+    }
+
+
 @app.get("/media/{asset_id}/provenance", tags=["media"])
 def provenance(asset_id: str, db: OrmSession = Depends(get_db)):
     asset = db.get(models.Asset, asset_id)

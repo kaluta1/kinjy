@@ -195,6 +195,25 @@ export default function Composer({
     },
     [provenance],
   )
+  // Pictures that arrived with a pasted article: files the writer already
+  // owns, so nothing is uploaded, but they are attached on Post exactly like
+  // the ones uploaded here - the list below only attaches what it knows.
+  const adoptInline = useCallback((items: Array<{ id: string; kind: string; url: string }>) => {
+    setInlineMedia((current) => [
+      ...current,
+      ...items
+        .filter((item) => !current.some((known) => known.id === item.id))
+        .map((item) => ({
+          id: item.id,
+          url: item.url,
+          kind: item.kind,
+          size_bytes: 0,
+          provenance: 'original',
+          provenance_signed: false,
+          previewUrl: item.url,
+        })),
+    ])
+  }, [])
   // The author's own declaration. Nothing infers this — a wrong guess either
   // censors an adult or shows a child what they should not see.
   const [mature, setMature] = useState(false)
@@ -554,6 +573,7 @@ export default function Composer({
                   value={body}
                   onChange={setBody}
                   onUploadMedia={uploadInline}
+                  onAdoptMedia={adoptInline}
                   onUploadingChange={setArticleUploading}
                 />
               </div>
