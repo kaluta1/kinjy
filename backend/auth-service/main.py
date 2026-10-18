@@ -1208,6 +1208,37 @@ def internal_user(user_id: str, db: OrmSession = Depends(get_db)):
     }
 
 
+@app.get("/internal/staff", tags=["internal"])
+def internal_staff(min_role: str = "moderator", db: OrmSession = Depends(get_db)):
+    """Who to tell when something waits for the staff - a payout wallet to approve."""
+    roles = {"moderator": STAFF_ROLES, "admin": ("admin", "superadmin"), "superadmin": ("superadmin",)}
+    rows = db.scalars(
+        select(models.User).where(models.User.role.in_(roles.get(min_role, STAFF_ROLES)), models.User.status == "active")
+    ).all()
+    return {"items": [{"user_id": u.id, "role": u.role} for u in rows]}
+
+
+@app.get("/internal/users/{user_id}/identity", tags=["internal"])
+def internal_identity(user_id: str, db: OrmSession = Depends(get_db)):
+    """What payment-service needs to write to a member and to check who they are.
+
+    Kept apart from /internal/users/{id}, which a dozen services read: the
+    e-mail address and the date of birth go only to the one that needs them.
+    """
+    user = _active_user(db, user_id)
+    profile = db.scalar(select(models.UserAgeProfile).where(models.UserAgeProfile.user_id == user_id))
+    return {
+        "id": user.id,
+        "email": user.email,
+        "email_verified": user.email_verified,
+        "display_name": user.display_name,
+        "country": user.country,
+        "lang": user.lang,
+        "kyc_verified": user.kyc_verified,
+        "date_of_birth": profile.date_of_birth.isoformat() if profile else None,
+    }
+
+
 @app.patch("/internal/users/{user_id}", tags=["internal"])
 def sync_identity(user_id: str, payload: schemas.IdentitySyncIn, db: OrmSession = Depends(get_db)):
     user = db.get(models.User, user_id)

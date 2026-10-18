@@ -202,6 +202,17 @@ export default function ProfileCard() {
               </Link>
             </li>
           )}
+          {(user?.role === 'admin' || user?.role === 'superadmin') && (
+            <li>
+              <Link
+                to="/admin/wallets"
+                className={cn('flex w-full items-center gap-2 rounded-full px-3 py-1.5 text-xs font-semibold', tok.mid, tok.hoverBg)}
+              >
+                <Wallet size={12} className="text-gold" aria-hidden="true" />
+                Payout wallets
+              </Link>
+            </li>
+          )}
           {isStaff(user?.role) && (
             <li>
               <Link

@@ -51,6 +51,7 @@ const APP_ROUTES = [
   '/supervision',
   '/trust-safety',
   '/team',
+  '/admin/wallets',
   '/moderation',
   // Covers /settings/supervision, which the notifications link to.
   '/settings',
@@ -62,7 +63,7 @@ const APP_ROUTES = [
 const OWN_CHROME_PAGES = ['/', '/memorials', '/platform', '/feeds', '/creators', '/pricing', '/payments', '/safety', '/developers', '/app', '/join', '/admin', '/commerce', '/family', '/assistant']
 
 /** Public pages with a dynamic part (/p/:postId, /memorial/:code) and the sign-in helpers. */
-const OWN_CHROME_PREFIXES = ['/p/', '/memorial/', '/reset-password']
+const OWN_CHROME_PREFIXES = ['/p/', '/memorial/', '/reset-password', '/payout-wallet/']
 
 function hasOwnChrome(pathname: string): boolean {
   return OWN_CHROME_PAGES.includes(pathname) || OWN_CHROME_PREFIXES.some((prefix) => pathname.startsWith(prefix))

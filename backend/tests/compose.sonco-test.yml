@@ -1,0 +1,19 @@
+# Local only: points payment-service at tests/fake_sonco_kaluta.py.
+#   docker compose -f docker-compose.yml -f backend/tests/compose.sonco-test.yml up -d --no-deps payment-service
+# Without this file the service is back to the .env values. Never on a server.
+services:
+  payment-service:
+    environment:
+      SONCOPAY_API_KEY: sp_test_fake_for_e2e
+      SONCOPAY_WEBHOOK_SECRET: whsec_fake_for_e2e
+      SONCOPAY_BASE_URL: http://host.docker.internal:8790
+      KALUTA_KYC_API_KEY: klt_fake_for_e2e
+      KALUTA_KYC_BASE_URL: http://host.docker.internal:8790
+      SMTP_HOST: host.docker.internal
+      SMTP_PORT: "8791"
+      SMTP_USER: ""
+      SMTP_PASSWORD: ""
+      SMTP_SSL: "false"
+      SMTP_STARTTLS: "false"
+      SMTP_FROM: noreply@example.com
+    extra_hosts: ["host.docker.internal:host-gateway"]

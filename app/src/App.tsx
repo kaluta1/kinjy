@@ -25,6 +25,8 @@ const Developers = lazy(() => import('./pages/Developers'))
 const AppDemo = lazy(() => import('./pages/AppDemo'))
 const SignIn = lazy(() => import('./pages/SignIn'))
 const ResetPassword = lazy(() => import('./pages/ResetPassword'))
+const PayoutWalletConfirm = lazy(() => import('./pages/PayoutWalletConfirm'))
+const PayoutWallets = lazy(() => import('./pages/app/PayoutWallets'))
 const PostPage = lazy(() => import('./pages/PostPage'))
 const Dashboard = lazy(() => import('./pages/Dashboard'))
 const SocialHub = lazy(() => import('./pages/SocialHub'))
@@ -142,6 +144,7 @@ export default function App() {
           {/* Both halves of a forgotten password: no token asks for a link,
               ?token= from the mail sets the new password. */}
           <Route path="/reset-password" element={<ResetPassword />} />
+          <Route path="/payout-wallet/confirm" element={<PayoutWalletConfirm />} />
           {/* Where a post shared outside Kinjy lands. Public to a visitor:
               a link that demands a sign-in before showing anything is a link
               nobody forwards. ?ref= carries the sharer's invitation. */}
@@ -185,6 +188,7 @@ export default function App() {
               anybody who is not staff, so the route itself is not the guard. */}
           <Route path="/trust-safety" element={<TrustSafety />} />
           <Route path="/team" element={<Team />} />
+          <Route path="/admin/wallets" element={<PayoutWallets />} />
           {/* Where the appeal notification sends the member. */}
           <Route path="/moderation" element={<Moderation />} />
           {/* Every avatar in the app links here. */}

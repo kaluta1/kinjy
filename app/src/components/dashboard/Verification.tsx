@@ -1,4 +1,5 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
+import { useSearchParams } from 'react-router'
 import { BadgeCheck, ExternalLink, FlaskConical, Lock } from 'lucide-react'
 import { useApi } from '@/hooks/useApi'
 import { ApiError, kaluta, type KycStatus, type OrderPayment } from '@/lib/api'
@@ -17,20 +18,88 @@ const TONE = {
  * Payment and verification are deliberately separate: paying the annual fee
  * does not verify anyone, and a failed check does not consume the year that was
  * paid for. The panel shows both facts independently for that reason.
+ *
+ * The fee is paid on Sonco Pay's page and the check is done on Kaluta KYC's;
+ * the member comes back here from both. Coming back is not proof of anything,
+ * so the page asks the server, which reads the answer from Sonco Pay or
+ * Kaluta, and waits a little for it when it is not there yet.
  */
 export default function Verification() {
   const kyc = useApi<KycStatus>(() => kaluta.account.kyc(), [])
+  const [params, setParams] = useSearchParams()
   const [starting, setStarting] = useState(false)
   const [message, setMessage] = useState<string | null>(null)
   const [payment, setPayment] = useState<OrderPayment | null>(null)
   const [paying, setPaying] = useState(false)
+
+  // Back from Sonco Pay with ?payment=: wait for the payment to be confirmed.
+  const returnedPayment = params.get('payment')
+  useEffect(() => {
+    if (!returnedPayment) return
+    let cancelled = false
+    let tries = 0
+    setMessage('Checking your payment…')
+    const check = async () => {
+      tries += 1
+      try {
+        const status = await kaluta.account.paymentStatus(returnedPayment)
+        if (cancelled) return
+        if (status.settled) {
+          setMessage('Fee paid. You can start the identity check now.')
+          kyc.reload()
+          return
+        }
+        if (status.status === 'failed' || status.status === 'expired') {
+          setMessage('The payment did not go through. You were not charged; you can try again.')
+          return
+        }
+      } catch {
+        /* keep waiting: a confirmation can take a moment */
+      }
+      if (!cancelled && tries < 20) window.setTimeout(check, 3000)
+      else if (!cancelled) setMessage('Your payment is still being confirmed. This page updates when it is.')
+    }
+    void check()
+    return () => {
+      cancelled = true
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [returnedPayment])
+
+  // Back from Kaluta with ?kyc=done: the verdict can take a moment.
+  const backFromKyc = params.get('kyc') === 'done'
+  const pendingNow = kyc.data?.status === 'pending'
+  useEffect(() => {
+    if (!backFromKyc || !pendingNow) return
+    const id = window.setTimeout(() => kyc.reload(), 5000)
+    return () => window.clearTimeout(id)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [backFromKyc, pendingNow, kyc.data])
+
+  // Once there is nothing left to wait for, the return markers leave the URL
+  // so a reload does not start waiting again.
+  useEffect(() => {
+    if (!kyc.data) return
+    if ((returnedPayment && kyc.data.fee_paid) || (backFromKyc && kyc.data.status !== 'pending')) {
+      const next = new URLSearchParams(params)
+      next.delete('payment')
+      next.delete('kyc')
+      setParams(next, { replace: true })
+    }
+  }, [kyc.data, returnedPayment, backFromKyc, params, setParams])
 
   const pay = async () => {
     if (!kyc.data) return
     setPaying(true)
     setMessage(null)
     try {
-      setPayment(await kaluta.account.payKycFee(kyc.data.fee_usd))
+      const started = await kaluta.account.payKycFee(kyc.data.fee_usd)
+      if (!started.mock && started.checkout_url && /^https:\/\//i.test(started.checkout_url)) {
+        // Same tab: Sonco Pay sends the member back here when it is done.
+        window.location.assign(started.checkout_url)
+        return
+      }
+      setPayment(started)
     } catch (err) {
       setMessage(err instanceof ApiError ? err.message : 'Could not start the payment')
     } finally {
@@ -58,7 +127,12 @@ export default function Verification() {
     setMessage(null)
     try {
       const result = await kaluta.account.startKyc()
-      setMessage(`Verification ${result.status}. Attempt ${result.attempt ?? 1}.`)
+      if (result.verification_url && /^https:\/\//i.test(result.verification_url)) {
+        // Kaluta's own flow, in this tab; it sends the member back here.
+        window.location.assign(result.verification_url)
+        return
+      }
+      setMessage(result.status === 'verified' ? 'You are already verified.' : `Verification ${result.status}.`)
       kyc.reload()
     } catch (err) {
       setMessage(err instanceof ApiError ? err.message : 'Could not start verification')
@@ -161,14 +235,30 @@ export default function Verification() {
                   )}
                 </div>
               ) : (
-                <button
-                  type="button"
-                  onClick={start}
-                  disabled={starting || kyc.data.attempts_used >= kyc.data.attempts_allowed}
-                  className="rounded-full bg-gold px-5 py-2.5 text-sm font-semibold text-ink disabled:opacity-40"
-                >
-                  Start verification
-                </button>
+                <div className="w-full space-y-2">
+                  {kyc.data.status === 'pending' && (
+                    <p className="text-sm text-text-mid">
+                      Your check is open. Continue where you left off - it does not use another attempt.
+                    </p>
+                  )}
+                  {kyc.data.status === 'rejected' && (
+                    <p className="text-sm text-red-200">
+                      The last check did not pass. Make sure your name and date of birth on Kinjy match your document.
+                    </p>
+                  )}
+                  <button
+                    type="button"
+                    onClick={start}
+                    disabled={
+                      starting ||
+                      (kyc.data.status !== 'pending' && kyc.data.attempts_used >= kyc.data.attempts_allowed)
+                    }
+                    className="inline-flex items-center gap-1.5 rounded-full bg-gold px-5 py-2.5 text-sm font-semibold text-ink disabled:opacity-40"
+                  >
+                    {starting ? 'Opening…' : kyc.data.status === 'pending' ? 'Continue verification' : 'Start verification'}
+                    <ExternalLink size={14} aria-hidden="true" />
+                  </button>
+                </div>
               )}
             </div>
 

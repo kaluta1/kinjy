@@ -21,7 +21,7 @@ Last reviewed: 2026-10-18 (open communities that publish publicly)
 | **Live video broadcasting** | Chat is real, camera preview is local-only. **Nothing is transmitted.** `/live` says so on screen. | An ingest server, a transcoder and a CDN — or WebRTC peer-to-peer plus a TURN server (viewer-count limited). |
 | **End-to-end encrypted messages** | Messages and chat attachments are **encrypted at rest** (`MESSAGES_ENCRYPTION_KEY`), so a stolen database or backup reveals nothing — but the server holds the key and can read them. No key exchange exists, so nothing is end-to-end; the thread header says “Encrypted on our servers”, not “end-to-end”. | Per-device keys, a key agreement (Signal/MLS via a vetted library), multi-device and key backup. |
 | **Voice and video calls** | *Signalling* is built: offer/answer/ICE relay over the existing socket, payload never inspected. **No TURN server**, so peers behind symmetric NATs will fail to connect, and **no group calls** (an offer to 3+ is refused rather than left to fail mysteriously). | A TURN relay, and an SFU for groups. |
-| **Real payment rails** | NowPayments and Mangopay run in **mock mode**. The ledger, splits and payout batches are real; money movement is not. | API keys, IPN endpoint reachable from the internet, payout whitelisting. |
+| **Real payment rails** | **Sonco Pay** takes every payment and pays withdrawals once `SONCOPAY_API_KEY` is set (18/10, see the section at the end). Without it, the old rails stay in mock mode. NowPayments and Mangopay themselves are still not wired. | Sonco Pay: the server IP declared in its dashboard, and a funded Sonco Pay balance for withdrawals. |
 | **WebAuthn off localhost** | Passkeys work on `http://localhost`. From another machine over plain HTTP the ceremony **will fail**. | HTTPS. |
 
 ## 2. Rules stored but not enforced
@@ -191,8 +191,8 @@ Checked on production 2026-08-20, promise by promise.
 - **Kinjy Leaders payout to an actual rail** — the monthly snapshot, the
   commission ranking, the fraud-review gate and `/admin/leaders-pool/pay` all
   work and credit member wallets. Getting that wallet balance out of the
-  building still goes through the ordinary payout batch, which is mock until
-  the NowPayments/Mangopay keys are set.
+  building is now a member withdrawal through Sonco Pay (18/10); the old
+  payout batch refuses to run while Sonco Pay is on.
 - **Referral-pool refund when the pool fills mid-payment** — if the last seat is
   sold between checkout and settlement, the payment is flagged `refund_due` and
   logged loudly, but nothing refunds it automatically yet.
@@ -1272,3 +1272,42 @@ Three causes, all fixed:
   only runs inside a container - pre-existing.
 - Deployed on kinjy.com 17/10 22:51 (auth, social, messaging, memorial,
   gateway, web; backups `pre-team-20261017-2250`), with the mention change.
+
+## Sonco Pay payments, Kaluta KYC, payout wallet and withdrawals (18/10)
+
+- **Every payment goes through Sonco Pay** when `SONCOPAY_API_KEY` is set:
+  checkout creates a Sonco Pay payment (`order_id` = Kinjy payment id) and the
+  member pays on Sonco Pay's page, then comes back. Settled only when the
+  payment read back from Sonco Pay is paid, USD, for the exact amount -
+  webhook signature checked (`/api/payments/webhook/soncopay`), and the mock
+  shortcut is off.
+- **KinjyKYC = Kaluta KYC** after the fee: `/kyc/start` opens a session with
+  name, date of birth and country; reopening it costs no attempt; an expired
+  session gives the attempt back. The Kaluta webhook (`/api/kyc/webhook/kaluta`)
+  is unsigned, so it is a doorbell: the state is read back from Kaluta.
+- **Payout wallet** (USDT on BSC only): the member saves it, confirms it from
+  an e-mail link (24 h, one use, works signed out), then an admin approves it
+  on `/admin/wallets`; the admin's id and name are kept and shown. An admin
+  cannot approve their own. A new address starts again and blocks withdrawals.
+- **Withdraw** (Earnings tab): the whole available balance, automatic. The
+  ledger reserves it under the withdrawal id first (`payout_holds`, locked
+  wallet), one withdrawal in flight per member (database index), Sonco Pay
+  payout `reference` = the same id. Refusal or failed payout gives the money
+  back once; a timeout keeps it reserved and a reconciler (every 5 min, or
+  `/admin/payouts/withdrawals/reconcile`) finishes it.
+- Minimum withdrawal = Sonco Pay's `min_payout_usd` ($5 today) plus the
+  network fee, because the **fee is paid by the member**
+  (`PAYOUT_FEE_PAID_BY=member`; `platform` makes Kinjy pay it). Withdrawals
+  are paid **from Kinjy's own Sonco Pay balance**: it must hold USDT BSC.
+- Tests: `e2e_soncopay.py` 55/55 against `fake_sonco_kaluta.py`
+  (`compose.sonco-test.yml`); ledger reconcile drift 0; older payment tests
+  pass in mock mode.
+- **Not done:**
+  - **subscriptions and ad credits still have no purchase screen**, so
+    nothing calls checkout for them;
+  - no screen for the admin withdrawal list (the route exists);
+  - the old `/payments/destinations` and payout batch are refused while
+    Sonco Pay is on, not removed;
+  - not tried against the real Sonco Pay and Kaluta: the live key only
+    answers from the server's declared IP. The first real payment and the
+    first real withdrawal are the test.

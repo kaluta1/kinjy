@@ -19,6 +19,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY requirements.txt /tmp/requirements.txt
 RUN pip install --retries 5 --timeout 120 -r /tmp/requirements.txt
 
+# The Sonco Pay SDK, shipped with the code rather than fetched: it is not on a
+# public index, and the version that pays real money should be the one that was
+# tested, not whatever a registry serves on the day of a build. Pure Python and
+# small, so it sits in the shared layer.
+COPY vendor /tmp/vendor
+RUN pip install --no-deps /tmp/vendor/*.whl
+
 # Shared library, then the service itself.
 COPY common /app/common
 

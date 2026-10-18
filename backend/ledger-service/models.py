@@ -190,6 +190,32 @@ class PayoutItem(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
 
+class PayoutHold(Base):
+    """Money taken out of a member's balance for one withdrawal.
+
+    Keyed by the withdrawal it belongs to, so reserving the same withdrawal
+    twice - a double click, a retry after a timeout, two tabs - takes the money
+    once, and releasing it twice puts it back once. That key is the whole
+    point: a withdrawal pays real money, and "the request was sent again" must
+    never mean "the member was paid again".
+
+    Reserving moves the amount from ``available`` to ``lifetime_paid`` at once,
+    which is what the reconciliation expects of money that has left. If Sonco
+    Pay then refuses or fails the payout, releasing moves it back.
+    """
+
+    __tablename__ = "payout_holds"
+    __table_args__ = {"schema": SCHEMA}
+
+    key: Mapped[str] = mapped_column(String(80), primary_key=True)
+    member_id: Mapped[str] = mapped_column(String(40), index=True)
+    amount: Mapped[Decimal] = mapped_column(AMOUNT)
+    currency: Mapped[str] = mapped_column(String(10), default="USD")
+    status: Mapped[str] = mapped_column(String(20), default="reserved")  # reserved|released
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    released_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
 # --- Chart of accounts ------------------------------------------------------
 # Kept as constants so a typo becomes an import error rather than a silently
 # orphaned ledger line.

@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import date, datetime, timezone
 from decimal import Decimal
 
-from sqlalchemy import Boolean, Date, DateTime, Integer, Numeric, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, Date, DateTime, Index, Integer, Numeric, String, Text, UniqueConstraint, text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from common.database import Base
@@ -25,7 +25,7 @@ class PaymentIntent(Base):
 
     id: Mapped[str] = mapped_column(String(40), primary_key=True, default=lambda: new_id("pmt"))
     user_id: Mapped[str] = mapped_column(String(40), index=True)
-    rail: Mapped[str] = mapped_column(String(20), default="nowpayments")  # nowpayments|mangopay|mock
+    rail: Mapped[str] = mapped_column(String(20), default="nowpayments")  # soncopay|nowpayments|mangopay|mock
     purpose: Mapped[str] = mapped_column(String(40))  # order|subscription|ad_credit|kyc_fee|tribute
     reference: Mapped[str | None] = mapped_column(String(80), index=True)
 
@@ -62,6 +62,22 @@ class PayoutDestination(Base):
     is_default: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
+    # The Sonco Pay wallet (rail "soncopay") goes through two checks before a
+    # withdrawal may use it: the member confirms it from their e-mail - so a
+    # stolen session cannot quietly redirect their money - and then an admin
+    # approves it, and which admin is kept. Changing the address starts both
+    # checks again.
+    status: Mapped[str] = mapped_column(String(20), default="pending_email")
+    # pending_email|pending_admin|confirmed|rejected
+    confirm_token_hash: Mapped[str | None] = mapped_column(String(64), index=True)
+    confirm_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    email_confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    reviewed_by: Mapped[str | None] = mapped_column(String(40))
+    reviewed_by_name: Mapped[str | None] = mapped_column(String(120))
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    review_note: Mapped[str | None] = mapped_column(String(300))
+    updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
 
 class KycRecord(Base):
     """KinjyKYC (blueprint §20).
@@ -86,6 +102,10 @@ class KycRecord(Base):
     status: Mapped[str] = mapped_column(String(20), default="unverified")
     # unverified|pending|verified|rejected
     provider_reference: Mapped[str | None] = mapped_column(String(120))
+    # The open Kaluta session, so coming back to the page reopens it instead
+    # of spending another of the year's attempts.
+    verification_url: Mapped[str | None] = mapped_column(String(500))
+    session_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     verified_on: Mapped[date | None] = mapped_column(Date)
     expires_on: Mapped[date | None] = mapped_column(Date)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
@@ -116,3 +136,45 @@ class Refund(Base):
     failure_reason: Mapped[str | None] = mapped_column(String(200))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
     settled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class Withdrawal(Base):
+    """A member taking their commissions out, paid by Sonco Pay in USDT on BSC.
+
+    The id is the idempotency key end to end: the ledger reserves the amount
+    under it, and Sonco Pay receives it as the payout reference. A retry of the
+    same withdrawal is the same payout on both sides, never a second one.
+    """
+
+    __tablename__ = "withdrawals"
+    __table_args__ = (
+        # One withdrawal in flight per member. Two tabs, or a double click,
+        # meet here before they can meet the money.
+        Index(
+            "uq_withdrawal_in_flight",
+            "user_id",
+            unique=True,
+            postgresql_where=text("status IN ('reserved', 'submitted')"),
+        ),
+        {"schema": SCHEMA},
+    )
+
+    id: Mapped[str] = mapped_column(String(40), primary_key=True, default=lambda: new_id("wdr"))
+    user_id: Mapped[str] = mapped_column(String(40), index=True)
+    destination_id: Mapped[int | None] = mapped_column(Integer)
+    # What leaves the member's balance, the network fee, and what reaches the
+    # wallet. With the fee on the member, net = amount - fee.
+    amount: Mapped[Decimal] = mapped_column(AMOUNT)
+    fee: Mapped[Decimal] = mapped_column(AMOUNT, default=Decimal("0"))
+    net: Mapped[Decimal] = mapped_column(AMOUNT)
+    asset: Mapped[str] = mapped_column(String(10), default="USDT")
+    network: Mapped[str] = mapped_column(String(10), default="BSC")
+    address: Mapped[str] = mapped_column(String(255))
+    status: Mapped[str] = mapped_column(String(20), default="reserved", index=True)
+    # reserved|submitted|completed|failed
+    soncopay_payout_id: Mapped[str | None] = mapped_column(String(80), index=True)
+    tx_hash: Mapped[str | None] = mapped_column(String(120))
+    failure_reason: Mapped[str | None] = mapped_column(String(300))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

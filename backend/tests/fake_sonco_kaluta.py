@@ -1,0 +1,164 @@
+"""A stand-in for Sonco Pay, Kaluta KYC and a mail server, for e2e_soncopay.py.
+
+Run on the host; the stack reaches it through host.docker.internal (see
+tests/compose.sonco-test.yml). Nothing here moves money or opens a real
+identity session, which is the point: those cost real money and are tested
+against the real services only by a human, with a real key.
+
+HTTP on 8790 speaks the parts of both APIs Kinjy uses, plus /_ctl routes the
+test drives. SMTP on 8791 keeps every message so the test can follow the
+confirmation link.
+"""
+from __future__ import annotations
+
+import json
+import re
+import socketserver
+import threading
+import time
+import uuid
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+STATE = {
+    "payments": {},        # id -> payment
+    "payouts": {},         # id -> payout
+    "sessions": {},        # id -> kaluta session
+    "mails": [],
+    "payout_mode": "ok",   # ok | refuse | unreachable
+    "payout_calls": 0,
+}
+LOCK = threading.Lock()
+
+
+class Handler(BaseHTTPRequestHandler):
+    def log_message(self, *args):
+        pass
+
+    def _send(self, code, body):
+        raw = json.dumps(body).encode()
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(raw)))
+        self.end_headers()
+        self.wfile.write(raw)
+
+    def _body(self):
+        n = int(self.headers.get("Content-Length") or 0)
+        return json.loads(self.rfile.read(n) or b"{}")
+
+    def do_GET(self):
+        p = self.path.split("?")[0]
+        with LOCK:
+            if p == "/v1/payout-fees":
+                return self._send(200, {"fees": {"USDT:BSC": "0.50", "USDT:TRON": "1"}, "min_payout_usd": "5"})
+            m = re.fullmatch(r"/v1/payments/([^/]+)", p)
+            if m and m.group(1) in STATE["payments"]:
+                return self._send(200, STATE["payments"][m.group(1)])
+            m = re.fullmatch(r"/v1/payouts/([^/]+)", p)
+            if m and m.group(1) in STATE["payouts"]:
+                return self._send(200, STATE["payouts"][m.group(1)])
+            m = re.fullmatch(r"/v1/sessions/([^/]+)/public", p)
+            if m and m.group(1) in STATE["sessions"]:
+                s = STATE["sessions"][m.group(1)]
+                return self._send(200, {"session_id": s["session_id"], "status": s["status"]})
+            if p == "/_ctl/state":
+                return self._send(200, STATE)
+        self._send(404, {"detail": "not found"})
+
+    def do_POST(self):
+        p = self.path.split("?")[0]
+        body = self._body()
+        with LOCK:
+            if p == "/v1/payments":
+                if not (self.headers.get("X-Api-Key") or "").startswith("sp_"):
+                    return self._send(401, {"detail": "bad key", "code": "authentication_error"})
+                for pay in STATE["payments"].values():
+                    if pay["order_id"] == body.get("order_id"):
+                        return self._send(200, pay)
+                pid = "pay_" + uuid.uuid4().hex[:12]
+                pay = {"id": pid, "order_id": body.get("order_id"), "amount": body.get("amount"),
+                       "currency": body.get("currency"), "status": "pending",
+                       "checkout_url": f"https://fake.soncopay.test/pay/{pid}",
+                       "return_url": body.get("return_url"), "callback_url": body.get("callback_url")}
+                STATE["payments"][pid] = pay
+                return self._send(201, pay)
+            if p == "/v1/payouts":
+                STATE["payout_calls"] += 1
+                mode = STATE["payout_mode"]
+                if mode == "refuse":
+                    return self._send(400, {"detail": "Insufficient balance", "code": "insufficient_balance"})
+                if mode == "unreachable":
+                    return self._send(503, {"detail": "down"})
+                for po in STATE["payouts"].values():
+                    if po["reference"] == body.get("reference"):
+                        return self._send(200, po)
+                oid = "po_" + uuid.uuid4().hex[:12]
+                po = {"id": oid, "reference": body.get("reference"), "amount": body.get("amount"),
+                      "asset": body.get("asset"), "network": body.get("network"),
+                      "address": body.get("address"), "status": "pending", "tx_hash": None}
+                STATE["payouts"][oid] = po
+                return self._send(201, po)
+            if p == "/v1/sessions":
+                if not self.headers.get("X-API-Key"):
+                    return self._send(401, {"detail": "no key"})
+                sid = "ses_" + uuid.uuid4().hex[:12]
+                s = {"session_id": sid, "status": "created", "request": body,
+                     "verification_url": f"https://fake.kalutakyc.test/v/{sid}",
+                     "expires_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() + 3600))}
+                STATE["sessions"][sid] = s
+                return self._send(201, {k: s[k] for k in ("session_id", "verification_url", "expires_at")})
+            # --- controls ---
+            if p == "/_ctl/payment":
+                STATE["payments"][body["id"]].update(body.get("set", {}))
+                return self._send(200, STATE["payments"][body["id"]])
+            if p == "/_ctl/payout":
+                STATE["payouts"][body["id"]].update(body.get("set", {}))
+                return self._send(200, STATE["payouts"][body["id"]])
+            if p == "/_ctl/session":
+                STATE["sessions"][body["id"]]["status"] = body["status"]
+                return self._send(200, {"ok": True})
+            if p == "/_ctl/mode":
+                STATE["payout_mode"] = body["payout_mode"]
+                return self._send(200, {"ok": True})
+        self._send(404, {"detail": "not found"})
+
+
+class SMTPHandler(socketserver.StreamRequestHandler):
+    """Just enough SMTP for smtplib.send_message, without TLS or auth."""
+
+    def handle(self):
+        def say(line):
+            self.wfile.write((line + "\r\n").encode())
+
+        say("220 fake ESMTP")
+        while True:
+            line = self.rfile.readline()
+            if not line:
+                return
+            cmd = line.decode(errors="replace").strip().upper()
+            if cmd.startswith("EHLO") or cmd.startswith("HELO"):
+                say("250 fake")
+            elif cmd.startswith("DATA"):
+                say("354 go ahead")
+                data = []
+                while True:
+                    row = self.rfile.readline()
+                    if row in (b".\r\n", b".\n", b""):
+                        break
+                    data.append(row.decode(errors="replace"))
+                with LOCK:
+                    STATE["mails"].append("".join(data))
+                say("250 queued")
+            elif cmd.startswith("QUIT"):
+                say("221 bye")
+                return
+            else:
+                say("250 ok")
+
+
+if __name__ == "__main__":
+    smtp = socketserver.ThreadingTCPServer(("0.0.0.0", 8791), SMTPHandler)
+    smtp.daemon_threads = True
+    threading.Thread(target=smtp.serve_forever, daemon=True).start()
+    print("fake sonco/kaluta on :8790, smtp on :8791", flush=True)
+    ThreadingHTTPServer(("0.0.0.0", 8790), Handler).serve_forever()

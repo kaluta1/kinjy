@@ -806,6 +806,107 @@ def list_journals(
     return {"total": total, "items": [_journal_out(r, db) for r in rows]}
 
 
+@app.get("/internal/wallets/{member_id}", tags=["internal"])
+def wallet_of(member_id: str, db: OrmSession = Depends(get_db)):
+    """One member's balance, for payment-service to quote a withdrawal on."""
+    wallet = posting.get_wallet(db, member_id)
+    db.commit()
+    return {
+        "member_id": member_id,
+        "available": str(economy.money(wallet.available)),
+        "pending": str(economy.money(wallet.pending)),
+        "lifetime_paid": str(economy.money(wallet.lifetime_paid)),
+    }
+
+
+class HoldIn(BaseModel):
+    member_id: str
+    amount: Decimal = Field(gt=0)
+    key: str = Field(min_length=4, max_length=80)
+
+
+def _locked_wallet(db: OrmSession, member_id: str) -> models.Wallet:
+    """The member's wallet, locked until the end of this transaction.
+
+    The lock is what makes the balance check mean something: without it, two
+    withdrawals arriving together both read the same balance, both pass, and
+    both are paid out of money that was only there once.
+    """
+    wallet = db.scalar(
+        select(models.Wallet)
+        .where(models.Wallet.owner_id == member_id, models.Wallet.currency == "USD")
+        .with_for_update()
+    )
+    if wallet is None:
+        raise HTTPException(status_code=409, detail="Nothing to withdraw")
+    return wallet
+
+
+@app.post("/internal/payouts/reserve", tags=["internal"])
+def reserve_payout(payload: HoldIn, db: OrmSession = Depends(get_db)):
+    """Take a withdrawal's amount out of the member's balance, once.
+
+    Called by payment-service before it asks Sonco Pay to send anything, so the
+    money has already left the balance by the time it can leave the platform.
+    The same key again returns the hold that already exists and moves nothing.
+    """
+    amount = economy.money(payload.amount)
+    existing = db.get(models.PayoutHold, payload.key)
+    if existing is not None:
+        if existing.member_id != payload.member_id or economy.money(existing.amount) != amount:
+            # The same key for a different member or amount is a bug in the
+            # caller, and paying it would be a guess.
+            raise HTTPException(status_code=409, detail="That withdrawal key is already used for something else")
+        return {"key": existing.key, "status": existing.status, "amount": str(existing.amount), "created": False}
+
+    wallet = _locked_wallet(db, payload.member_id)
+    # Two requests with the same key both got here; the second waited on the
+    # lock while the first took the money. Look again now that it is ours.
+    if db.scalar(select(models.PayoutHold.key).where(models.PayoutHold.key == payload.key)):
+        db.rollback()
+        return reserve_payout(payload, db)
+    if economy.money(wallet.available) < amount:
+        raise HTTPException(status_code=409, detail="The balance is lower than the amount to withdraw")
+    wallet.available = economy.money(wallet.available) - amount
+    wallet.lifetime_paid = economy.money(wallet.lifetime_paid) + amount
+    db.add(models.PayoutHold(key=payload.key, member_id=payload.member_id, amount=amount))
+    db.commit()
+    return {
+        "key": payload.key,
+        "status": "reserved",
+        "amount": str(amount),
+        "available": str(wallet.available),
+        "created": True,
+    }
+
+
+@app.post("/internal/payouts/release", tags=["internal"])
+def release_payout(payload: HoldIn, db: OrmSession = Depends(get_db)):
+    """Give a withdrawal's amount back, once. For a payout that did not happen.
+
+    Only ever after Sonco Pay has said no, or that it failed - never on a
+    timeout, when the money may well be on its way. Releasing a hold that was
+    already released, or that never existed, moves nothing.
+    """
+    hold = db.scalar(
+        select(models.PayoutHold).where(models.PayoutHold.key == payload.key).with_for_update()
+    )
+    if hold is None:
+        raise HTTPException(status_code=404, detail="No such withdrawal hold")
+    if hold.member_id != payload.member_id or economy.money(hold.amount) != economy.money(payload.amount):
+        raise HTTPException(status_code=409, detail="That withdrawal key belongs to something else")
+    if hold.status == "released":
+        return {"key": hold.key, "status": "released", "released": False}
+
+    wallet = _locked_wallet(db, hold.member_id)
+    wallet.available = economy.money(wallet.available) + economy.money(hold.amount)
+    wallet.lifetime_paid = economy.money(wallet.lifetime_paid) - economy.money(hold.amount)
+    hold.status = "released"
+    hold.released_at = datetime.now(timezone.utc)
+    db.commit()
+    return {"key": hold.key, "status": "released", "released": True, "available": str(wallet.available)}
+
+
 @app.get("/internal/payout-candidates", tags=["internal"])
 def payout_candidates(db: OrmSession = Depends(get_db)):
     """Members at or above the $1 threshold. payment-service applies the KYC and

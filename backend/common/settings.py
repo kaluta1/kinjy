@@ -148,6 +148,31 @@ MANGOPAY_CLIENT_ID = _str("MANGOPAY_CLIENT_ID")
 MANGOPAY_API_KEY = _str("MANGOPAY_API_KEY")
 MANGOPAY_BASE_URL = _str("MANGOPAY_BASE_URL", "https://api.sandbox.mangopay.com")
 
+# Sonco Pay: every payment Kinjy takes, and every commission it pays out.
+# Blank key => the old rails (mock in development). The key is an sp_live_ or
+# sp_test_ key; a live key only answers from an IP address declared in the
+# Sonco Pay dashboard, so the production server's address has to be listed
+# there or every call comes back 403.
+SONCOPAY_API_KEY = _str("SONCOPAY_API_KEY")
+SONCOPAY_WEBHOOK_SECRET = _str("SONCOPAY_WEBHOOK_SECRET")
+# Only set to point at something other than Sonco Pay itself - a test double.
+SONCOPAY_BASE_URL = _str("SONCOPAY_BASE_URL")
+# Commissions are paid in USDT on BNB Smart Chain, to an address the member
+# saved and an admin approved.
+PAYOUT_ASSET = _str("PAYOUT_ASSET", "USDT")
+PAYOUT_NETWORK = _str("PAYOUT_NETWORK", "BSC")
+# Who carries Sonco Pay's network fee on a withdrawal: "member" sends the
+# balance minus the fee (what most payout services do), "platform" sends the
+# full balance and Kinjy pays the fee on top.
+PAYOUT_FEE_PAID_BY = _str("PAYOUT_FEE_PAID_BY", "member")
+# How long the link in the wallet confirmation e-mail stays valid.
+PAYOUT_WALLET_CONFIRM_HOURS = _int("PAYOUT_WALLET_CONFIRM_HOURS", 24)
+
+# Kaluta KYC: the identity check behind KinjyKYC. Blank key => verification
+# cannot start, and says so, rather than pretending to.
+KALUTA_KYC_API_KEY = _str("KALUTA_KYC_API_KEY")
+KALUTA_KYC_BASE_URL = _str("KALUTA_KYC_BASE_URL", "https://kalutakyc.com")
+
 # --- AI ---------------------------------------------------------------------
 AI_DEFAULT_PROVIDER = _str("AI_DEFAULT_PROVIDER", "mock")
 

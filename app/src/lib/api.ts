@@ -312,6 +312,72 @@ export interface KycStatus {
   fee_usd: string
 }
 
+/**
+ * Where commissions are paid: a BSC address, confirmed from the member's
+ * e-mail, then approved by an admin (whose name is kept). A new address
+ * starts both checks again.
+ */
+export type PayoutWalletStatus = 'pending_email' | 'pending_admin' | 'confirmed' | 'rejected'
+
+export interface PayoutWallet {
+  id: number
+  address: string
+  asset: string
+  network: string
+  status: PayoutWalletStatus
+  email_confirmed_at?: string | null
+  reviewed_by_name?: string | null
+  reviewed_at?: string | null
+  review_note?: string | null
+  updated_at?: string | null
+}
+
+export interface PayoutWalletReview extends PayoutWallet {
+  user_id: string
+  display_name?: string | null
+  handle?: string | null
+  kyc_verified?: boolean | null
+  reviewed_by?: string | null
+}
+
+export interface WithdrawQuote {
+  available: string
+  /** The smallest balance that can be withdrawn: Sonco Pay's minimum, plus the fee when the member carries it. */
+  minimum: string
+  fee: string | null
+  fee_paid_by: 'member' | 'platform'
+  you_receive: string | null
+  asset: string
+  network: string
+  wallet: PayoutWallet | null
+  eligible: boolean
+  blocked_by: string[]
+}
+
+export interface Withdrawal {
+  id: string
+  amount: string
+  fee: string
+  net: string
+  asset: string
+  network: string
+  address: string
+  status: 'reserved' | 'submitted' | 'completed' | 'failed'
+  tx_hash?: string | null
+  failure_reason?: string | null
+  created_at: string
+  completed_at?: string | null
+}
+
+export interface PaymentIntentStatus {
+  payment_id: string
+  purpose: string
+  reference?: string | null
+  amount: string
+  status: string
+  settled: boolean
+}
+
 export interface DeviceSession {
   id: string
   device_label: string | null
@@ -2663,7 +2729,12 @@ export const kaluta = {
      * `checkout_url` and `pay_address` say where to pay.
      */
     payOrder: (orderId: string, amount: string) =>
-      api.post<OrderPayment>('/payments/checkout', { purpose: 'order', amount, reference: orderId }),
+      api.post<OrderPayment>('/payments/checkout', {
+        purpose: 'order',
+        amount,
+        reference: orderId,
+        return_path: `/market/orders/${orderId}`,
+      }),
     settleMockPayment: (paymentId: string) =>
       api.post<{ payment_id: string; status: string; mock: boolean }>(`/payments/${paymentId}/mock-settle`, {}),
 
@@ -2885,6 +2956,20 @@ export const kaluta = {
     remove: (userId: string) => api.delete<{ user_id: string; role: string }>(`/admin/team/${userId}`),
   },
 
+  /** Admin: payout wallets waiting for approval, and the withdrawals they paid. */
+  payoutAdmin: {
+    wallets: (status: PayoutWalletStatus | 'all' = 'pending_admin') =>
+      api.get<{ items: PayoutWalletReview[] }>(`/admin/payouts/wallets?status=${status}`),
+    approve: (walletId: number, note?: string) =>
+      api.post<{ wallet: PayoutWalletReview }>(`/admin/payouts/wallets/${walletId}/approve`, { note }),
+    reject: (walletId: number, note?: string) =>
+      api.post<{ wallet: PayoutWalletReview }>(`/admin/payouts/wallets/${walletId}/reject`, { note }),
+    withdrawals: (status?: string) =>
+      api.get<{ items: Array<Withdrawal & { user_id: string; soncopay_payout_id?: string | null }> }>(
+        `/admin/payouts/withdrawals${status ? `?status=${status}` : ''}`,
+      ),
+  },
+
   trustSafety: {
     overview: () => api.get<ModerationOverview>('/admin/moderation/overview'),
     reviewQueue: (limit = 50) =>
@@ -2948,9 +3033,33 @@ export const kaluta = {
       ),
 
     kyc: () => api.get<KycStatus>('/kyc/status'),
-    startKyc: () => api.post<{ status: string; attempt?: number }>('/kyc/start'),
+    /** Opens (or reopens) the Kaluta KYC session; `verification_url` is where the member goes next. */
+    startKyc: () =>
+      api.post<{ status: string; attempt?: number; verification_url?: string; resumed?: boolean; already?: boolean }>(
+        '/kyc/start',
+      ),
     /** Pay this year's verification fee. The server holds the price; `amount` must match it. */
-    payKycFee: (amount: string) => api.post<OrderPayment>('/payments/checkout', { purpose: 'kyc_fee', amount }),
+    payKycFee: (amount: string) =>
+      api.post<OrderPayment>('/payments/checkout', {
+        purpose: 'kyc_fee',
+        amount,
+        return_path: '/dashboard?tab=verification',
+      }),
+    /** Where a payment stands, read back from Sonco Pay - what the page asks on the member's return. */
+    paymentStatus: (paymentId: string) => api.get<PaymentIntentStatus>(`/payments/intents/${paymentId}`),
+
+    payoutWallet: () => api.get<{ wallet: PayoutWallet | null; asset: string; network: string }>('/payments/payout-wallet'),
+    /** Saves the address and mails the confirmation link. The same address again changes nothing. */
+    setPayoutWallet: (address: string) =>
+      api.put<{ wallet: PayoutWallet; changed: boolean }>('/payments/payout-wallet', { address }),
+    resendWalletConfirmation: () => api.post<{ sent: boolean }>('/payments/payout-wallet/resend', {}),
+    /** The link from the e-mail. Works signed out: having the mail is the proof. */
+    confirmPayoutWallet: (token: string) =>
+      api.post<{ wallet: PayoutWallet }>('/payments/payout-wallet/confirm', { token }, { auth: false }),
+    withdrawQuote: () => api.get<WithdrawQuote>('/payments/withdraw/quote'),
+    /** Withdraws the whole available balance to the approved wallet. */
+    withdraw: () => api.post<{ withdrawal: Withdrawal }>('/payments/withdraw', {}),
+    withdrawals: () => api.get<{ items: Withdrawal[] }>('/payments/withdrawals'),
 
     /**
      * Change the password, and sign the other devices out.
