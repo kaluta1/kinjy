@@ -11,6 +11,7 @@ import {
   type ReferralPoolState,
 } from '@/lib/api'
 import { FEATURES } from '@/lib/features'
+import InPagePayment from '@/components/payments/InPagePayment'
 
 const usd = (value: string | number) =>
   `$${Number(value).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
@@ -32,6 +33,9 @@ export default function Earn() {
   const [joining, setJoining] = useState(false)
   const [note, setNote] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const [seatPayment, setSeatPayment] = useState<{ payment_id: string; amount: string; checkout_url?: string } | null>(
+    null,
+  )
 
   const join = async () => {
     setJoining(true)
@@ -39,6 +43,11 @@ export default function Earn() {
     setNote(null)
     try {
       const payment = await kaluta.referralPool.join()
+      if (payment.rail === 'soncopay') {
+        // Paid right here, on Kinjy's page.
+        setSeatPayment(payment)
+        return
+      }
       if (payment.checkout_url) {
         window.location.href = payment.checkout_url
         return
@@ -181,6 +190,20 @@ export default function Earn() {
                     <Crown size={15} aria-hidden="true" />
                     You hold seat #{pool.data.my_seat.seat_number.toLocaleString()} ({pool.data.my_seat.status}).
                   </p>
+                ) : seatPayment ? (
+                  <div className="mt-5 rounded-2xl border border-[var(--cloud-border)] p-4">
+                    <InPagePayment
+                      paymentId={seatPayment.payment_id}
+                      fallbackUrl={seatPayment.checkout_url}
+                      amount={seatPayment.amount}
+                      returnPath="/earn"
+                      onPaid={() => {
+                        setSeatPayment(null)
+                        setNote('Payment received. Your seat is being granted.')
+                        setPoolTick((n) => n + 1)
+                      }}
+                    />
+                  </div>
                 ) : pool.data.open ? (
                   <button
                     type="button"

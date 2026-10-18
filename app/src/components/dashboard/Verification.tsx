@@ -3,6 +3,7 @@ import { useSearchParams } from 'react-router'
 import { BadgeCheck, ExternalLink, FlaskConical, Lock } from 'lucide-react'
 import { useApi } from '@/hooks/useApi'
 import { ApiError, kaluta, type KycStatus, type OrderPayment } from '@/lib/api'
+import InPagePayment from '@/components/payments/InPagePayment'
 import { Badge, Panel, PanelState } from './primitives'
 
 const TONE = {
@@ -93,13 +94,8 @@ export default function Verification() {
     setPaying(true)
     setMessage(null)
     try {
-      const started = await kaluta.account.payKycFee(kyc.data.fee_usd)
-      if (!started.mock && started.checkout_url && /^https:\/\//i.test(started.checkout_url)) {
-        // Same tab: Sonco Pay sends the member back here when it is done.
-        window.location.assign(started.checkout_url)
-        return
-      }
-      setPayment(started)
+      // Paid right here, on Kinjy's page (components/payments/InPagePayment).
+      setPayment(await kaluta.account.payKycFee(kyc.data.fee_usd))
     } catch (err) {
       setMessage(err instanceof ApiError ? err.message : 'Could not start the payment')
     } finally {
@@ -209,7 +205,22 @@ export default function Verification() {
                       </button>
                     </div>
                   )}
-                  {payment && !payment.mock && (
+                  {payment && payment.rail === 'soncopay' && (
+                    <div className="rounded-2xl border border-[var(--cloud-border)] p-4">
+                      <InPagePayment
+                        paymentId={payment.payment_id}
+                        fallbackUrl={payment.checkout_url}
+                        amount={payment.amount}
+                        returnPath="/dashboard?tab=verification"
+                        onPaid={() => {
+                          setPayment(null)
+                          setMessage('Fee paid. You can start the identity check now.')
+                          kyc.reload()
+                        }}
+                      />
+                    </div>
+                  )}
+                  {payment && !payment.mock && payment.rail !== 'soncopay' && (
                     <div className="space-y-2 rounded-2xl border border-white/10 p-3 text-sm text-text-mid">
                       {payment.checkout_url && /^https?:\/\//i.test(payment.checkout_url) && (
                         <a

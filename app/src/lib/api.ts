@@ -376,6 +376,67 @@ export interface PaymentIntentStatus {
   amount: string
   status: string
   settled: boolean
+  /** The step Sonco Pay asks for next, when the payment is still open. */
+  action?: PayAction | null
+  /** A declined request (mobile money refused...): choose a method again. */
+  retryable?: boolean
+}
+
+/** Paying on Kinjy's own page: what Sonco Pay offers for one payment. */
+export interface PayMethods {
+  status?: string
+  mobile_money: Array<{
+    code: string
+    operator: string
+    label?: string | null
+    country: string
+    prefix: string
+    currency?: string | null
+    estimated_pay_amount?: string | null
+    estimated_payer_total?: string | null
+    redirect?: boolean
+    needs_operator?: boolean
+  }>
+  crypto: Array<{
+    asset: string
+    network: string
+    network_label?: string | null
+    label?: string | null
+    pay_currency?: string | null
+    estimated_pay_amount?: string | null
+  }>
+  other: Array<{ method: 'card' | 'binance_pay'; code?: string | null; label?: string | null }>
+}
+
+export interface PayAction {
+  type: 'send_crypto' | 'approve_on_phone' | 'redirect' | 'open_wallet' | 'wait_for_confirmation' | 'choose_method'
+  expires_at?: string | null
+  asset?: string
+  network?: string
+  network_label?: string
+  address?: string
+  memo?: string | null
+  amount?: string
+  amount_rule?: string
+  underpaid?: boolean
+  qr_url?: string
+  phone?: string
+  operator?: string
+  currency?: string
+  instructions?: string | null
+  url?: string
+  retry?: boolean
+  last_error?: string | null
+}
+
+export interface PayChoice {
+  method: 'mobile_money' | 'crypto' | 'card' | 'binance_pay'
+  code?: string
+  asset?: string
+  network?: string
+  phone?: string
+  country?: string
+  return_path?: string
 }
 
 export interface DeviceSession {
@@ -3047,6 +3108,14 @@ export const kaluta = {
       }),
     /** Where a payment stands, read back from Sonco Pay - what the page asks on the member's return. */
     paymentStatus: (paymentId: string) => api.get<PaymentIntentStatus>(`/payments/intents/${paymentId}`),
+    /** The methods this payment can be paid with, on Kinjy's own page. */
+    paymentMethods: (paymentId: string) => api.get<PayMethods>(`/payments/intents/${paymentId}/methods`),
+    /** Pass the member's choice to Sonco Pay; the answer is the step to show next. */
+    choosePaymentMethod: (paymentId: string, choice: PayChoice) =>
+      api.post<{ status: string; settled: boolean; action: PayAction | null }>(
+        `/payments/intents/${paymentId}/choose`,
+        choice,
+      ),
 
     payoutWallet: () => api.get<{ wallet: PayoutWallet | null; asset: string; network: string }>('/payments/payout-wallet'),
     /** Saves the address and mails the confirmation link. The same address again changes nothing. */

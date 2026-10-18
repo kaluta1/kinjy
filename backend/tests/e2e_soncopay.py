@@ -129,6 +129,36 @@ check("an outside return path is refused",
           "purpose": "kyc_fee", "amount": "10.00", "return_path": "//evil.example"}).status_code == 422)
 check("the mock shortcut is off", c.post(f"/payments/{pay['payment_id']}/mock-settle", headers=H(member)).status_code == 403)
 
+print()
+print("Paying on Kinjy's own page")
+methods = c.get(f"/payments/intents/{pay['payment_id']}/methods", headers=H(member)).json()
+check("the methods come from Sonco Pay",
+      [m["code"] for m in methods.get("mobile_money", [])] == ["mtn_bj"] and methods["crypto"][0]["asset"] == "USDT"
+      and methods["mobile_money"][0]["prefix"] == "+229", methods)
+check("somebody else cannot see them",
+      c.get(f"/payments/intents/{pay['payment_id']}/methods", headers=H(admin)).status_code == 404)
+r = c.post(f"/payments/intents/{pay['payment_id']}/choose", headers=H(member),
+           json={"method": "mobile_money", "code": "mtn_bj", "phone": "970000000", "country": "BJ"})
+check("a number Sonco Pay refuses: its reason, shown", r.status_code == 400 and "not a mobile money" in r.text, r.text[:200])
+r = c.post(f"/payments/intents/{pay['payment_id']}/choose", headers=H(member),
+           json={"method": "mobile_money", "code": "mtn_bj", "phone": "97 12 34 56", "country": "BJ"})
+check("mobile money: approve on the phone", r.status_code == 200 and r.json()["action"]["type"] == "approve_on_phone", r.text[:200])
+chosen = next(p for p in fake_state()["payments"].values() if p["order_id"] == pay["payment_id"])["chosen"]
+check("the number goes with its dialling code", chosen.get("phone") == "+22997123456", chosen)
+check("and the member as payer", (chosen.get("payer") or {}).get("reference") == member["id"], chosen)
+check("choosing does not settle anything", r.json()["settled"] is False)
+r = c.post(f"/payments/intents/{pay['payment_id']}/choose", headers=H(member),
+           json={"method": "crypto", "asset": "USDT", "network": "BSC"})
+step = r.json()["action"]
+check("crypto instead: the address and the exact amount, with a QR code",
+      step["type"] == "send_crypto" and step["address"].startswith("0x") and step["amount"] == "10.00"
+      and step["qr_url"].endswith("/qr.svg"), step)
+poll = c.get(f"/payments/intents/{pay['payment_id']}", headers=H(member)).json()
+check("the page's poll shows the same step", poll["action"]["type"] == "send_crypto" and not poll["settled"], poll)
+r = c.post(f"/payments/intents/{pay['payment_id']}/choose", headers=H(member),
+           json={"method": "card", "return_path": "//evil.example"})
+check("a return path off the site is refused", r.status_code == 422)
+
 paid_claim = {**sp, "status": "paid"}
 check("a webhook with a wrong signature is refused",
       webhook("payment.paid", paid_claim, secret="whsec_wrong").status_code == 400)

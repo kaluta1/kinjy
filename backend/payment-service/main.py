@@ -348,29 +348,119 @@ async def soncopay_webhook(request: Request, db: OrmSession = Depends(get_db)):
     return {"ok": True, "status": verdict}
 
 
+def _my_open_sonco_intent(payment_id: str, principal, db: OrmSession) -> models.PaymentIntent:
+    intent = db.get(models.PaymentIntent, payment_id)
+    if intent is None or intent.user_id != principal.user_id:
+        raise HTTPException(status_code=404, detail="Payment not found")
+    if intent.rail != "soncopay" or not intent.external_id:
+        raise HTTPException(status_code=409, detail="This payment is not paid on Kinjy's page")
+    return intent
+
+
 @app.get("/payments/intents/{payment_id}", tags=["payments"])
 async def payment_status(payment_id: str, principal: CurrentUser, db: OrmSession = Depends(get_db)):
-    """Where a payment stands, read back from Sonco Pay when it is still open.
+    """Where a payment stands, read back from Sonco Pay, with the step to show.
 
-    What the page asks on the member's return: the webhook usually got there
-    first, but it does not have to for the member to see their payment.
+    What the payment page asks every few seconds, and what the page asks on
+    the member's return. The webhook usually got there first, but it does not
+    have to for the member to see their payment go through.
     """
     intent = db.get(models.PaymentIntent, payment_id)
     if intent is None or intent.user_id != principal.user_id:
         raise HTTPException(status_code=404, detail="Payment not found")
-    verdict = None
+    verdict, step = None, None
     if intent.rail == "soncopay" and intent.settled_at is None and intent.status in ("waiting", "confirming"):
-        verdict = await _settle_from_sonco(intent.id, None, db)
+        sp_payment = None
+        try:
+            sp_payment = sonco.retrieve_payment(intent.external_id)
+        except sonco.SoncoError:
+            pass
+        if sp_payment is not None:
+            verdict = await _settle_from_sonco(intent.id, sp_payment, db)
+            step = sonco.action(sp_payment)
         db.expire_all()
         intent = db.get(models.PaymentIntent, payment_id)
+    settled = intent.settled_at is not None
     return {
         "payment_id": intent.id,
         "purpose": intent.purpose,
         "reference": intent.reference,
         "amount": str(intent.amount),
-        "status": "paid" if intent.settled_at else (verdict or intent.status),
-        "settled": intent.settled_at is not None,
+        "status": "paid" if settled else (verdict or intent.status),
+        "settled": settled,
+        "action": None if settled else step,
+        # A declined request (mobile money refused, card declined) leaves the
+        # payment open: the member picks a method again.
+        "retryable": bool(step and step.get("type") == "choose_method" and step.get("retry")),
     }
+
+
+@app.get("/payments/intents/{payment_id}/methods", tags=["payments"])
+def payment_methods(payment_id: str, principal: CurrentUser, db: OrmSession = Depends(get_db)):
+    """The ways this payment can be paid on Kinjy's own page, from Sonco Pay."""
+    intent = _my_open_sonco_intent(payment_id, principal, db)
+    if intent.settled_at is not None:
+        return {"status": "paid", "mobile_money": [], "crypto": [], "other": []}
+    try:
+        return sonco.offer(intent.external_id)
+    except sonco.SoncoError as exc:
+        log.error("sonco pay methods for %s failed: %s", intent.id, exc)
+        raise HTTPException(status_code=503, detail="The payment methods could not be loaded. Try again.")
+
+
+class ChooseIn(BaseModel):
+    method: str = Field(pattern="^(mobile_money|crypto|card|binance_pay)$")
+    code: str | None = Field(default=None, max_length=40)
+    asset: str | None = Field(default=None, max_length=20)
+    network: str | None = Field(default=None, max_length=20)
+    phone: str | None = Field(default=None, max_length=24)
+    country: str | None = Field(default=None, max_length=2)
+    operator: str | None = Field(default=None, max_length=40)
+    # Where a card or operator page sends the member back. A path on this
+    # site only, as for checkout.
+    return_path: str | None = Field(default=None, max_length=300, pattern=r"^/([^/\\\s][^\\\s]*)?$")
+
+
+@app.post("/payments/intents/{payment_id}/choose", tags=["payments"])
+async def choose_payment_method(
+    payment_id: str, payload: ChooseIn, principal: CurrentUser, db: OrmSession = Depends(get_db)
+):
+    """Pass the member's choice to Sonco Pay and return the step to show.
+
+    Called again, it changes the method or sends a new request after a
+    declined one. The answer says what to do next; it never says "paid" on its
+    own - the payment is read back, as everywhere else.
+    """
+    intent = _my_open_sonco_intent(payment_id, principal, db)
+    if intent.settled_at is not None:
+        return {"status": "paid", "settled": True, "action": None}
+    if payload.method == "mobile_money" and not payload.code:
+        raise HTTPException(status_code=422, detail="Choose a mobile money operator")
+    if payload.method == "crypto" and not (payload.asset and payload.network):
+        raise HTTPException(status_code=422, detail="Choose a currency and a network")
+    identity = payouts._identity(principal.user_id)
+    payer = {"reference": principal.user_id}
+    if identity.get("email"):
+        payer["email"] = identity["email"]
+    if identity.get("display_name"):
+        payer["name"] = identity["display_name"][:80]
+    back = payload.return_path or "/hub"
+    joiner = "&" if "?" in back else "?"
+    try:
+        sp_payment = sonco.choose(
+            intent.external_id, method=payload.method, payer=payer, code=payload.code,
+            asset=payload.asset, network=payload.network, phone=payload.phone,
+            country=payload.country, operator=payload.operator,
+            return_url=f"{settings.FRONTEND_URL.rstrip('/')}{back}{joiner}payment={intent.id}",
+        )
+    except sonco.SoncoError as exc:
+        if exc.definite:
+            # Sonco Pay's own words: a wrong number, a method closed, a
+            # request still waiting on the phone. Worth showing as they are.
+            raise HTTPException(status_code=400, detail=str(exc) or "That payment method was refused")
+        raise HTTPException(status_code=503, detail="The payment service did not answer. Try again.")
+    verdict = await _settle_from_sonco(intent.id, sp_payment, db)
+    return {"status": verdict, "settled": verdict == "paid", "action": sonco.action(sp_payment)}
 
 
 async def _on_settled(intent: models.PaymentIntent, db: OrmSession) -> None:

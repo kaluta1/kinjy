@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { CheckCircle2, Copy, ExternalLink, FlaskConical, ShieldCheck } from 'lucide-react'
 import { ghostBtn, primaryBtn } from '@/components/commerce/ActionSheet'
 import { ApiError, kaluta, type OrderPayment } from '@/lib/api'
+import InPagePayment from '@/components/payments/InPagePayment'
 
 /**
  * Pays for one order, from "Pay" to "held in escrow".
@@ -112,7 +113,20 @@ export default function PaymentPanel({
         </div>
       )}
 
-      {payment && !payment.mock && (
+      {payment && payment.rail === 'soncopay' && (
+        <InPagePayment
+          paymentId={payment.payment_id}
+          fallbackUrl={payment.checkout_url}
+          amount={payment.amount}
+          returnPath={`/market/orders/${orderId}`}
+          onPaid={() => {
+            setPaid(true)
+            onPaid()
+          }}
+        />
+      )}
+
+      {payment && !payment.mock && payment.rail !== 'soncopay' && (
         <div className="space-y-3 rounded-2xl border border-white/10 bg-ink-2/40 p-3">
           {payment.checkout_url && /^https?:\/\//i.test(payment.checkout_url) && (
             <a

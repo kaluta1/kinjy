@@ -51,6 +51,17 @@ class Handler(BaseHTTPRequestHandler):
         with LOCK:
             if p == "/v1/payout-fees":
                 return self._send(200, {"fees": {"USDT:BSC": "0.50", "USDT:TRON": "1"}, "min_payout_usd": "5"})
+            m = re.fullmatch(r"/v1/payments/([^/]+)/methods", p)
+            if m and m.group(1) in STATE["payments"]:
+                pay = STATE["payments"][m.group(1)]
+                return self._send(200, {"status": pay["status"], "amount": pay["amount"], "currency": pay["currency"],
+                                        "methods": [
+                    {"method": "mobile_money", "code": "mtn_bj", "operator": "MTN", "label": "MTN Benin",
+                     "countries": ["BJ"], "pay_currency": "XOF", "estimated_pay_amount": "6100", "fields": ["phone"]},
+                    {"method": "crypto", "asset": "USDT", "network": "BSC", "network_label": "BNB Smart Chain",
+                     "estimated_pay_amount": pay["amount"]},
+                    {"method": "card", "code": "card", "label": "Bank card"},
+                ]})
             m = re.fullmatch(r"/v1/payments/([^/]+)", p)
             if m and m.group(1) in STATE["payments"]:
                 return self._send(200, STATE["payments"][m.group(1)])
@@ -107,6 +118,23 @@ class Handler(BaseHTTPRequestHandler):
                      "expires_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() + 3600))}
                 STATE["sessions"][sid] = s
                 return self._send(201, {k: s[k] for k in ("session_id", "verification_url", "expires_at")})
+            m = re.fullmatch(r"/v1/payments/([^/]+)/method", p)
+            if m and m.group(1) in STATE["payments"]:
+                pay = STATE["payments"][m.group(1)]
+                pay["chosen"] = body
+                kind = body.get("method")
+                if kind == "mobile_money":
+                    if (body.get("phone") or "").endswith("0000000"):
+                        return self._send(400, {"detail": "This number is not a mobile money account", "code": "bad_phone"})
+                    pay["next_action"] = {"type": "approve_on_phone", "phone": body.get("phone"),
+                                          "operator": "MTN", "amount": "6100", "currency": "XOF"}
+                elif kind == "crypto":
+                    pay["next_action"] = {"type": "send_crypto", "asset": body.get("asset"),
+                                          "network": body.get("network"), "address": "0xfeedfeedfeedfeedfeedfeedfeedfeedfeedfeed",
+                                          "amount": pay["amount"], "amount_rule": "exact"}
+                else:
+                    pay["next_action"] = {"type": "redirect", "url": f"https://fake.soncopay.test/card/{pay['id']}"}
+                return self._send(200, pay)
             # --- controls ---
             if p == "/_ctl/payment":
                 STATE["payments"][body["id"]].update(body.get("set", {}))
