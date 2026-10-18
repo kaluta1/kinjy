@@ -11,6 +11,7 @@ import {
   Loader2,
   Lock,
   MapPin,
+  UserRound,
   Tag,
   Sparkles,
   Users,
@@ -76,6 +77,8 @@ const VISIBILITY = [
   { id: 'public', label: 'Anyone', icon: Globe2 },
   { id: 'followers', label: 'Followers', icon: Users },
   { id: 'circle', label: 'A circle', icon: Lock },
+  // Visible to the author alone: a note, a draft to come back to, a memory.
+  { id: 'private', label: 'Only me', icon: UserRound },
 ] as const
 
 type Kind = 'text' | 'image' | 'video' | 'article'
@@ -242,7 +245,9 @@ export default function Composer({
       ? (circles.data ?? []).find((c) => c.id === circleId)?.name ?? 'a circle'
       : visibility === 'followers'
         ? 'Followers'
-        : 'Anyone'
+        : visibility === 'private'
+          ? 'Only me'
+          : 'Anyone'
 
   // Tags from the body plus anything typed in the topics field, so the chips
   // show everything the post will actually carry.

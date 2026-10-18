@@ -114,7 +114,7 @@ class PostIn(BaseModel):
     # "short" is declared, never inferred. A portrait clip posted to the feed is
     # still a feed post; what makes a short is the author choosing that surface.
     format: str = Field(default="text", pattern="^(text|image|video|audio|article|carousel|short)$")
-    visibility: str = Field(default="public", pattern="^(public|followers|circle|community)$")
+    visibility: str = Field(default="public", pattern="^(public|followers|circle|community|private)$")
     circle_id: str | None = None
     community_id: str | None = None
     lang: str = "en"
@@ -1044,8 +1044,11 @@ async def create_post(payload: PostIn, principal: CurrentUser, db: OrmSession = 
              post_id=post.id, author_id=post.author_id, format=post.format,
              mature=post.mature)
 
-    # After the write, so a mention can never cost the post.
-    _notify_mentions(post.body, principal.user_id, post.id, "post")
+    # After the write, so a mention can never cost the post. Not for an
+    # "only me" post: the person named could not open it, and the
+    # notification would quote it to them anyway.
+    if post.visibility != "private":
+        _notify_mentions(post.body, principal.user_id, post.id, "post")
     return _post_out(post, db, viewer=principal.user_id)
 
 
@@ -3268,6 +3271,8 @@ def _inclusion_reasons(post: models.Post, mode: str, viewer: str | None, db: Orm
         reasons.append({"kind": "visibility", "label": "The author made it public."})
     elif post.visibility == "followers":
         reasons.append({"kind": "visibility", "label": "The author shared it with their followers."})
+    elif post.visibility == "private":
+        reasons.append({"kind": "visibility", "label": "Only you can see it."})
     elif post.visibility == "circle" and post.author_id != viewer:
         reasons.append({"kind": "visibility", "label": "The author shared it with a circle you are in."})
 
@@ -3661,7 +3666,7 @@ class RepostIn(BaseModel):
     """A comment turns a repost into a quote — the blueprint's two are one route."""
 
     body: str = Field(default="", max_length=5000)
-    visibility: str = Field(default="public", pattern="^(public|followers|circle|community)$")
+    visibility: str = Field(default="public", pattern="^(public|followers|circle|community|private)$")
     circle_id: str | None = None
 
 

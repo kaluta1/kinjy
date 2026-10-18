@@ -40,7 +40,7 @@ class Post(Base):
     format: Mapped[str] = mapped_column(String(20), default="text")  # text|image|video|audio|article|carousel
 
     # Audience (blueprint module D): public, a named circle, or followers only.
-    visibility: Mapped[str] = mapped_column(String(20), default="public")  # public|followers|circle|community
+    visibility: Mapped[str] = mapped_column(String(20), default="public")  # public|followers|circle|community|private (only the author)
     circle_id: Mapped[str | None] = mapped_column(String(40), index=True)
     community_id: Mapped[str | None] = mapped_column(String(40), index=True)
 

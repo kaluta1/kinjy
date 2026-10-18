@@ -52,6 +52,7 @@ const AUDIENCE: Record<string, { label: string; hint: string }> = {
   followers: { label: 'Followers', hint: 'Only the author’s followers can see this.' },
   circle: { label: 'Circle', hint: 'Shared with a circle — only its members and the author can see this.' },
   community: { label: 'Community', hint: 'Shared with a community — only its members can see this.' },
+  private: { label: 'Only me', hint: 'Only you can see this post.' },
 }
 
 const PROVENANCE_LABEL: Record<string, string> = {
