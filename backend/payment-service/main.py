@@ -940,8 +940,14 @@ async def kaluta_webhook(request: Request, db: OrmSession = Depends(get_db)):
     nobody - and its real state is read back from Kaluta before anything
     changes. Somebody posting "approved" gets, at most, a read of the truth.
     """
+    raw = await request.body()
+    # Signed (a company webhook): the signature must be right. Unsigned (a
+    # session webhook): accepted as a doorbell. Either way, nothing below
+    # trusts the body - the session is read back from Kaluta.
+    if kaluta.signature_ok(raw, request.headers.get("X-Kaluta-Signature")) is False:
+        raise HTTPException(status_code=401, detail="Invalid signature")
     try:
-        body = json.loads(await request.body() or b"{}")
+        body = json.loads(raw or b"{}")
     except ValueError:
         raise HTTPException(status_code=400, detail="Unreadable body")
     session_id = body.get("session_id") or body.get("id") or (body.get("data") or {}).get("session_id")

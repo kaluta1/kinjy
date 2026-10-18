@@ -9,6 +9,7 @@ services:
       SONCOPAY_BASE_URL: http://host.docker.internal:8790
       KALUTA_KYC_API_KEY: klt_fake_for_e2e
       KALUTA_KYC_BASE_URL: http://host.docker.internal:8790
+      KALUTA_KYC_WEBHOOK_SECRET: kaluta_whsec_fake_for_e2e
       SMTP_HOST: host.docker.internal
       SMTP_PORT: "8791"
       SMTP_USER: ""

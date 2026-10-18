@@ -11,7 +11,10 @@ from Kaluta, and acts on that answer only.
 """
 from __future__ import annotations
 
+import hashlib
+import hmac
 import logging
+import time
 
 import httpx
 
@@ -28,6 +31,10 @@ IN_PROGRESS = (
     "created", "document_pending", "document_submitted",
     "face_pending", "face_submitted", "under_review",
 )
+
+
+# A timestamped signature older than this is a replay, not a delivery.
+SIGNATURE_TOLERANCE_SECONDS = 5 * 60
 
 
 class KalutaError(RuntimeError):
@@ -95,3 +102,31 @@ def split_name(display_name: str | None) -> tuple[str | None, str | None]:
     if len(parts) == 1:
         return parts[0], None
     return parts[0], " ".join(parts[1:])
+
+
+def signature_ok(raw_body: bytes, header: str | None) -> bool | None:
+    """Check X-Kaluta-Signature against KALUTA_KYC_WEBHOOK_SECRET.
+
+    None when there is nothing to check (no secret, or an unsigned session
+    webhook); True or False otherwise. Two forms exist:
+        t=<unix>,v1=<hmac of "<t>.<body>">   (company webhooks, replay-checked)
+        sha256=<hmac of the body>
+    """
+    secret = (settings.KALUTA_KYC_WEBHOOK_SECRET or "").strip()
+    header = (header or "").strip()
+    if not secret or not header:
+        return None
+    if header.startswith("sha256="):
+        expected = hmac.new(secret.encode(), raw_body, hashlib.sha256).hexdigest()
+        return hmac.compare_digest(expected, header[len("sha256="):])
+    parts = dict(p.split("=", 1) for p in header.split(",") if "=" in p)
+    stamp, signature = parts.get("t"), parts.get("v1")
+    if not stamp or not signature:
+        return False
+    try:
+        if abs(time.time() - float(stamp)) > SIGNATURE_TOLERANCE_SECONDS:
+            return False
+    except ValueError:
+        return False
+    expected = hmac.new(secret.encode(), f"{stamp}.".encode() + raw_body, hashlib.sha256).hexdigest()
+    return hmac.compare_digest(expected, signature)

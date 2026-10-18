@@ -194,6 +194,20 @@ check("starting again reopens it, without spending an attempt",
 r = c.post("/kyc/webhook/kaluta", json={"session_id": session["session_id"], "status": "approved"})
 check("an unsigned 'approved' while Kaluta says 'created' verifies nobody",
       r.status_code == 200 and c.get("/kyc/status", headers=H(member)).json()["status"] == "pending")
+def kaluta_signed(body, secret="kaluta_whsec_fake_for_e2e"):
+    import hashlib, hmac
+    raw = json.dumps(body).encode()
+    ts = str(int(time.time()))
+    sig = hmac.new(secret.encode(), f"{ts}.".encode() + raw, hashlib.sha256).hexdigest()
+    return c.post("/kyc/webhook/kaluta", content=raw,
+                  headers={"Content-Type": "application/json", "X-Kaluta-Signature": f"t={ts},v1={sig}"})
+
+
+check("a Kaluta webhook with a wrong signature is refused",
+      kaluta_signed({"session_id": session["session_id"]}, secret="wrong").status_code == 401)
+r = kaluta_signed({"session_id": session["session_id"], "status": "approved"})
+check("correctly signed, accepted - and still read back: Kaluta says 'created', nobody verified",
+      r.status_code == 200 and c.get("/kyc/status", headers=H(member)).json()["status"] == "pending", r.text[:120])
 check("an invented session is ignored",
       c.post("/kyc/webhook/kaluta", json={"session_id": "ses_invented"}).json().get("ignored") is True)
 ctl("session", {"id": session["session_id"], "status": "approved"})

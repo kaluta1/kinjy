@@ -173,6 +173,10 @@ PAYOUT_WALLET_CONFIRM_HOURS = _int("PAYOUT_WALLET_CONFIRM_HOURS", 24)
 # cannot start, and says so, rather than pretending to.
 KALUTA_KYC_API_KEY = _str("KALUTA_KYC_API_KEY")
 KALUTA_KYC_BASE_URL = _str("KALUTA_KYC_BASE_URL", "https://kalutakyc.com")
+# Signs the webhooks declared on the company in Kaluta's dashboard. Checked when
+# present - a wrong signature is refused - but never trusted on its own: the
+# session is still read back from Kaluta. Session webhooks come unsigned.
+KALUTA_KYC_WEBHOOK_SECRET = _str("KALUTA_KYC_WEBHOOK_SECRET")
 
 # --- AI ---------------------------------------------------------------------
 AI_DEFAULT_PROVIDER = _str("AI_DEFAULT_PROVIDER", "mock")
