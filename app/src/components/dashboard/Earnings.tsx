@@ -13,6 +13,17 @@ const SOURCE_LABELS: Record<string, string> = {
   ad_purchase: 'Advertising',
   creator_revenue: 'Creator revenue',
   referral_pool_entry: 'Referral pool',
+  kyc_fee: 'Verification fees',
+}
+
+/** What the member did, for one line of the list. */
+const SOURCE_DONE: Record<string, string> = {
+  kyc_fee: 'verified their account',
+  referral_pool_entry: 'took a seat in the referral pool',
+  ad_purchase: 'bought advertising',
+  marketplace_order: 'completed an order',
+  creator_revenue: 'earned creator revenue',
+  service: 'paid for a service',
 }
 
 /**
@@ -92,6 +103,28 @@ export default function Earnings() {
           </div>
         </PanelState>
       </Panel>
+
+      {/* Each commission, newest first, and whom it came from: what a
+          sponsor wants to see after a member they invited pays. */}
+      {(commissions.data?.items.length ?? 0) > 0 && (
+        <Panel title="Your latest earnings" subtitle="Your 20% each time a member you invited pays on Kinjy." className="lg:col-span-2">
+          <ul className="divide-y divide-[var(--cloud-border)]">
+            {commissions.data!.items.map((item) => (
+              <li key={item.id} className="flex items-center justify-between gap-3 py-2.5">
+                <span className="min-w-0">
+                  <span className="block truncate text-sm text-text-hi">
+                    {item.role === 'creator'
+                      ? 'Your content earned revenue'
+                      : `${item.from_name || 'A member you invited'} ${SOURCE_DONE[item.source_kind] ?? 'paid on Kinjy'}`}
+                  </span>
+                  <span className="caption">{new Date(item.created_at).toLocaleString()}</span>
+                </span>
+                <span className="mono-data shrink-0 text-sm font-semibold text-emerald-300">+{usd(item.amount)}</span>
+              </li>
+            ))}
+          </ul>
+        </Panel>
+      )}
 
       <Payout onChange={wallet.reload} />
     </div>

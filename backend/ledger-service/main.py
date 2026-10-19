@@ -487,6 +487,23 @@ def my_commissions(
         .group_by(models.Commission.source_kind)
     ).all()
 
+    # Whom each one came from: the member whose payment wrote the journal.
+    payer = dict(
+        db.execute(
+            select(models.Journal.id, models.Journal.created_by).where(
+                models.Journal.id.in_({r.journal_id for r in rows} or {""})
+            )
+        ).all()
+    )
+    names: dict[str, str] = {}
+    for member_id in {m for m in payer.values() if m}:
+        try:
+            response = httpx.get(f"{AUTH_URL}/internal/users/{member_id}", timeout=3)
+            if response.status_code == 200:
+                names[member_id] = response.json().get("display_name") or ""
+        except Exception:
+            pass
+
     return {
         "total": total,
         "by_source": {kind: str(amount) for kind, amount in by_source},
@@ -499,6 +516,8 @@ def my_commissions(
                 "amount": str(r.amount),
                 "status": r.status,
                 "created_at": r.created_at,
+                "from_member_id": payer.get(r.journal_id),
+                "from_name": names.get(payer.get(r.journal_id) or "") or None,
             }
             for r in rows
         ],

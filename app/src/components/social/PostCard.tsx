@@ -1,3 +1,4 @@
+import VerifiedBadge from '@/components/ui-kit/VerifiedBadge'
 import MentionLink from './MentionLink'
 import { useLayoutEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
@@ -573,8 +574,10 @@ export default function PostCard({
         <div className="min-w-0">
           <p className="truncate text-sm font-semibold text-text-hi">
             {source.author?.handle ? (
-              <Link to={`/u/${source.author.handle}`} className="hover:underline">
+              <Link to={`/u/${source.author.handle}`} className="inline-flex items-center gap-1 hover:underline">
                 {isOwn && !shared ? 'You' : source.author.display_name}
+                {/* The badge an identity check earns. */}
+                {source.author.verified && <VerifiedBadge size={14} />}
               </Link>
             ) : (
               `@${source.author_id.slice(0, 12)}`

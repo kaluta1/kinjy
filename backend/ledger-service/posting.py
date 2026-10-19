@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session as OrmSession
 
 from common.economy import Split
 from common.ids import new_id
+from common.notify import notify
 
 import models
 
@@ -140,6 +141,8 @@ def post_split(
                 currency=currency,
             )
         )
+        if share.role == "sponsor" and share.amount > 0:
+            _tell_sponsor(share.beneficiary, share.amount, kind, created_by)
 
         if credit_wallets:
             wallet = get_wallet(db, share.beneficiary, currency)
@@ -267,3 +270,37 @@ def post_escrow(
 
     assert_balanced(db, journal.id)
     return journal
+
+
+# What the member the sponsor invited did, in the words of the notification.
+_WHAT = {
+    "kyc_fee": "paid their verification fee",
+    "referral_pool_entry": "took a seat in the referral pool",
+    "ad_purchase": "bought advertising",
+    "marketplace_order": "completed an order",
+    "creator_revenue": "earned creator revenue",
+    "service_fee": "paid for a service",
+}
+
+
+def _tell_sponsor(sponsor_id: str, amount: Decimal, kind: str, member_id: str | None) -> None:
+    """A sponsor hears about each commission as it is earned - the member it
+    came from and the amount - instead of finding it in a balance later.
+    Best effort: a notification must never cost the posting."""
+    name = "A member you invited"
+    if member_id:
+        try:
+            import httpx
+
+            response = httpx.get(f"http://auth-service:8000/internal/users/{member_id}", timeout=3)
+            if response.status_code == 200:
+                name = response.json().get("display_name") or name
+        except Exception:
+            pass
+    notify(
+        sponsor_id,
+        kind="commission_earned",
+        title=f"You earned ${Decimal(amount):.2f}",
+        body=f"{name} {_WHAT.get(kind, 'paid on Kinjy')}. Your 20% is in your balance.",
+        link="/dashboard?tab=earnings",
+    )

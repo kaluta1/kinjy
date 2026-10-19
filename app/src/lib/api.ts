@@ -288,6 +288,9 @@ export interface CommissionsPage {
     amount: string
     status: string
     created_at: string
+    /** The member whose payment earned it. */
+    from_member_id?: string | null
+    from_name?: string | null
   }>
 }
 

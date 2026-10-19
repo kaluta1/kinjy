@@ -1281,7 +1281,30 @@ def set_kyc(user_id: str, verified: bool, until: datetime | None = None, db: Orm
     user.kyc_verified = verified
     user.kyc_verified_until = until
     db.commit()
+    _push_badge(user_id, verified)
     return {"user_id": user_id, "kyc_verified": verified, "until": until}
+
+
+def _push_badge(user_id: str, verified: bool) -> bool:
+    """Put the verified badge on (or off) the public profile. Best effort, logged."""
+    try:
+        httpx.post(
+            f"http://user-service:8000/internal/profiles/{user_id}/verified",
+            json={"verified": verified}, timeout=5,
+        ).raise_for_status()
+        return True
+    except Exception as exc:
+        log.error("could not update the verified badge of %s: %s", user_id, exc)
+        return False
+
+
+@app.post("/internal/kyc/resync-badges", tags=["internal"])
+def resync_badges(db: OrmSession = Depends(get_db)):
+    """Badges for everybody already verified - those who verified before the
+    profile followed the identity check. Safe to run again."""
+    rows = db.scalars(select(models.User).where(models.User.kyc_verified.is_(True))).all()
+    done = sum(1 for u in rows if _push_badge(u.id, True))
+    return {"verified": len(rows), "badges_set": done}
 
 
 # ---------------------------------------------------------------------------

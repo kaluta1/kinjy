@@ -2057,6 +2057,23 @@ def internal_profile_ids(after: str | None = None, limit: int = 500, db: OrmSess
     return {"items": list(ids), "next": ids[-1] if ids else None}
 
 
+class VerifiedIn(BaseModel):
+    verified: bool
+
+
+@app.post("/internal/profiles/{user_id}/verified", tags=["internal"])
+def set_profile_verified(user_id: str, payload: VerifiedIn, db: OrmSession = Depends(get_db)):
+    """The verified badge, from the identity check (auth-service calls this).
+
+    The profile copied the flag once, when it was created, so somebody who
+    verified afterwards never got their badge.
+    """
+    profile = _ensure_profile(db, user_id)
+    profile.verified = payload.verified
+    db.commit()
+    return {"user_id": user_id, "verified": profile.verified}
+
+
 @app.post("/internal/profiles", tags=["internal"])
 def profiles_by_id(payload: ProfileIds, db: OrmSession = Depends(get_db)):
     """Resolve many ids at once.
