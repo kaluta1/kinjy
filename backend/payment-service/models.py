@@ -40,6 +40,9 @@ class PaymentIntent(Base):
     raw_payload: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
     settled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Kaluta Pay: whether the split of this payment (what stays in escrow for
+    # members) was set. "pending" until it is; the reconciler retries.
+    split_status: Mapped[str | None] = mapped_column(String(20))
 
 
 class PayoutDestination(Base):

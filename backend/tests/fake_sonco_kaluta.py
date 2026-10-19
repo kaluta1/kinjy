@@ -25,6 +25,8 @@ STATE = {
     "sessions": {},        # id -> kaluta session
     "mails": [],
     "payout_mode": "ok",   # ok | refuse | unreachable
+    "kp_invoices": {},     # Kaluta Pay invoices
+    "kp_escrow": {},       # invoice id -> lines
     "payout_calls": 0,
 }
 LOCK = threading.Lock()
@@ -46,9 +48,35 @@ class Handler(BaseHTTPRequestHandler):
         n = int(self.headers.get("Content-Length") or 0)
         return json.loads(self.rfile.read(n) or b"{}")
 
+    def _kp_key(self):
+        return (self.headers.get("X-Api-Key") or "").startswith("kpk_")
+
+    def do_PUT(self):
+        p = self.path.split("?")[0]
+        body = self._body()
+        with LOCK:
+            m = re.fullmatch(r"/kp/v1/invoices/([^/]+)/escrow", p)
+            if m and m.group(1) in STATE["kp_invoices"]:
+                inv = STATE["kp_invoices"][m.group(1)]
+                if inv["status"] != "paid":
+                    return self._send(409, {"detail": "no paid payment on this invoice yet"})
+                STATE["kp_escrow"][inv["id"]] = body.get("lines", [])
+                return self._send(200, {"lines": body.get("lines", [])})
+        self._send(404, {"detail": "not found"})
+
     def do_GET(self):
         p = self.path.split("?")[0]
         with LOCK:
+            if p == "/kp/v1/payment-methods":
+                return self._send(200, [
+                    {"id": "crypto:USDT:BSC", "kind": "crypto", "method": "crypto", "asset": "USDT",
+                     "network": "BSC", "label": "USDT BSC", "enabled": True},
+                    {"id": "mtn_bj", "kind": "mobile_money", "method": "mobile_money", "code": "mtn_bj",
+                     "label": "MTN Benin", "countries": ["BJ"], "fields": ["phone"], "enabled": True},
+                ])
+            m = re.fullmatch(r"/kp/v1/invoices/([^/]+)", p)
+            if m and m.group(1) in STATE["kp_invoices"]:
+                return self._send(200, STATE["kp_invoices"][m.group(1)])
             if p == "/v1/payout-fees":
                 return self._send(200, {"fees": {"USDT:BSC": "0.50", "USDT:TRON": "1"}, "min_payout_usd": "5"})
             m = re.fullmatch(r"/v1/payments/([^/]+)/methods", p)
@@ -135,6 +163,39 @@ class Handler(BaseHTTPRequestHandler):
                 else:
                     pay["next_action"] = {"type": "redirect", "url": f"https://fake.soncopay.test/card/{pay['id']}"}
                 return self._send(200, pay)
+            if p == "/kp/v1/invoices":
+                if not self._kp_key():
+                    return self._send(401, {"detail": "invalid API key"})
+                for inv in STATE["kp_invoices"].values():
+                    if inv["order_ref"] == body.get("order_ref"):
+                        return self._send(201, inv)
+                iid = "bil_" + uuid.uuid4().hex[:12]
+                inv = {"id": iid, "status": "open", "amount": body.get("amount"), "currency": body.get("currency"),
+                       "amount_paid": 0, "order_ref": body.get("order_ref"), "customer": body.get("customer"),
+                       "metadata": body.get("metadata"), "url": f"https://fake.kalutapay.test/i/{iid}",
+                       "checkouts": []}
+                STATE["kp_invoices"][iid] = inv
+                return self._send(201, inv)
+            m = re.fullmatch(r"/kp/v1/invoices/([^/]+)/checkout", p)
+            if m and m.group(1) in STATE["kp_invoices"]:
+                inv = STATE["kp_invoices"][m.group(1)]
+                method = body.get("method", "")
+                if method.startswith("crypto:"):
+                    na = {"type": "send_crypto", "asset": method.split(":")[1], "network": method.split(":")[2],
+                          "address": "0xkpkpkpkpkpkpkpkpkpkpkpkpkpkpkpkpkpkpkpkp", "amount": inv["amount"],
+                          "amount_rule": "exact"}
+                else:
+                    na = {"type": "approve_on_phone", "phone": body.get("phone"), "amount": "6100", "currency": "XOF"}
+                chk = {"id": "chk_" + uuid.uuid4().hex[:10], "provider": method, "status": "pending",
+                       "next_action": na, "request": body}
+                inv["checkouts"].insert(0, chk)
+                return self._send(201, {"checkout": chk, "invoice": inv})
+            if p == "/_ctl/kp_paid":
+                inv = STATE["kp_invoices"][body["id"]]
+                inv.update({"status": "paid", "amount_paid": body.get("amount_paid", inv["amount"])})
+                for chk in inv["checkouts"]:
+                    chk["status"] = "completed"
+                return self._send(200, inv)
             # --- controls ---
             if p == "/_ctl/payment":
                 STATE["payments"][body["id"]].update(body.get("set", {}))

@@ -169,6 +169,17 @@ PAYOUT_FEE_PAID_BY = _str("PAYOUT_FEE_PAID_BY", "member")
 # How long the link in the wallet confirmation e-mail stays valid.
 PAYOUT_WALLET_CONFIRM_HOURS = _int("PAYOUT_WALLET_CONFIRM_HOURS", 24)
 
+# Kaluta Pay (kalutagroup.com): takes Kinjy's payments and splits each one -
+# what members are owed stays in escrow, the rest goes to Kinjy's address.
+# Set the key and every payment goes through it; withdrawals stay on Sonco Pay.
+KALUTAPAY_API_KEY = _str("KALUTAPAY_API_KEY")
+KALUTAPAY_WEBHOOK_SECRET = _str("KALUTAPAY_WEBHOOK_SECRET")
+KALUTAPAY_BASE_URL = _str("KALUTAPAY_BASE_URL", "https://kalutagroup.com")
+# The annual KYC fee is Kinjy revenue like any other: the payer's sponsor is
+# paid their 20% on it and the Leaders pool its 5%. Before 19/10 it was never
+# written to the ledger, so it paid nobody.
+KYC_FEE_COMMISSIONABLE = _str("KYC_FEE_COMMISSIONABLE", "1") not in ("0", "false", "no")
+
 # Kaluta KYC: the identity check behind KinjyKYC. Blank key => verification
 # cannot start, and says so, rather than pretending to.
 KALUTA_KYC_API_KEY = _str("KALUTA_KYC_API_KEY")

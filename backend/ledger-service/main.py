@@ -346,6 +346,35 @@ def post_service_fee(payload: ServiceFeeIn, db: OrmSession = Depends(get_db)):
     return _journal_out(journal, db)
 
 
+@app.post("/internal/post/kyc-fee", tags=["postings"])
+def post_kyc_fee(payload: PoolEntryIn, db: OrmSession = Depends(get_db)):
+    """A member paid the annual KYC fee: Kinjy revenue, so their sponsor earns
+    their 20% on it and the Leaders pool its 5%, like on everything else."""
+    split = economy.revenue_split(payload.amount, _sponsor(payload.member_id), kind="kyc_fee")
+    journal = posting.post_split(
+        db,
+        kind="kyc_fee",
+        split=split,
+        revenue_account=models.ACC_REVENUE_KYC,
+        reference=payload.reference,
+        description=f"Annual KYC fee from {payload.member_id}",
+        idempotency_key=payload.idempotency_key,
+        created_by=payload.member_id,
+    )
+    db.commit()
+    return _journal_out(journal, db)
+
+
+@app.get("/internal/journals/by-key", tags=["internal"])
+def journal_by_key(key: str, db: OrmSession = Depends(get_db)):
+    """The journal written under one idempotency key, or 404. What payment-service
+    reads to know what a payment owes members, and so what to hold in escrow."""
+    journal = db.scalar(select(models.Journal).where(models.Journal.idempotency_key == key))
+    if journal is None:
+        raise HTTPException(status_code=404, detail="No journal under that key")
+    return _journal_out(journal, db)
+
+
 @app.post("/internal/post/referral-pool-entry", tags=["postings"])
 def post_referral_pool_entry(payload: PoolEntryIn, db: OrmSession = Depends(get_db)):
     """A referral-pool seat is bought.

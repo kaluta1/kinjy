@@ -29,6 +29,7 @@ from common.notify import notify
 from common.service import create_app
 
 import kaluta
+import kalutapay
 import models
 import payouts
 import rails
@@ -55,6 +56,7 @@ MIGRATIONS = [
     f"CREATE INDEX IF NOT EXISTS ix_payout_destinations_confirm_token_hash ON {_T}.payout_destinations (confirm_token_hash)",
     f"ALTER TABLE {_T}.kyc_records ADD COLUMN IF NOT EXISTS verification_url VARCHAR(500)",
     f"ALTER TABLE {_T}.kyc_records ADD COLUMN IF NOT EXISTS session_expires_at TIMESTAMPTZ",
+    f"ALTER TABLE {_T}.payment_intents ADD COLUMN IF NOT EXISTS split_status VARCHAR(20)",
 ]
 
 
@@ -62,6 +64,18 @@ def _start_reconciler():
     # Withdrawals a webhook never closed - Sonco Pay down at the wrong moment,
     # a delivery lost - are read back every five minutes.
     asyncio.get_event_loop().create_task(payouts.reconcile_loop())
+    asyncio.get_event_loop().create_task(_splits_loop())
+
+
+async def _splits_loop() -> None:
+    # Kaluta Pay splits that did not land at payment time.
+    while True:
+        await asyncio.sleep(300)
+        if kalutapay.enabled():
+            try:
+                await asyncio.to_thread(reconcile_splits)
+            except Exception as exc:
+                log.error("split reconciler: %s", exc)
 
 
 app = create_app(
@@ -155,8 +169,13 @@ def checkout(payload: CheckoutIn, principal: CurrentUser, db: OrmSession = Depen
 
     # Sonco Pay, once configured, takes every payment: a client asking for
     # another rail does not get to pick a different door.
-    rail = "soncopay" if sonco.enabled() else rails.choose_rail(
-        payload.rail if payload.rail != "soncopay" else None, "USD"
+    # Kaluta Pay, once configured, takes every payment (and splits it); else
+    # Sonco Pay directly. A client asking for another rail does not get to
+    # pick a different door.
+    rail = (
+        "kalutapay" if kalutapay.enabled()
+        else "soncopay" if sonco.enabled()
+        else rails.choose_rail(payload.rail if payload.rail not in ("soncopay", "kalutapay") else None, "USD")
     )
     intent = models.PaymentIntent(
         id=new_id("pmt"),
@@ -172,7 +191,20 @@ def checkout(payload: CheckoutIn, principal: CurrentUser, db: OrmSession = Depen
 
     callback = f"{settings.GATEWAY_URL}/api/payments/ipn/nowpayments"
     try:
-        if rail == "soncopay":
+        if rail == "kalutapay":
+            identity = payouts._identity(principal.user_id)
+            back = payload.return_path or "/hub"
+            joiner = "&" if "?" in back else "?"
+            invoice = kalutapay.create_invoice(
+                payment_id=intent.id, amount=intent.amount,
+                title=PURPOSE_LABELS.get(payload.purpose, "Kinjy payment"),
+                customer_id=principal.user_id, email=identity.get("email"),
+                name=identity.get("display_name"), referrer_id=_sponsor_of(principal.user_id),
+                metadata={"purpose": payload.purpose, "reference": payload.reference, "kinjy_payment": intent.id},
+                success_url=f"{settings.FRONTEND_URL.rstrip('/')}{back}{joiner}payment={intent.id}",
+            )
+            result = {"external_id": invoice.get("id"), "checkout_url": invoice.get("url"), "raw": invoice}
+        elif rail == "soncopay":
             identity = payouts._identity(principal.user_id)
             back = payload.return_path or "/hub"
             joiner = "&" if "?" in back else "?"
@@ -206,6 +238,10 @@ def checkout(payload: CheckoutIn, principal: CurrentUser, db: OrmSession = Depen
     except sonco.SoncoError as exc:
         db.rollback()
         log.error("sonco pay checkout failed (%s): %s", exc.code, exc)
+        raise HTTPException(status_code=503, detail="The payment service is unavailable right now. Try again in a moment.")
+    except kalutapay.KalutaPayError as exc:
+        db.rollback()
+        log.error("kaluta pay checkout failed (%s): %s", exc.status, exc)
         raise HTTPException(status_code=503, detail="The payment service is unavailable right now. Try again in a moment.")
 
     intent.external_id = result.get("external_id")
@@ -259,7 +295,7 @@ async def mock_settle(payment_id: str, principal: CurrentUser, db: OrmSession = 
     Refuses to run once a real rail is configured — otherwise it would be a way
     to mint settled payments in production.
     """
-    if sonco.enabled() or rails.nowpayments_enabled() or rails.mangopay_enabled():
+    if kalutapay.enabled() or sonco.enabled() or rails.nowpayments_enabled() or rails.mangopay_enabled():
         raise HTTPException(status_code=403, detail="A live payment rail is configured; mock settlement is disabled")
 
     intent = db.get(models.PaymentIntent, payment_id)
@@ -270,6 +306,177 @@ async def mock_settle(payment_id: str, principal: CurrentUser, db: OrmSession = 
     await _on_settled(intent, db)
     db.commit()
     return {"payment_id": payment_id, "status": intent.status, "mock": True}
+
+
+def _sponsor_of(user_id: str) -> str | None:
+    """Who sponsored this member - given to Kaluta Pay with the payer."""
+    try:
+        response = httpx.get(f"{AUTH_URL}/internal/users/{user_id}", timeout=5)
+        response.raise_for_status()
+        return response.json().get("invited_by")
+    except Exception:
+        return None
+
+
+def _escrow_lines(intent: models.PaymentIntent) -> list[dict] | None:
+    """What this payment owes members, to hold in escrow. None when not knowable yet.
+
+    Read from the ledger journal the payment wrote (``payment:{id}``), so the
+    escrow holds exactly what the ledger owes: each sponsor's commission, and
+    the Leaders pool's share. A marketplace order is held whole: it reaches
+    the seller only after delivery. A payment that owes nobody (no sponsor, a
+    purpose with no programme) gets an empty split - all of it to Kinjy.
+    """
+    if intent.purpose == "order":
+        return [{
+            "reference": f"order-{intent.id}", "kind": "other", "amount": str(intent.amount),
+            "label": "Marketplace order held until the buyer confirms delivery",
+            "source": {"external_id": intent.user_id},
+        }]
+    if intent.purpose not in ("kyc_fee", "referral_pool", "ad_credit"):
+        return []
+    if intent.purpose == "kyc_fee" and not settings.KYC_FEE_COMMISSIONABLE:
+        return []
+    try:
+        response = httpx.get(f"{LEDGER_URL}/internal/journals/by-key",
+                             params={"key": f"payment:{intent.id}"}, timeout=8)
+    except Exception as exc:
+        log.warning("ledger unreachable for the split of %s: %s", intent.id, exc)
+        return None
+    if response.status_code == 404:
+        return None  # not posted yet; the reconciler comes back
+    if response.status_code >= 400:
+        return None
+    lines = []
+    for n, entry in enumerate(response.json().get("entries", [])):
+        amount = Decimal(entry.get("credit") or "0")
+        if amount <= 0:
+            continue
+        if entry.get("account") == "liabilities:member_payable" and entry.get("beneficiary_id"):
+            lines.append({
+                "reference": f"{intent.id}-c{n}", "kind": "commission", "level": 1,
+                "amount": str(amount), "label": "Sponsor commission, 20% of Kinjy's revenue",
+                "beneficiary": {"external_id": entry["beneficiary_id"]},
+                "source": {"external_id": intent.user_id},
+            })
+        elif entry.get("account") == "liabilities:leaders_pool":
+            lines.append({
+                "reference": f"{intent.id}-l{n}", "kind": "other", "amount": str(amount),
+                "label": "Kinjy Leaders pool, 5% of Kinjy's revenue",
+                "source": {"external_id": intent.user_id},
+            })
+    return lines
+
+
+def _split(intent: models.PaymentIntent, db: OrmSession) -> None:
+    """Set the Kaluta Pay split of a paid payment. Retried by the reconciler until it lands."""
+    if intent.rail != "kalutapay" or intent.settled_at is None or intent.split_status == "done":
+        return
+    lines = _escrow_lines(intent)
+    if lines is None:
+        intent.split_status = "pending"
+        db.commit()
+        return
+    try:
+        kalutapay.put_escrow(intent.external_id, lines)
+        intent.split_status = "done"
+    except kalutapay.KalutaPayError as exc:
+        log.error("kaluta pay split of %s failed: %s", intent.id, exc)
+        intent.split_status = "pending"
+    db.commit()
+
+
+async def _settle_from_kalutapay(intent_id: str, invoice: dict | None, db: OrmSession) -> str:
+    """Apply what Kaluta Pay says about one invoice. The intent is locked, so a
+    webhook and the member's page settle it once."""
+    intent = db.scalar(
+        select(models.PaymentIntent).where(models.PaymentIntent.id == intent_id).with_for_update()
+    )
+    if intent is None or intent.rail != "kalutapay":
+        db.rollback()
+        return "unknown"
+    if intent.settled_at is not None:
+        db.rollback()
+        _split(intent, db)
+        return "paid"
+    if invoice is None:
+        try:
+            invoice = kalutapay.get_invoice(intent.external_id)
+        except kalutapay.KalutaPayError:
+            db.rollback()
+            return "pending"
+    if kalutapay.conforms(intent, invoice):
+        intent.status = "finished"
+        intent.settled_at = datetime.now(timezone.utc)
+        intent.split_status = "pending"
+        intent.raw_payload = json.dumps(invoice)[:20000]
+        await _on_settled(intent, db)
+        db.commit()
+        _split(intent, db)
+        return "paid"
+    if invoice.get("status") == kalutapay.PAID:
+        log.error("payment %s: kaluta pay says paid but it does not match (%s %s, ref %s)",
+                  intent.id, invoice.get("amount"), invoice.get("currency"), invoice.get("order_ref"))
+    elif invoice.get("status") in ("void", "expired", "canceled", "cancelled"):
+        intent.status = "failed"
+        db.commit()
+        return "failed"
+    db.rollback()
+    return "pending"
+
+
+@app.post("/payments/webhook/kalutapay", tags=["payments"])
+async def kalutapay_webhook(request: Request, db: OrmSession = Depends(get_db)):
+    """Signed notification from Kaluta Pay (HMAC-SHA512 of the raw body).
+
+    Even signed, the invoice is read back from Kaluta Pay before anything
+    moves; the notification only says which one to read.
+    """
+    if not settings.KALUTAPAY_WEBHOOK_SECRET:
+        raise HTTPException(status_code=503, detail="Webhook not configured")
+    raw = await request.body()
+    if not kalutapay.signature_ok(raw, request.headers.get("X-KalutaPay-Signature")):
+        raise HTTPException(status_code=401, detail="Invalid signature")
+    try:
+        body = json.loads(raw or b"{}")
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Unreadable body")
+    event = str(body.get("event") or "")
+    data = body.get("data") or {}
+    if not event.startswith("invoice.") or not data.get("order_ref"):
+        return {"ok": True, "ignored": True}
+    try:
+        invoice = kalutapay.get_invoice(str(data.get("id")))
+    except kalutapay.KalutaPayError:
+        invoice = None
+    verdict = await _settle_from_kalutapay(str(data["order_ref"]), invoice, db)
+    return {"ok": True, "status": verdict}
+
+
+def reconcile_splits() -> int:
+    """Splits that did not land (Kaluta Pay or the ledger down at the time)."""
+    from common.database import SessionLocal
+
+    with SessionLocal() as db:
+        rows = db.scalars(
+            select(models.PaymentIntent).where(
+                models.PaymentIntent.rail == "kalutapay",
+                models.PaymentIntent.settled_at.is_not(None),
+                models.PaymentIntent.split_status == "pending",
+            ).limit(100)
+        ).all()
+        for intent in rows:
+            try:
+                _split(intent, db)
+            except Exception as exc:
+                db.rollback()
+                log.error("split retry of %s failed: %s", intent.id, exc)
+        return len(rows)
+
+
+@app.post("/admin/payments/splits/reconcile", tags=["admin"])
+def reconcile_splits_now(_: AdminUser):
+    return {"checked": reconcile_splits()}
 
 
 async def _settle_from_sonco(intent_id: str, sp_payment: dict | None, db: OrmSession) -> str:
@@ -352,7 +559,7 @@ def _my_open_sonco_intent(payment_id: str, principal, db: OrmSession) -> models.
     intent = db.get(models.PaymentIntent, payment_id)
     if intent is None or intent.user_id != principal.user_id:
         raise HTTPException(status_code=404, detail="Payment not found")
-    if intent.rail != "soncopay" or not intent.external_id:
+    if intent.rail not in ("soncopay", "kalutapay") or not intent.external_id:
         raise HTTPException(status_code=409, detail="This payment is not paid on Kinjy's page")
     return intent
 
@@ -369,7 +576,18 @@ async def payment_status(payment_id: str, principal: CurrentUser, db: OrmSession
     if intent is None or intent.user_id != principal.user_id:
         raise HTTPException(status_code=404, detail="Payment not found")
     verdict, step = None, None
-    if intent.rail == "soncopay" and intent.settled_at is None and intent.status in ("waiting", "confirming"):
+    if intent.rail == "kalutapay" and intent.settled_at is None and intent.status in ("waiting", "confirming"):
+        invoice = None
+        try:
+            invoice = kalutapay.get_invoice(intent.external_id)
+        except kalutapay.KalutaPayError:
+            pass
+        if invoice is not None:
+            verdict = await _settle_from_kalutapay(intent.id, invoice, db)
+            step = _kp_step(kalutapay.open_action(invoice))
+        db.expire_all()
+        intent = db.get(models.PaymentIntent, payment_id)
+    elif intent.rail == "soncopay" and intent.settled_at is None and intent.status in ("waiting", "confirming"):
         sp_payment = None
         try:
             sp_payment = sonco.retrieve_payment(intent.external_id)
@@ -402,10 +620,21 @@ def payment_methods(payment_id: str, principal: CurrentUser, db: OrmSession = De
     if intent.settled_at is not None:
         return {"status": "paid", "mobile_money": [], "crypto": [], "other": []}
     try:
+        if intent.rail == "kalutapay":
+            return kalutapay.offer()
         return sonco.offer(intent.external_id)
-    except sonco.SoncoError as exc:
-        log.error("sonco pay methods for %s failed: %s", intent.id, exc)
+    except (sonco.SoncoError, kalutapay.KalutaPayError) as exc:
+        log.error("payment methods for %s failed: %s", intent.id, exc)
         raise HTTPException(status_code=503, detail="The payment methods could not be loaded. Try again.")
+
+
+def _kp_step(next_action: dict | None) -> dict | None:
+    """Kaluta Pay passes the provider's step through; drawn the same way. Its
+    QR code is not Sonco Pay's public one, so the address alone is shown."""
+    step = sonco.action({"next_action": next_action, "id": ""}) if next_action else None
+    if step:
+        step.pop("qr_url", None)
+    return step
 
 
 class ChooseIn(BaseModel):
@@ -439,6 +668,28 @@ async def choose_payment_method(
     if payload.method == "crypto" and not (payload.asset and payload.network):
         raise HTTPException(status_code=422, detail="Choose a currency and a network")
     identity = payouts._identity(principal.user_id)
+    if intent.rail == "kalutapay":
+        # Kaluta Pay names a method by one id: "crypto:USDT:BSC", or the
+        # mobile money / card code.
+        method_id = (
+            f"crypto:{payload.asset}:{payload.network}" if payload.method == "crypto"
+            else payload.code or payload.method
+        )
+        phone = sonco.international_phone(payload.phone, payload.country or "") if payload.phone else None
+        try:
+            started = kalutapay.start_checkout(
+                intent.external_id, method=method_id, email=identity.get("email"),
+                phone=phone, operator=payload.operator,
+            )
+        except kalutapay.KalutaPayError as exc:
+            if exc.definite:
+                raise HTTPException(status_code=400, detail=str(exc) or "That payment method was refused")
+            raise HTTPException(status_code=503, detail="The payment service did not answer. Try again.")
+        checkout = started.get("checkout") or {}
+        verdict = "pending"
+        if (started.get("invoice") or {}).get("status") == kalutapay.PAID:
+            verdict = await _settle_from_kalutapay(intent.id, None, db)
+        return {"status": verdict, "settled": verdict == "paid", "action": _kp_step(checkout.get("next_action"))}
     payer = {"reference": principal.user_id}
     if identity.get("email"):
         payer["email"] = identity["email"]
@@ -523,6 +774,21 @@ async def _on_settled(intent: models.PaymentIntent, db: OrmSession) -> None:
         record.fee_paid = True
         record.fee_payment_id = intent.id
         # Paying does not verify anyone — the identity check still has to pass.
+        if settings.KYC_FEE_COMMISSIONABLE:
+            # Kinjy revenue, so the payer's sponsor earns their 20% on it.
+            try:
+                httpx.post(
+                    f"{LEDGER_URL}/internal/post/kyc-fee",
+                    json={
+                        "member_id": intent.user_id,
+                        "amount": str(intent.amount),
+                        "reference": intent.id,
+                        "idempotency_key": f"payment:{intent.id}",
+                    },
+                    timeout=10,
+                ).raise_for_status()
+            except Exception as exc:
+                log.error("kyc fee posting failed for payment %s: %s", intent.id, exc)
 
     elif intent.purpose == "ad_credit":
         try:
