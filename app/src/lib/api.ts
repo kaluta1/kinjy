@@ -2215,10 +2215,35 @@ export const kaluta = {
         public_content?: boolean
         price_usd: string | null
         members_count: number
+        avatar_url?: string | null
+        cover_url?: string | null
+        owner_id?: string
+        /** Requests waiting - for the owner and moderators only, else null. */
+        pending_count?: number | null
         my_role: string | null
         my_status: string | null
         my_pinned?: boolean
       }>(`/communities/${id}${invite ? `?invite=${encodeURIComponent(invite)}` : ''}`),
+
+    /** The owner renames it, or changes its description, photo (asset id) or cover. */
+    edit: (
+      id: string,
+      patch: { name?: string; description?: string; avatar_asset_id?: string | null; cover_asset_id?: string | null },
+    ) =>
+      api.patch<{ id: string; name: string; description: string; avatar_url: string | null; cover_url: string | null }>(
+        `/communities/${id}`,
+        patch,
+      ),
+    /** Who is in it: names, faces, roles. Members see it; anybody, for a public one. */
+    roster: (id: string) =>
+      api.get<{
+        total: number
+        items: Array<{
+          user_id: string
+          role: string
+          profile: { handle: string; display_name: string; avatar_url: string | null } | null
+        }>
+      }>(`/communities/${id}/roster`),
 
     /** The groups pinned to the sidebar, oldest pin first. */
     pinned: () =>

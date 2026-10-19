@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from 'react'
 import { Check, Shield, ShieldOff, UserMinus, X } from 'lucide-react'
 import { ApiError, kaluta } from '@/lib/api'
 import { useAppTheme } from '@/components/appdemo/theme'
+import MemberAvatar from '@/components/social/MemberAvatar'
 import { cn } from '@/lib/utils'
 
 interface Member {
@@ -24,9 +25,15 @@ interface Member {
 export default function MemberQueue({
   communityId,
   canModerate,
+  onChanged,
+  bare = false,
 }: {
   communityId: string
   canModerate: boolean
+  /** After an approval, a ban... - so the page's counts follow. */
+  onChanged?: () => void
+  /** Inside a dialog that already has the frame and the title. */
+  bare?: boolean
 }) {
   const { tok } = useAppTheme()
   const [members, setMembers] = useState<Member[]>([])
@@ -57,6 +64,7 @@ export default function MemberQueue({
     try {
       await kaluta.communities.act(communityId, userId, action)
       load()
+      onChanged?.()
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'That did not go through')
     } finally {
@@ -71,7 +79,13 @@ export default function MemberQueue({
   const name = (m: Member) => m.profile?.display_name ?? `@${m.user_id.slice(0, 12)}`
 
   const Row = ({ member, children }: { member: Member; children: React.ReactNode }) => (
-    <li className="flex items-center gap-2 py-1.5">
+    <li className="flex items-center gap-2.5 py-1.5">
+      <MemberAvatar
+        handle={member.profile?.handle}
+        displayName={member.profile?.display_name}
+        avatarUrl={member.profile?.avatar_url ?? null}
+        size={32}
+      />
       <span className="min-w-0 flex-1">
         {/* Name only; the handle on hover. */}
         <span
@@ -121,15 +135,15 @@ export default function MemberQueue({
   )
 
   return (
-    <div className={cn('rounded-card-lg p-4', tok.card)}>
-      <h3 className={cn('mb-3 text-sm font-semibold', tok.text)}>Members</h3>
+    <div className={cn(!bare && cn('rounded-card-lg p-4', tok.card))}>
+      {!bare && <h3 className={cn('mb-3 text-sm font-semibold', tok.text)}>Members</h3>}
 
       {loading && <p className={cn('text-xs', tok.low)}>Loading…</p>}
 
       {!loading && pending.length > 0 && (
         <>
-          <p className={cn('mb-1 text-[0.65rem] font-bold uppercase tracking-wider', tok.low)}>
-            Waiting for an answer ({pending.length})
+          <p className={cn('mb-1 text-xs font-semibold', tok.mid)}>
+            Asking to join ({pending.length})
           </p>
           <ul className="mb-3 divide-y divide-current/10">
             {pending.map((m) => (
@@ -155,7 +169,7 @@ export default function MemberQueue({
 
       {!loading && (
         <>
-          <p className={cn('mb-1 text-[0.65rem] font-bold uppercase tracking-wider', tok.low)}>
+          <p className={cn('mb-1 text-xs font-semibold', tok.mid)}>
             Members ({active.length})
           </p>
           <ul className="divide-y divide-current/10">
@@ -163,8 +177,9 @@ export default function MemberQueue({
               <Row key={m.user_id} member={m}>
                 {m.role === 'owner' ? (
                   // The owner is not actionable — not by a moderator, and not
-                  // by themselves. The API refuses it too.
-                  <span className={cn('text-[0.62rem]', tok.low)}>owner</span>
+                  // by themselves. The API refuses it too. Their badge already
+                  // says who they are.
+                  null
                 ) : (
                   <>
                     <Action
@@ -190,7 +205,7 @@ export default function MemberQueue({
 
       {banned.length > 0 && (
         <>
-          <p className={cn('mb-1 mt-3 text-[0.65rem] font-bold uppercase tracking-wider', tok.low)}>
+          <p className={cn('mb-1 mt-3 text-xs font-semibold', tok.mid)}>
             Banned ({banned.length})
           </p>
           <ul className="divide-y divide-current/10">

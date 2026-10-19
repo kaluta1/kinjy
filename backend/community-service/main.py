@@ -31,6 +31,7 @@ import models
 
 log = logging.getLogger("community-service")
 MESSAGING_URL = "http://messaging-service:8000"
+MEDIA_URL = "http://media-service:8000"
 
 
 USER_URL = "http://user-service:8000"
@@ -99,6 +100,10 @@ MIGRATIONS = [
     # every row that already exists, which is what they already did.
     f"ALTER TABLE {models.SCHEMA}.communities "
     "ADD COLUMN IF NOT EXISTS public_content BOOLEAN NOT NULL DEFAULT TRUE",
+    # The photo and the cover an owner can set.
+    f"ALTER TABLE {models.SCHEMA}.communities ADD COLUMN IF NOT EXISTS avatar_asset_id VARCHAR(40)",
+    f"ALTER TABLE {models.SCHEMA}.communities ADD COLUMN IF NOT EXISTS cover_url VARCHAR(500)",
+    f"ALTER TABLE {models.SCHEMA}.communities ADD COLUMN IF NOT EXISTS cover_asset_id VARCHAR(40)",
 ]
 
 app = create_app(
@@ -353,7 +358,7 @@ def join(
             stewards,
             kind="community_request",
             title=f"Someone asked to join {community.name}",
-            link=f"/communities?open={community_id}&tab=requests",
+            link=f"/communities/{community.slug}?manage=requests",
         )
     return {"joined": status == "active", "status": status}
 
@@ -408,6 +413,17 @@ def _membership(db: OrmSession, community_id: str, user_id: str) -> models.Membe
             models.Membership.user_id == user_id,
         )
     )
+
+
+def _require_owner(db: OrmSession, community_id: str, user_id: str) -> models.Community:
+    """The community's settings - its name, face and privacy - are its owner's."""
+    community = db.get(models.Community, community_id)
+    if community is None:
+        raise HTTPException(status_code=404, detail="Community not found")
+    membership = _membership(db, community_id, user_id)
+    if membership is None or membership.role != "owner" or membership.status != "active":
+        raise HTTPException(status_code=403, detail="Only the owner can change this community's settings")
+    return community
 
 
 def _require_steward(db: OrmSession, community_id: str, user_id: str) -> models.Community:
@@ -692,6 +708,17 @@ def get_community(
         "city": community.city,
         "members_count": community.members_count,
         "avatar_url": community.avatar_url,
+        "cover_url": community.cover_url,
+        "owner_id": community.owner_id,
+        # How many are waiting to be let in - for the owner and moderators, who
+        # answer them, and nobody else.
+        "pending_count": (
+            db.scalar(
+                select(func.count()).select_from(models.Membership).where(
+                    models.Membership.community_id == community.id, models.Membership.status == "pending"
+                )
+            ) or 0
+        ) if membership and membership.status == "active" and membership.role in ("owner", "moderator") else None,
         "my_role": membership.role if membership else None,
         "my_status": membership.status if membership else None,
         "my_pinned": bool(membership and membership.status == "active" and membership.pinned_at),
@@ -776,7 +803,7 @@ def act_on_member(
             user_id,
             kind="community_approved",
             title=f"You were admitted to {community.name}",
-            link=f"/communities?open={community_id}",
+            link=f"/communities/{community.slug}",
         )
     return {"ok": True, "action": action}
 
@@ -796,6 +823,108 @@ class PrivacyIn(BaseModel):
     kind: str = Field(pattern="^(public|private|secret)$")
 
 
+COMMUNITY_IMAGES = ("avatar", "cover")
+
+
+def _ready_image_url(asset_id: str, owner_id: str, purpose: str) -> str:
+    """An uploaded image's url, once media-service vouches it is the owner's.
+
+    Fails closed, and "not found" and "not yours" read the same, so asset ids
+    cannot be probed by trying them.
+    """
+    try:
+        response = httpx.get(f"{MEDIA_URL}/internal/media/{asset_id}", timeout=5)
+    except httpx.HTTPError:
+        raise HTTPException(status_code=503, detail="Images cannot be checked right now. Please try again.")
+    if response.status_code == 404:
+        raise HTTPException(status_code=422, detail="Image not found")
+    if response.status_code != 200:
+        raise HTTPException(status_code=503, detail="Images cannot be checked right now. Please try again.")
+    asset = response.json()
+    if asset.get("owner_id") != owner_id:
+        raise HTTPException(status_code=422, detail="Image not found")
+    if asset.get("purpose") != purpose:
+        raise HTTPException(status_code=422, detail=f"This image was not uploaded as a {purpose}")
+    if asset.get("status") != "ready" or not asset.get("url"):
+        raise HTTPException(status_code=409, detail="This image is still being processed")
+    return asset["url"]
+
+
+class CommunityEdit(BaseModel):
+    name: str | None = Field(default=None, min_length=2, max_length=140)
+    description: str | None = Field(default=None, max_length=4000)
+    # Uploaded as a profile photo is, applied here by id; None takes it off.
+    avatar_asset_id: str | None = None
+    cover_asset_id: str | None = None
+
+    model_config = {"extra": "forbid"}
+
+
+@app.patch("/communities/{community_id}", tags=["governance"])
+def edit_community(
+    community_id: str, payload: CommunityEdit, principal: CurrentUser, db: OrmSession = Depends(get_db)
+):
+    """The owner renames the community, or changes its description, photo or cover."""
+    community = _require_owner(db, community_id, principal.user_id)
+    sent = payload.model_dump(exclude_unset=True)
+    if payload.name is not None:
+        community.name = payload.name.strip()
+    if payload.description is not None:
+        community.description = payload.description.strip()
+    replaced: list[str] = []
+    for purpose in COMMUNITY_IMAGES:
+        key = f"{purpose}_asset_id"
+        if key not in sent:
+            continue
+        asset_id = sent[key]
+        url = None if asset_id is None else _ready_image_url(asset_id, principal.user_id, purpose)
+        previous = getattr(community, key)
+        if previous and previous != asset_id:
+            replaced.append(previous)
+        setattr(community, key, asset_id)
+        setattr(community, f"{purpose}_url", url)
+    db.commit()
+    # The image it replaced is a file nothing refers to any more.
+    for asset_id in replaced:
+        try:
+            httpx.post(f"{MEDIA_URL}/internal/media/{asset_id}/discard",
+                       json={"owner_id": principal.user_id}, timeout=10)
+        except httpx.HTTPError as exc:
+            log.warning("could not discard replaced community image %s: %s", asset_id, exc)
+    return {
+        "id": community.id, "name": community.name, "description": community.description,
+        "avatar_url": community.avatar_url, "cover_url": community.cover_url,
+    }
+
+
+@app.get("/communities/{community_id}/roster", tags=["communities"])
+def roster(community_id: str, principal: MaybeUser, limit: int = 200, offset: int = 0,
+           db: OrmSession = Depends(get_db)):
+    """Who is in the community: names, faces and roles. For its members, and for
+    anybody when the community is public. Requests and bans stay with the
+    owner and moderators (GET /members)."""
+    community = db.get(models.Community, community_id)
+    if community is None:
+        raise HTTPException(status_code=404, detail="Community not found")
+    mine = _membership(db, community_id, principal.user_id) if principal else None
+    if community.kind != "public" and not (mine and mine.status == "active"):
+        raise HTTPException(status_code=404, detail="Community not found")
+    rows = db.scalars(
+        select(models.Membership)
+        .where(models.Membership.community_id == community_id, models.Membership.status == "active")
+        .order_by(models.Membership.joined_at)
+        .limit(min(limit, 500))
+        .offset(offset)
+    ).all()
+    rank = {"owner": 0, "moderator": 1}
+    rows = sorted(rows, key=lambda r: rank.get(r.role, 2))
+    profiles = _profiles({r.user_id for r in rows})
+    return {
+        "total": community.members_count,
+        "items": [{"user_id": r.user_id, "role": r.role, "profile": profiles.get(r.user_id)} for r in rows],
+    }
+
+
 @app.patch("/communities/{community_id}/privacy", tags=["governance"])
 def set_privacy(
     community_id: str, payload: PrivacyIn, principal: CurrentUser, db: OrmSession = Depends(get_db)
@@ -807,7 +936,7 @@ def set_privacy(
     one keeps the members it has - nobody is put out for a setting they did
     not choose.
     """
-    community = _require_steward(db, community_id, principal.user_id)
+    community = _require_owner(db, community_id, principal.user_id)
     if community.kind == "paid":
         raise HTTPException(
             status_code=409,
@@ -871,7 +1000,7 @@ def set_public_content(
     its content being for members, so there is nothing here to choose - and
     offering the switch would suggest otherwise.
     """
-    community = _require_steward(db, community_id, principal.user_id)
+    community = _require_owner(db, community_id, principal.user_id)
     if community.kind != "public":
         raise HTTPException(
             status_code=409,

@@ -1,10 +1,10 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { Link, useLocation } from 'react-router'
-import { ArrowLeft, Globe, Link2, Lock, LogOut, Pin, PinOff, UsersRound } from 'lucide-react'
+import { ArrowLeft, Globe, Link2, Lock, LogOut, Pencil, Pin, PinOff, UsersRound } from 'lucide-react'
 import Composer from '@/components/social/Composer'
 import LinkQr from '@/components/ui-kit/LinkQr'
 import PostCard from '@/components/social/PostCard'
-import MemberQueue from '@/components/community/MemberQueue'
+import { CommunityMembersDialog, CommunitySettingsDialog } from '@/components/community/CommunityDialogs'
 import { useApi } from '@/hooks/useApi'
 import { useAuth } from '@/hooks/useAuth'
 import { ApiError, kaluta, type Post } from '@/lib/api'
@@ -18,13 +18,6 @@ const KIND_LABEL: Record<string, string> = {
   secret: 'Secret — unlisted, opened only by a shared link',
   paid: 'Paid — access is bought',
 }
-
-/** The choices a steward has. Paid is a price, not a privacy setting. */
-const PRIVACY_CHOICES: Array<{ kind: 'public' | 'private' | 'secret'; label: string; hint: string }> = [
-  { kind: 'public', label: 'Public', hint: 'Anyone can read it and join.' },
-  { kind: 'private', label: 'Private', hint: 'Anyone can find it; a moderator approves who joins.' },
-  { kind: 'secret', label: 'Secret', hint: 'Unlisted; only a shared link opens it, and joining still needs approval.' },
-]
 
 /**
  * One community, opened: what has been posted in it, and the box to add to it.
@@ -68,7 +61,10 @@ export default function CommunityView({
   const [busy, setBusy] = useState(false)
   const [note, setNote] = useState<string | null>(null)
   const [fresh, setFresh] = useState<Post[]>([])
-  const [managing, setManaging] = useState(false)
+  // The two windows: the owner's settings, and the members (with the
+  // requests, for those who answer them).
+  const [editing, setEditing] = useState(false)
+  const [showMembers, setShowMembers] = useState(false)
   const [shareNote, setShareNote] = useState<string | null>(null)
   // The address just copied, kept so it can also be drawn as a code.
   const [sharedUrl, setSharedUrl] = useState<string | null>(null)
@@ -87,6 +83,21 @@ export default function CommunityView({
   const isPending = community?.my_status === 'pending'
   const isOwner = community?.my_role === 'owner'
   const isSteward = isMember && (isOwner || community?.my_role === 'moderator')
+  const pending = community?.pending_count ?? 0
+  // Members see who else is in; anybody may, on a public community.
+  const canSeeMembers = isMember || community?.kind === 'public'
+
+  // The "someone asked to join" notification lands here with ?manage=requests.
+  const wantsRequests = new URLSearchParams(location.search).get('manage') === 'requests'
+  useEffect(() => {
+    if (wantsRequests && isSteward) setShowMembers(true)
+  }, [wantsRequests, isSteward])
+
+  const refresh = () => {
+    detail.reload()
+    feed.reload()
+    onChanged?.()
+  }
 
   const join = async () => {
     if (!community) return
@@ -177,52 +188,6 @@ export default function CommunityView({
     }
   }
 
-  const changePublicContent = async (next: boolean) => {
-    if (!community) return
-    setBusy(true)
-    setNote(null)
-    try {
-      await kaluta.communities.setPublicContent(community.id, next)
-      setNote(
-        next
-          ? 'Anyone can read this community now. Only members can post, like and comment.'
-          : 'This community is for its members now. Links to its posts no longer open for anybody else.',
-      )
-      detail.reload()
-      feed.reload()
-      onChanged?.()
-    } catch (err) {
-      setNote(err instanceof ApiError ? err.message : 'Could not change who can read this')
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  const changePrivacy = async (kind: 'public' | 'private' | 'secret') => {
-    if (!community || kind === community.kind) return
-    setBusy(true)
-    setNote(null)
-    try {
-      const result = await kaluta.communities.setPrivacy(community.id, kind)
-      setNote(
-        kind === 'public'
-          ? result.admitted
-            ? `This group is public now. ${result.admitted} waiting request${result.admitted === 1 ? ' was' : 's were'} admitted.`
-            : 'This group is public now.'
-          : kind === 'private'
-            ? 'This group is private now. Members stay; newcomers ask to join.'
-            : 'This group is secret now. It is unlisted, and only a shared link opens it.',
-      )
-      detail.reload()
-      feed.reload()
-      onChanged?.()
-    } catch (err) {
-      setNote(err instanceof ApiError ? err.message : 'Could not change the privacy')
-    } finally {
-      setBusy(false)
-    }
-  }
-
   const posts = [...fresh, ...(feed.data?.items ?? [])]
 
   return (
@@ -242,25 +207,37 @@ export default function CommunityView({
       {community && (
         <>
           <header className="cloud-card overflow-hidden">
-            <div
-              aria-hidden="true"
-              className={cn(
-                'h-28 sm:h-36',
-                community.kind === 'public'
-                  ? 'bg-gradient-to-r from-[#C9D6F2] via-[#E3ECF7] to-[#F6EBD3]'
-                  : community.kind === 'private'
-                    ? 'bg-gradient-to-r from-[#F2B8A2] via-[#F7E1D8] to-[#F0C878]'
-                    : 'bg-gradient-to-r from-[#F0C878] via-[#F6EBD3] to-[#F2B8A2]',
-              )}
-            />
+            {community.cover_url ? (
+              <img src={community.cover_url} alt="" className="h-36 w-full object-cover sm:h-48" />
+            ) : (
+              <div
+                aria-hidden="true"
+                className={cn(
+                  'h-28 sm:h-36',
+                  community.kind === 'public'
+                    ? 'bg-gradient-to-r from-[#C9D6F2] via-[#E3ECF7] to-[#F6EBD3]'
+                    : community.kind === 'private'
+                      ? 'bg-gradient-to-r from-[#F2B8A2] via-[#F7E1D8] to-[#F0C878]'
+                      : 'bg-gradient-to-r from-[#F0C878] via-[#F6EBD3] to-[#F2B8A2]',
+                )}
+              />
+            )}
             <div className="px-5 pb-6 sm:px-7">
             <div className="-mt-9 flex items-end gap-4">
-              <span
-                aria-hidden="true"
-                className="flex h-[72px] w-[72px] shrink-0 items-center justify-center rounded-[20px] border-4 border-[var(--cloud)] bg-gold/25 text-gold-soft"
-              >
-                <UsersRound size={30} />
-              </span>
+              {community.avatar_url ? (
+                <img
+                  src={community.avatar_url}
+                  alt=""
+                  className="h-[72px] w-[72px] shrink-0 rounded-[20px] border-4 border-[var(--cloud)] object-cover"
+                />
+              ) : (
+                <span
+                  aria-hidden="true"
+                  className="flex h-[72px] w-[72px] shrink-0 items-center justify-center rounded-[20px] border-4 border-[var(--cloud)] bg-gold/25 text-gold-soft"
+                >
+                  <UsersRound size={30} />
+                </span>
+              )}
             </div>
             <div className="mt-3 min-w-0">
                 <h1 className="text-[clamp(28px,3.4vw,38px)] font-bold leading-[1.05] tracking-[-0.035em] text-text-hi">{community.name}</h1>
@@ -322,13 +299,29 @@ export default function CommunityView({
                   Leave
                 </button>
               )}
-              {(isOwner || community.my_role === 'moderator') && (
+              {isOwner && (
                 <button
                   type="button"
-                  onClick={() => setManaging((m) => !m)}
-                  className="rounded-full border border-[var(--cloud-border)] px-5 py-2.5 text-sm font-semibold text-text-low hover:border-sky/50 hover:text-sky"
+                  onClick={() => setEditing(true)}
+                  className="inline-flex items-center gap-1.5 rounded-full border border-[var(--cloud-border)] px-5 py-2.5 text-sm font-semibold text-text-mid hover:border-gold/50 hover:text-gold-soft"
                 >
-                  {managing ? 'Close' : 'Manage members'}
+                  <Pencil size={13} aria-hidden="true" />
+                  Edit community
+                </button>
+              )}
+              {canSeeMembers && (
+                <button
+                  type="button"
+                  onClick={() => setShowMembers(true)}
+                  className="inline-flex items-center gap-1.5 rounded-full border border-[var(--cloud-border)] px-5 py-2.5 text-sm font-semibold text-text-mid hover:border-gold/50 hover:text-gold-soft"
+                >
+                  <UsersRound size={13} aria-hidden="true" />
+                  Members
+                  {isSteward && pending > 0 && (
+                    <span className="ms-0.5 rounded-full bg-gold px-1.5 text-[0.7rem] font-bold text-ink" aria-label={`${pending} waiting`}>
+                      {pending}
+                    </span>
+                  )}
                 </button>
               )}
               {isMember && (
@@ -367,61 +360,6 @@ export default function CommunityView({
               </div>
             )}
 
-            {isSteward && community.kind !== 'paid' && (
-              <fieldset className="mt-5">
-                <legend className="text-sm font-semibold text-text-hi">Privacy</legend>
-                <div role="radiogroup" className="mt-2 flex flex-wrap gap-2">
-                  {PRIVACY_CHOICES.map((choice) => (
-                    <button
-                      key={choice.kind}
-                      type="button"
-                      role="radio"
-                      aria-checked={community.kind === choice.kind}
-                      disabled={busy}
-                      onClick={() => changePrivacy(choice.kind)}
-                      className={cn(
-                        'inline-flex items-center gap-1.5 rounded-full border px-4 py-2 text-sm font-semibold disabled:opacity-40',
-                        community.kind === choice.kind
-                          ? 'border-gold/60 bg-gold/15 text-gold-soft'
-                          : 'border-[var(--cloud-border)] text-text-mid hover:border-gold/40',
-                      )}
-                    >
-                      {choice.kind === 'public' ? <Globe size={13} aria-hidden="true" /> : <Lock size={13} aria-hidden="true" />}
-                      {choice.label}
-                    </button>
-                  ))}
-                </div>
-                <p className="mt-2 text-xs text-text-low">
-                  {PRIVACY_CHOICES.find((c) => c.kind === community.kind)?.hint}
-                </p>
-
-                {/* Only on an open community: the other kinds are defined by
-                    their content being for members, so there is nothing here
-                    to choose and offering it would suggest otherwise. */}
-                {community.kind === 'public' && (
-                  <label className="mt-4 flex items-start gap-2.5">
-                    <input
-                      type="checkbox"
-                      checked={publishesPublicly}
-                      disabled={busy}
-                      onChange={(event) => void changePublicContent(event.target.checked)}
-                      className="mt-0.5 h-4 w-4 shrink-0 accent-[var(--gold)]"
-                    />
-                    <span className="min-w-0">
-                      <span className="block text-sm font-semibold text-text-hi">
-                        Anyone can read this community
-                      </span>
-                      <span className="mt-0.5 block text-xs text-text-low">
-                        Its posts open for people who have not joined, and a link to one
-                        shows a preview when it is shared outside Kinjy. Joining is still
-                        what lets somebody post, like or comment.
-                      </span>
-                    </span>
-                  </label>
-                )}
-              </fieldset>
-            )}
-
             {note && (
               <p role="status" className="mt-3 text-sm text-text-mid">
                 {note}
@@ -436,10 +374,14 @@ export default function CommunityView({
               </p>
             )}
 
-            {managing && (
-              <div className="mt-4">
-                <MemberQueue communityId={communityId} canModerate />
-              </div>
+            {isSteward && pending > 0 && (
+              <button
+                type="button"
+                onClick={() => setShowMembers(true)}
+                className="mt-3 text-sm font-semibold text-gold-soft hover:underline"
+              >
+                {pending} {pending === 1 ? 'person is' : 'people are'} asking to join
+              </button>
             )}
             </div>
           </header>
@@ -503,6 +445,22 @@ export default function CommunityView({
                 />
               ))}
             </div>
+          )}
+          {editing && isOwner && (
+            <CommunitySettingsDialog
+              community={{ ...community, public_content: publishesPublicly }}
+              onClose={() => setEditing(false)}
+              onChanged={refresh}
+            />
+          )}
+          {showMembers && canSeeMembers && (
+            <CommunityMembersDialog
+              communityId={community.id}
+              canModerate={isSteward}
+              pending={pending}
+              onClose={() => setShowMembers(false)}
+              onChanged={refresh}
+            />
           )}
         </>
       )}
