@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { Link, useLocation } from 'react-router'
-import { ArrowLeft, Globe, Link2, Lock, LogOut, Pencil, Pin, PinOff, UsersRound } from 'lucide-react'
+import { ArrowLeft, Bell, BellOff, Globe, Link2, Lock, LogOut, Pencil, Pin, PinOff, UsersRound } from 'lucide-react'
 import Composer from '@/components/social/Composer'
 import LinkQr from '@/components/ui-kit/LinkQr'
 import PostCard from '@/components/social/PostCard'
@@ -188,6 +188,22 @@ export default function CommunityView({
     }
   }
 
+  const toggleNotifications = async () => {
+    if (!community) return
+    const on = !community.my_notify_posts
+    setBusy(true)
+    setNote(null)
+    try {
+      await kaluta.communities.setPostNotifications(community.id, on)
+      setNote(on ? 'You will be told about each new post here.' : 'No more notifications for new posts here.')
+      detail.reload()
+    } catch (err) {
+      setNote(err instanceof ApiError ? err.message : 'Could not change the notifications')
+    } finally {
+      setBusy(false)
+    }
+  }
+
   const posts = [...fresh, ...(feed.data?.items ?? [])]
 
   return (
@@ -334,6 +350,19 @@ export default function CommunityView({
                 >
                   {community.my_pinned ? <PinOff size={13} aria-hidden="true" /> : <Pin size={13} aria-hidden="true" />}
                   {community.my_pinned ? 'Unpin' : 'Pin'}
+                </button>
+              )}
+              {isMember && (
+                <button
+                  type="button"
+                  onClick={toggleNotifications}
+                  disabled={busy}
+                  aria-pressed={Boolean(community.my_notify_posts)}
+                  title={community.my_notify_posts ? 'Stop notifications for new posts' : 'Be notified of new posts'}
+                  className="inline-flex items-center gap-1.5 rounded-full border border-[var(--cloud-border)] px-5 py-2.5 text-sm font-semibold text-text-mid hover:border-gold/50 hover:text-gold-soft disabled:opacity-40"
+                >
+                  {community.my_notify_posts ? <Bell size={13} aria-hidden="true" /> : <BellOff size={13} aria-hidden="true" />}
+                  {community.my_notify_posts ? 'Notifications on' : 'Notifications off'}
                 </button>
               )}
               <button

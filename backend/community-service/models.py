@@ -84,6 +84,10 @@ class Membership(Base):
     # belongs to somebody *in* the group: leaving deletes the row and the pin
     # with it, and a ban keeps the row but the pinned list reads active only.
     pinned_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Whether this member is told about each new post in the group. On by
+    # default - joining a group is asking to hear from it - and theirs to turn
+    # off from the group's page.
+    notify_posts: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
 
 
 class Forum(Base):

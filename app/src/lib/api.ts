@@ -2239,6 +2239,8 @@ export const kaluta = {
         my_role: string | null
         my_status: string | null
         my_pinned?: boolean
+        /** Whether you are told about each new post here. */
+        my_notify_posts?: boolean
       }>(`/communities/${id}${invite ? `?invite=${encodeURIComponent(invite)}` : ''}`),
 
     /** The owner renames it, or changes its description, photo (asset id) or cover. */
@@ -2270,6 +2272,9 @@ export const kaluta = {
     /** Three pins are free; more answer 402 until the year's KYC fee is paid. */
     pin: (id: string) => api.post<{ pinned: boolean; already?: boolean; count?: number }>(`/communities/${id}/pin`),
     unpin: (id: string) => api.delete<{ pinned: boolean }>(`/communities/${id}/pin`),
+    /** Be told about each new post in a group you belong to, or not. */
+    setPostNotifications: (id: string, on: boolean) =>
+      api.put<{ notify_posts: boolean }>(`/communities/${id}/notifications`, { notify_posts: on }),
 
     /** The roll and the queue waiting on it. Owner and moderators only. */
     members: (id: string, status?: string) =>

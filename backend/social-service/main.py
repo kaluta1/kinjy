@@ -276,7 +276,7 @@ def _name_of(user_id: str) -> str:
     return profile.get("display_name") or "Someone"
 
 
-def _notify_mentions(body: str, actor_id: str, post_id: str, where: str) -> None:
+def _notify_mentions(body: str, actor_id: str, post_id: str, where: str) -> set[str]:
     """Tell the people named in a body that they were named.
 
     Best-effort on purpose, like the other notifications here: the post is
@@ -289,7 +289,7 @@ def _notify_mentions(body: str, actor_id: str, post_id: str, where: str) -> None
     """
     handles = _mentioned_handles(body)
     if not handles:
-        return
+        return set()
     try:
         response = httpx.post(
             f"{USER_SERVICE}/internal/profiles/by-handle", json={"handles": handles}, timeout=5
@@ -298,7 +298,7 @@ def _notify_mentions(body: str, actor_id: str, post_id: str, where: str) -> None
         people = response.json().get("profiles", {})
     except Exception as exc:
         log.warning("could not resolve mentions: %s", exc)
-        return
+        return set()
 
     actor = _authors({actor_id}).get(actor_id) or {}
     who = actor.get("display_name") or "Someone"
@@ -309,10 +309,12 @@ def _notify_mentions(body: str, actor_id: str, post_id: str, where: str) -> None
     excerpt = body or ""
     for handle, name in _mention_names([excerpt]).items():
         excerpt = re.sub(rf"@{re.escape(handle)}", f"@{name}", excerpt, flags=re.IGNORECASE)
+    told: set[str] = set()
     for profile in people.values():
         target = profile.get("user_id")
         if not target or target == actor_id:
             continue
+        told.add(target)
         notify.notify(
             target,
             kind="mention",
@@ -323,6 +325,37 @@ def _notify_mentions(body: str, actor_id: str, post_id: str, where: str) -> None
             # two.
             link=f"/p/{post_id}",
         )
+    return told
+
+
+def _notify_community_post(post_id: str, author_id: str, community_id: str, text: str, skip: set[str]) -> None:
+    """Tell a group's members that something was posted in it.
+
+    Everybody active in the group who has not turned it off on the group's
+    page; never the author, and never somebody the post already reached by
+    naming them. Run on a thread after the response: a group of thousands is
+    thousands of notifications, and the author is not kept waiting for them.
+    """
+    try:
+        response = httpx.get(f"{COMMUNITY_URL}/internal/communities/{community_id}/post-audience", timeout=10)
+        response.raise_for_status()
+        members = set(response.json().get("user_ids", []))
+    except Exception as exc:
+        log.warning("community post audience lookup failed for %s: %s", community_id, exc)
+        return
+    members -= skip | {author_id}
+    if not members:
+        return
+    group = _community_summary(community_id).get("name") or "your group"
+    who = (_authors({author_id}).get(author_id) or {}).get("display_name") or "Someone"
+    excerpt = " ".join(text.split())[:140]
+    notify.notify_many(
+        members,
+        kind="community_post",
+        title=f"{who} posted in {group}",
+        body=excerpt or None,
+        link=f"/p/{post_id}",
+    )
 
 
 
@@ -1072,8 +1105,17 @@ async def create_post(payload: PostIn, principal: CurrentUser, db: OrmSession = 
     # After the write, so a mention can never cost the post. Not for an
     # "only me" post: the person named could not open it, and the
     # notification would quote it to them anyway.
+    told: set[str] = set()
     if post.visibility != "private":
-        _notify_mentions(post.body, principal.user_id, post.id, "post")
+        told = _notify_mentions(post.body, principal.user_id, post.id, "post")
+    # A post in a group is news to the group.
+    if post.visibility == "community" and post.community_id:
+        text = htmlish_to_text(post.body) if post.format == "article" else post.body
+        threading.Thread(
+            target=_notify_community_post,
+            args=(post.id, post.author_id, post.community_id, text or "", told),
+            daemon=True,
+        ).start()
     return _post_out(post, db, viewer=principal.user_id)
 
 

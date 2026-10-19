@@ -104,6 +104,9 @@ MIGRATIONS = [
     f"ALTER TABLE {models.SCHEMA}.communities ADD COLUMN IF NOT EXISTS avatar_asset_id VARCHAR(40)",
     f"ALTER TABLE {models.SCHEMA}.communities ADD COLUMN IF NOT EXISTS cover_url VARCHAR(500)",
     f"ALTER TABLE {models.SCHEMA}.communities ADD COLUMN IF NOT EXISTS cover_asset_id VARCHAR(40)",
+    # Told about new posts in the group: on for everybody already in one.
+    f"ALTER TABLE {models.SCHEMA}.memberships "
+    "ADD COLUMN IF NOT EXISTS notify_posts BOOLEAN NOT NULL DEFAULT TRUE",
 ]
 
 app = create_app(
@@ -680,6 +683,24 @@ def unpin_community(community_id: str, principal: CurrentUser, db: OrmSession = 
     return {"pinned": False}
 
 
+class NotifyIn(BaseModel):
+    notify_posts: bool
+
+
+@app.put("/communities/{community_id}/notifications", tags=["communities"])
+def set_post_notifications(
+    community_id: str, payload: NotifyIn, principal: CurrentUser, db: OrmSession = Depends(get_db)
+):
+    """Whether you are told about each new post in a group you belong to."""
+    community = _resolve(db, community_id)
+    membership = _membership(db, community.id, principal.user_id) if community else None
+    if membership is None or membership.status != "active":
+        raise HTTPException(status_code=404, detail="You are not a member of this group")
+    membership.notify_posts = payload.notify_posts
+    db.commit()
+    return {"notify_posts": membership.notify_posts}
+
+
 @app.get("/communities/{community_id}", tags=["communities"])
 def get_community(
     community_id: str,
@@ -735,6 +756,7 @@ def get_community(
         "my_role": membership.role if membership else None,
         "my_status": membership.status if membership else None,
         "my_pinned": bool(membership and membership.status == "active" and membership.pinned_at),
+        "my_notify_posts": bool(membership and membership.status == "active" and membership.notify_posts),
     }
 
 
@@ -1968,6 +1990,23 @@ def community_summary(community_id: str, db: OrmSession = Depends(get_db)):
         "owner_id": community.owner_id,
         "members_count": community.members_count,
     }
+
+
+@app.get("/internal/communities/{community_id}/post-audience", tags=["internal"])
+def post_audience(community_id: str, db: OrmSession = Depends(get_db)):
+    """Who is told about a new post here: active members who did not turn it off.
+
+    Internal only (the gateway never proxies /internal): a list of ids is
+    exactly what the public routes refuse to hand out.
+    """
+    ids = db.scalars(
+        select(models.Membership.user_id).where(
+            models.Membership.community_id == community_id,
+            models.Membership.status == "active",
+            models.Membership.notify_posts.is_(True),
+        )
+    ).all()
+    return {"user_ids": list(ids)}
 
 
 @app.get("/internal/membership/{community_id}/{user_id}", tags=["internal"])
