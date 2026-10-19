@@ -1381,3 +1381,11 @@ reported links open signed out with their own photo as preview.
   members from Kaluta Pay's escrow is Kaluta Pay's phase 2. The Sonco Pay
   account set on the Kinji tenant must be Kinjy's own, or escrowed commissions
   are not in the balance withdrawals are paid from. No real payment yet.
+
+## Communities: owner settings and members in dialogs (19/10)
+
+- Edit community (owner only): cover, photo, name, description, public/private/secret,
+  "anyone can read". Members dialog for members (anybody on a public one);
+  owner/moderators get requests, roles, bans. Request notification opens the queue.
+- Deployed 19/10 09:2x (community, web; backup `pre-community-dialogs-20261019-0920`).
+- **Not tested:** uploading a real cover/photo for a community (same uploader as chat groups).
