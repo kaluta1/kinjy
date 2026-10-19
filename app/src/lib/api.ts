@@ -902,6 +902,8 @@ export interface Community {
   members_count: number
   country: string | null
   city: string | null
+  avatar_url?: string | null
+  cover_url?: string | null
   /** The viewer's role when they are a member (member|moderator|owner), else null. */
   my_role?: string | null
   /** pending (request sent), active, banned - or null when not a member. */
@@ -2273,9 +2275,10 @@ export const kaluta = {
     act: (id: string, userId: string, action: 'approve' | 'reject' | 'ban' | 'unban' | 'promote' | 'demote') =>
       api.post<{ ok: boolean; action: string }>(`/communities/${id}/members/${userId}`, { action }),
 
-    list: (params: { q?: string; country?: string; limit?: number } = {}) => {
+    list: (params: { q?: string; country?: string; limit?: number; mine?: boolean } = {}) => {
       const query = new URLSearchParams()
       if (params.q) query.set('q', params.q)
+      if (params.mine) query.set('mine', 'true')
       if (params.country) query.set('country', params.country)
       query.set('limit', String(params.limit ?? 30))
       // Signed in when there is a session, so each card can say Joined / Request sent.

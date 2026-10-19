@@ -1,10 +1,10 @@
 import { useEffect, useState } from 'react'
 import { Link, useNavigate, useSearchParams } from 'react-router'
-import { Check, MessageCircle, UserMinus, Users, X } from 'lucide-react'
+import { Check, MessageCircle, Search, UserMinus, UserPlus, Users, X } from 'lucide-react'
 import AppShell from '@/components/app/AppShell'
 import MemberAvatar from '@/components/social/MemberAvatar'
 import { useApi } from '@/hooks/useApi'
-import { ApiError, kaluta, type ConnectionEntry } from '@/lib/api'
+import { ApiError, kaluta, type ConnectionEntry, type PersonSuggestion } from '@/lib/api'
 import { announce, onChange } from '@/lib/live'
 import ConfirmDialog from '@/components/ui-kit/ConfirmDialog'
 import { cn } from '@/lib/utils'
@@ -138,21 +138,23 @@ export default function Connections() {
 
   return (
     <AppShell>
-      <header className="mb-6">
-        <p className="mono-data text-[0.72rem] font-bold uppercase tracking-[0.15em] text-gold-soft">Connections</p>
-        <h1 className="mt-2 text-[clamp(38px,5vw,56px)] font-bold leading-[1.02] tracking-[-0.045em] text-text-hi">
-          Your people
-        </h1>
-        <p className="mt-3 max-w-2xl text-[0.95rem] leading-relaxed text-text-low">
-          People you are connected to. A connection is mutual, and it is what opens messaging between you.
-        </p>
-      </header>
+      <PeopleSearch
+        standingOf={(id) =>
+          groups?.accepted.some((e) => e.user_id === id)
+            ? 'connected'
+            : groups?.outgoing.some((e) => e.user_id === id)
+              ? 'invited'
+              : groups?.incoming.some((e) => e.user_id === id)
+                ? 'invites_you'
+                : 'none'
+        }
+      />
 
       {groups && (
         <div
           role="group"
           aria-label="Show"
-          className="inline-flex max-w-full gap-1 overflow-x-auto rounded-full border border-[var(--cloud-border)] bg-text-hi/[0.04] p-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
+          className="mt-6 inline-flex max-w-full gap-1 overflow-x-auto rounded-full border border-[var(--cloud-border)] bg-text-hi/[0.04] p-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
         >
           {TABS.map((t) => {
             const count = groups[t.id].length
@@ -203,7 +205,7 @@ export default function Connections() {
         )}
         <ul className="grid gap-4 sm:grid-cols-2">
           {rows.map((entry) => (
-            <li key={entry.id} className="cloud-card flex items-center gap-4 p-5">
+            <li key={entry.id} className="cloud-card flex items-center gap-4 p-4">
               <MemberAvatar
                 handle={entry.profile?.handle}
                 displayName={entry.profile?.display_name}
@@ -234,13 +236,7 @@ export default function Connections() {
         </ul>
       </div>
 
-      <p className="mt-8 text-sm text-text-low">
-        Choose who can send you an invitation in{' '}
-        <Link to="/dashboard?tab=privacy" className="text-gold-soft hover:underline">
-          your privacy settings
-        </Link>
-        .
-      </p>
+      <PeopleYouMayKnow />
       <ConfirmDialog
         open={Boolean(confirmRemove)}
         onOpenChange={(open) => !open && setConfirmRemove(null)}
@@ -289,5 +285,161 @@ function IconButton({
     >
       {children}
     </button>
+  )
+}
+
+
+/** What the Connect button does for somebody, given where you stand with them. */
+type Standing = 'none' | 'invited' | 'invites_you' | 'connected'
+
+function ConnectButton({ userId, name, standing: initial }: { userId: string; name: string; standing: Standing }) {
+  const [standing, setStanding] = useState<Standing>(initial)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const act = async () => {
+    setBusy(true)
+    setError(null)
+    try {
+      if (standing === 'invites_you') {
+        // Accepting is answering their invitation, not sending a new one.
+        await kaluta.connections.respond(userId, true)
+        setStanding('connected')
+      } else {
+        const result = await kaluta.connections.invite(userId)
+        setStanding(result.status === 'accepted' ? 'connected' : 'invited')
+      }
+      announce('connections')
+      announce('profile')
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Could not connect')
+    } finally {
+      setBusy(false)
+    }
+  }
+  if (standing === 'connected') {
+    return <span className="rounded-full bg-success/10 px-3.5 py-2 text-xs font-semibold text-success">Connected</span>
+  }
+  if (standing === 'invited') {
+    return <span className="rounded-full bg-text-hi/[0.07] px-3.5 py-2 text-xs font-semibold text-text-mid">Invited</span>
+  }
+  return (
+    <span className="flex flex-col items-end gap-1">
+      <button
+        type="button"
+        onClick={act}
+        disabled={busy}
+        aria-label={standing === 'invites_you' ? `Accept ${name}` : `Connect with ${name}`}
+        className="inline-flex items-center gap-1.5 rounded-full bg-gradient-to-br from-gold-soft to-gold px-3.5 py-2 text-xs font-bold text-ink disabled:opacity-40"
+      >
+        <UserPlus size={14} aria-hidden="true" />
+        {standing === 'invites_you' ? 'Accept' : 'Connect'}
+      </button>
+      {error && <span className="max-w-[12rem] text-end text-[0.7rem] text-red-200">{error}</span>}
+    </span>
+  )
+}
+
+/** Find somebody by name, and connect from the result. */
+function PeopleSearch({ standingOf }: { standingOf: (userId: string) => Standing }) {
+  const [query, setQuery] = useState('')
+  const [results, setResults] = useState<Array<{ user_id: string; handle: string; display_name: string; avatar_url?: string | null; city?: string | null }> | null>(null)
+  const [busy, setBusy] = useState(false)
+
+  useEffect(() => {
+    const q = query.trim()
+    if (q.length < 2) return
+    const id = window.setTimeout(() => {
+      setBusy(true)
+      kaluta.people
+        .search(q, 12)
+        .then((page) => setResults(page.items))
+        .catch(() => setResults([]))
+        .finally(() => setBusy(false))
+    }, 250)
+    return () => window.clearTimeout(id)
+  }, [query])
+
+  return (
+    <div>
+      <label className="flex w-full items-center gap-3 rounded-full border border-[var(--cloud-border)] bg-[var(--cloud)] px-5 py-3 transition-colors focus-within:border-gold/60">
+        <Search size={18} className="shrink-0 text-text-low" aria-hidden="true" />
+        <input
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          placeholder="Search people by name"
+          aria-label="Search people"
+          className="w-full bg-transparent text-[0.95rem] text-text-hi placeholder:text-text-low focus:outline-none"
+        />
+        {query && (
+          <button type="button" onClick={() => setQuery('')} aria-label="Clear the search" className="text-text-low hover:text-text-hi">
+            <X size={16} aria-hidden="true" />
+          </button>
+        )}
+      </label>
+      {results !== null && query.trim().length >= 2 && (
+        <div className="cloud-card mt-3 p-2">
+          {busy && results.length === 0 ? (
+            <p className="px-3 py-3 text-sm text-text-low">Searching…</p>
+          ) : results.length === 0 ? (
+            <p className="px-3 py-3 text-sm text-text-mid">Nobody found.</p>
+          ) : (
+            <ul>
+              {results.map((person) => (
+                <li key={person.user_id} className="flex items-center gap-3 rounded-xl px-3 py-2 hover:bg-text-hi/[0.04]">
+                  <MemberAvatar handle={person.handle} displayName={person.display_name} avatarUrl={person.avatar_url} size={40} />
+                  <Link to={`/u/${person.handle}`} className="min-w-0 flex-1">
+                    <span className="block truncate text-sm font-semibold text-text-hi hover:text-gold-soft">{person.display_name}</span>
+                    {person.city && <span className="block truncate text-xs text-text-low">{person.city}</span>}
+                  </Link>
+                  <ConnectButton
+                    key={`${person.user_id}-${standingOf(person.user_id)}`}
+                    userId={person.user_id}
+                    name={person.display_name}
+                    standing={standingOf(person.user_id)}
+                  />
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
+/** Suggestions: people near you or near the people you know. */
+function PeopleYouMayKnow() {
+  const suggestions = useApi(() => kaluta.suggestions.people(12), [])
+  const items: PersonSuggestion[] = (suggestions.data?.items ?? []).filter((p) => p.connection !== 'connected')
+  if (!suggestions.loading && items.length === 0) return null
+  return (
+    <section className="mt-10">
+      <h2 className="mb-3 text-lg font-bold tracking-[-0.02em] text-text-hi">People you may know</h2>
+      {suggestions.loading ? (
+        <p className="text-sm text-text-low">Loading…</p>
+      ) : (
+        <ul className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
+          {items.map((person) => (
+            <li key={person.user_id} className="cloud-card flex flex-col items-center p-5 text-center">
+              <MemberAvatar handle={person.handle} displayName={person.display_name} avatarUrl={person.avatar_url} size={72} />
+              <Link
+                to={`/u/${person.handle}`}
+                className="mt-3 block max-w-full truncate text-[1rem] font-bold text-text-hi hover:text-gold-soft"
+              >
+                {person.display_name}
+              </Link>
+              <span className="mt-0.5 block max-w-full truncate text-xs text-text-low">
+                {[person.city, `${person.followers_count} follower${person.followers_count === 1 ? '' : 's'}`]
+                  .filter(Boolean)
+                  .join(' · ')}
+              </span>
+              <span className="mt-4">
+                <ConnectButton userId={person.user_id} name={person.display_name} standing={person.connection ?? 'none'} />
+              </span>
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
   )
 }

@@ -9,7 +9,7 @@ import { ApiError, kaluta } from '@/lib/api'
 import { cn } from '@/lib/utils'
 
 /** A sheet from the bottom on a phone, a centred window from sm up. Closes on Escape and outside. */
-function Sheet({ title, onClose, children }: { title: string; onClose: () => void; children: ReactNode }) {
+export function Sheet({ title, onClose, children }: { title: string; onClose: () => void; children: ReactNode }) {
   const { tok } = useAppTheme()
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => event.key === 'Escape' && onClose()

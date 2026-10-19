@@ -202,6 +202,7 @@ def list_communities(
     principal: MaybeUser,
     q: str | None = None,
     country: str | None = None,
+    mine: bool = False,
     limit: int = 30,
     offset: int = 0,
     db: OrmSession = Depends(get_db),
@@ -209,6 +210,16 @@ def list_communities(
     # Secret communities are never listed — only reachable by direct link for
     # members. Filtering them here rather than in the client is the whole point.
     stmt = select(models.Community).where(models.Community.kind != "secret")
+    if mine:
+        # The viewer's own: joined or asked to join - secret ones included,
+        # since they are already in them.
+        if not principal:
+            return {"total": 0, "items": []}
+        joined = select(models.Membership.community_id).where(
+            models.Membership.user_id == principal.user_id,
+            models.Membership.status.in_(("active", "pending")),
+        )
+        stmt = select(models.Community).where(models.Community.id.in_(joined))
     if q:
         like = f"%{q.lower()}%"
         stmt = stmt.where(
@@ -250,6 +261,8 @@ def list_communities(
                 "members_count": r.members_count,
                 "country": r.country,
                 "city": r.city,
+                "avatar_url": r.avatar_url,
+                "cover_url": r.cover_url,
             }
             for r in rows
         ],
