@@ -1365,3 +1365,19 @@ design, to explain to Rabson.
 Deployed on kinjy.com 18/10 19:4x (user, community, messaging, social, web;
 backup `pre-bugfix-1810-20261018-1940`); 46 held photo posts re-rated, the
 reported links open signed out with their own photo as preview.
+
+## Payments through Kaluta Pay (19/10)
+
+- Every payment is a Kaluta Pay invoice (tenant "Kinji", escrow on), paid on
+  Kinjy's page; settled on the invoice read back; webhook
+  `https://kinjy.com/api/payments/webhook/kalutapay` (HMAC-SHA512, `whs_`).
+- Split after payment: sponsor commission + Leaders 5% in escrow (from the
+  ledger journal `payment:{id}`), an order held whole; retried every 5 min.
+- The KYC fee is now posted to the ledger (sponsor 20%, Leaders 5%).
+- Deployed 19/10 08:20 (ledger, payment; backup `pre-kalutapay-20261019-0819`).
+  Webhook checked live: unsigned 401, signed 200. Methods offered: USDT TRON/BSC,
+  BNB BSC, TRX TRON, card - **no mobile money** on the Kinji tenant.
+- **Not done / to confirm:** withdrawals still on Sonco Pay directly; paying
+  members from Kaluta Pay's escrow is Kaluta Pay's phase 2. The Sonco Pay
+  account set on the Kinji tenant must be Kinjy's own, or escrowed commissions
+  are not in the balance withdrawals are paid from. No real payment yet.
