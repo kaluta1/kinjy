@@ -2054,6 +2054,17 @@ export const kaluta = {
     attachable: (ids: string[]) =>
       api.post<{ attachable: Array<{ id: string; kind: string }> }>('/media/attachable', { ids }),
     /**
+     * Copy a picture from a web address into the member's own post media -
+     * for an article pasted from another site. The server fetches it (public
+     * addresses only, images only) and stores it like an upload; the preview
+     * address is signed for the author.
+     */
+    importUrl: (url: string, altText?: string) =>
+      api.post<UploadedMedia & { preview_url: string }>('/media/import-url', {
+        url,
+        alt_text: altText || undefined,
+      }),
+    /**
      * Upload a file and get back its public URL.
      *
      * The provenance label travels with the upload, not with the post: the

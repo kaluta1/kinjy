@@ -332,6 +332,65 @@ async def upload(
     }
 
 
+# --- pictures imported from an article pasted from elsewhere -------------------
+
+IMPORT_TYPES = ("image/jpeg", "image/png", "image/webp", "image/gif")
+IMPORT_MAX_BYTES = 15 * 1024 * 1024
+IMPORT_PER_MINUTE = 60
+_import_log: dict[str, list[float]] = {}
+
+
+class ImportIn(BaseModel):
+    url: str = Field(min_length=8, max_length=4000)
+    alt_text: str | None = Field(default=None, max_length=500)
+
+
+@app.post("/media/import-url", status_code=201, tags=["media"])
+async def import_url(payload: ImportIn, principal: CurrentUser, db: OrmSession = Depends(get_db)):
+    """Copy a picture from a web address into the member's own post media.
+
+    For an article pasted from another site or a document: its pictures are
+    addresses there, and an address there can expire, move or be taken down -
+    so the picture is copied once, here, and the article points at Kinjy's copy.
+
+    Fetched like a link preview (common/safefetch): public addresses only,
+    every redirect checked, images of the four web formats only, 15 MB at
+    most. Then stored by the ordinary upload path, so the file's first bytes,
+    the deduplication and the storage are exactly an upload's.
+    """
+    from io import BytesIO
+
+    from starlette.datastructures import Headers
+
+    from common import safefetch
+
+    now = time.monotonic()
+    recent = [t for t in _import_log.get(principal.user_id, []) if now - t < 60]
+    if len(recent) >= IMPORT_PER_MINUTE:
+        raise HTTPException(status_code=429, detail="Too many pictures at once. Try again in a minute.")
+    _import_log[principal.user_id] = [*recent, now]
+
+    try:
+        body, content_type, final_url = await run_in_threadpool(
+            safefetch.fetch_bytes, payload.url.strip(),
+            max_bytes=IMPORT_MAX_BYTES, accept=IMPORT_TYPES,
+            agent="KinjyArticleImport/1.0 (+https://kinjy.com)",
+        )
+    except safefetch.UnsafeURL as exc:
+        raise HTTPException(status_code=422, detail=f"The picture could not be imported: {exc}")
+    name = (final_url.rsplit("/", 1)[-1].split("?")[0] or "picture")[:80]
+    upload_file = UploadFile(file=BytesIO(body), filename=name,
+                             headers=Headers({"content-type": content_type}))
+    described = await upload(
+        principal, file=upload_file, provenance="original", alt_text=payload.alt_text,
+        derived_from=None, purpose="post", db=db,
+    )
+    # A preview address for the author, signed like the one a reader gets:
+    # the file is restricted, and the editor has no blob of it to show.
+    described["preview_url"] = mediasign.sign_url(described["url"], described["id"], principal.user_id)
+    return described
+
+
 def _stores_remotely(purpose: str) -> bool:
     """Whether a new upload goes to UploadCenter rather than the media volume."""
     return purpose == "post" and settings.POST_MEDIA_PROVIDER == "uploadcenter" and uploadcenter.enabled()

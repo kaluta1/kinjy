@@ -248,6 +248,24 @@ Checked on production 2026-08-20, promise by promise.
   refused by the server after they type, with the same sentence. Correct, and
   one step later than it should be. Reading, the share preview and every
   server-side refusal are verified in `backend/tests/e2e_open_community.py`.
+- **Pasting a rich article (19/10)** keeps structure, links, tables, embeds and
+  pictures (copied server-side through `/media/import-url`). Not done:
+  - text alignment, colours, fonts and line spacing are dropped on purpose;
+    only picture alignment (left / centre / right / full width) is kept;
+  - h4–h6 become subheadings (an article has two heading levels);
+  - pictures behind a login (a private Google Doc image, an intranet) cannot be
+    copied - they show as "could not be brought in" with Retry / Upload a
+    replacement / Remove;
+  - Word desktop sometimes puts pictures on the clipboard as `file:///` paths
+    without the files; those need "Upload a replacement";
+  - no progress percentage per picture, only "N of M" and a state per
+    placeholder; SVG, AVIF, HEIC and TIFF from the web are refused (JPEG, PNG,
+    WebP, GIF only, 15 MB each, 60 a minute);
+  - videos other than YouTube / Vimeo become a link, never a player;
+  - Undo after the pictures have arrived works in Chrome/Edge; Firefox and
+    Safari were not tried;
+  - a Vimeo embed showed a grey frame in the local browser (YouTube played) -
+    the embed code predates this work, not investigated.
 
 ## 6. Unverified in this environment
 

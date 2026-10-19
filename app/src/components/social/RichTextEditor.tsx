@@ -14,11 +14,19 @@ import {
   Clapperboard,
   Youtube,
   Trash2,
+  ClipboardType,
+  AlignLeft,
+  AlignCenter,
+  AlignRight,
+  StretchHorizontal,
+  Captions,
+  ScanText,
 } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
 import { useAppTheme } from '@/components/appdemo/theme'
-import { embedFromUrl, hydrateArticle, sanitizeHtml, type InlineMedia } from '@/lib/richtext'
-import { kaluta } from '@/lib/api'
+import { embedFromUrl, hydrateArticle, hydrateFigure, sanitizeHtml, type InlineMedia } from '@/lib/richtext'
+import { convertPastedHtml, plainTextToHtml, type PendingPicture } from '@/lib/articlePaste'
+import { ApiError, kaluta } from '@/lib/api'
 import FloatingPanel from './FloatingPanel'
 import { cn } from '@/lib/utils'
 
@@ -43,6 +51,14 @@ const TOOLS: Array<Tool | 'divider'> = [
   { id: 'ul', icon: List, label: 'Bullet list', command: 'insertUnorderedList' },
   { id: 'ol', icon: ListOrdered, label: 'Numbered list', command: 'insertOrderedList' },
 ]
+
+/** The server's limit on pictures and clips placed in one article. */
+const MAX_ARTICLE_MEDIA = 30
+/** Pictures brought in at the same time from one paste. */
+const PARALLEL_IMPORTS = 3
+
+type Pending = PendingPicture & { status: 'waiting' | 'working' | 'failed'; error?: string }
+type Brought = { id: string; url: string; kind: string }
 
 /**
  * A small WYSIWYG for article bodies.
@@ -97,7 +113,6 @@ export default function RichTextEditor({
   const [active, setActive] = useState<Set<string>>(new Set())
   const [empty, setEmpty] = useState(!value)
   const [uploading, setUploading] = useState(false)
-  useEffect(() => onUploadingChange?.(uploading), [uploading, onUploadingChange])
   const [mediaError, setMediaError] = useState<string | null>(null)
   // Where the caret was last seen inside the text. A toolbar click or a file
   // dialog takes the focus away; the media goes where the writer was, not to
@@ -112,6 +127,25 @@ export default function RichTextEditor({
   // nobody discovers.
   const selected = useRef<HTMLElement | null>(null)
   const [figureMenu, setFigureMenu] = useState(false)
+
+  // Pictures from a pasted article that are still being brought in, by the
+  // ref on their placeholder. The placeholder is in the text, where the
+  // picture goes; this is what the editor knows about each one.
+  const pending = useRef(new Map<string, Pending>())
+  // One upload per source, however many times a paste shows it.
+  const bySource = useRef(new Map<string, Promise<Brought>>())
+  const refCounter = useRef(0)
+  // Placeholders still in the text (waiting, working or failed). While there
+  // are any, the form around holds Post and Save: the article is not whole.
+  const [unresolved, setUnresolved] = useState(0)
+  const [progress, setProgress] = useState<{ done: number; total: number } | null>(null)
+  const replaceTarget = useRef<HTMLElement | null>(null)
+  // Ctrl+Shift+V was pressed: the paste that follows is words only.
+  const plainNext = useRef(false)
+  useEffect(
+    () => onUploadingChange?.(uploading || unresolved > 0),
+    [uploading, unresolved, onUploadingChange],
+  )
 
   // Seed the DOM once. Re-writing innerHTML on every keystroke would move the
   // caret to the start on each character.
@@ -129,6 +163,9 @@ export default function RichTextEditor({
     const el = editorRef.current
     const html = el?.innerHTML ?? ''
     setEmpty(!el?.textContent?.trim() && !el?.querySelector('figure'))
+    // Undo, Remove or a deleted paragraph can take placeholders out; what is
+    // left in the text is what still holds the form.
+    setUnresolved(el?.querySelectorAll('figure[data-pending-ref]').length ?? 0)
     onChange(sanitizeHtml(html))
   }
 
@@ -239,7 +276,7 @@ export default function RichTextEditor({
    * the address came back, so the link landed at the start of the article.
    * The selection is saved before asking and put back before acting.
    */
-  const [asking, setAsking] = useState<null | 'link' | 'embed'>(null)
+  const [asking, setAsking] = useState<null | 'link' | 'embed' | 'caption' | 'alt'>(null)
   const [askValue, setAskValue] = useState('')
 
   const ask = (what: 'link' | 'embed') => {
@@ -260,8 +297,41 @@ export default function RichTextEditor({
     return range
   }
 
+  /** Ask for a caption or a description of the chosen picture, prefilled. */
+  const askAbout = (what: 'caption' | 'alt') => {
+    const figure = selected.current
+    if (!figure) return
+    setFigureMenu(false)
+    setAskValue(figure.getAttribute(what === 'caption' ? 'data-caption' : 'data-alt') ?? '')
+    setMediaError(null)
+    setAsking(what)
+  }
+
+  /** Change what a figure says about itself, and draw it again. */
+  const setFigureDetail = (figure: HTMLElement, key: 'data-caption' | 'data-alt' | 'data-align', value: string) => {
+    if (value) figure.setAttribute(key, value)
+    else figure.removeAttribute(key)
+    const id = figure.getAttribute('data-media-id') ?? ''
+    if (key === 'data-caption') {
+      figure.querySelector('figcaption')?.remove()
+      if (value) {
+        const caption = document.createElement('figcaption')
+        caption.textContent = value
+        figure.appendChild(caption)
+      }
+    }
+    if (key === 'data-alt') figure.querySelector('img')?.setAttribute('alt', value || uploaded.current.get(id)?.alt_text || '')
+    emit()
+  }
+
   const submitAsk = () => {
     const raw = askValue.trim()
+    if (asking === 'caption' || asking === 'alt') {
+      const figure = selected.current
+      setAsking(null)
+      if (figure) setFigureDetail(figure, asking === 'caption' ? 'data-caption' : 'data-alt', raw.slice(0, 300))
+      return
+    }
     if (!raw) return
     if (asking === 'embed') {
       const found = embedFromUrl(raw)
@@ -459,29 +529,270 @@ export default function RichTextEditor({
     )
   }
 
+  /** A placeholder, drawn for what is known about its picture now. */
+  const drawPending = (figure: HTMLElement, item: Pending) => {
+    figure.className = 'article-figure article-pending'
+    figure.setAttribute('contenteditable', 'false')
+    figure.setAttribute('data-status', item.status)
+    const note = document.createElement('p')
+    note.className = 'article-figure-note'
+    if (item.status === 'failed') {
+      note.textContent = item.error ?? 'This picture could not be brought in.'
+      const actions = document.createElement('span')
+      actions.className = 'article-pending-actions'
+      for (const [action, label] of [
+        ['retry', 'Retry'],
+        ['replace', 'Upload a replacement'],
+        ['remove', 'Remove'],
+      ] as const) {
+        const button = document.createElement('button')
+        button.type = 'button'
+        button.setAttribute('data-rte-action', action)
+        button.textContent = label
+        actions.appendChild(button)
+      }
+      figure.replaceChildren(note, actions)
+    } else {
+      note.textContent = item.status === 'working' ? 'Bringing the picture in…' : 'Waiting to bring the picture in…'
+      figure.replaceChildren(note)
+    }
+  }
+
+  const placeholderFor = (ref: string): HTMLElement | null =>
+    editorRef.current?.querySelector<HTMLElement>(`figure[data-pending-ref="${ref}"]`) ?? null
+
+  /** Turn a placeholder into its picture, in place - so Undo still finds it. */
+  const fillPending = (figure: HTMLElement, brought: Brought) => {
+    const kind = brought.kind === 'video' ? 'video' : 'image'
+    const preview: InlineMedia = { url: brought.url, kind, alt_text: figure.getAttribute('data-alt') }
+    uploaded.current.set(brought.id, preview)
+    for (const name of figure.getAttributeNames()) {
+      if (!['data-alt', 'data-caption', 'data-align'].includes(name)) figure.removeAttribute(name)
+    }
+    figure.setAttribute('data-media-id', brought.id)
+    figure.setAttribute('data-kind', kind)
+    figure.replaceChildren()
+    hydrateFigure(figure, preview)
+  }
+
+  /** Where a picture comes from, made into a file of ours. */
+  const fetchPicture = async (item: Pending): Promise<Brought> => {
+    if (!onUploadMedia) throw new Error('Pictures cannot be added here.')
+    if (item.file) return onUploadMedia(item.file)
+    const src = item.src
+    if (src.startsWith('data:') || src.startsWith('blob:')) {
+      let blob: Blob
+      try {
+        blob = await (await fetch(src)).blob()
+      } catch {
+        throw new Error('This picture only existed in the page it was copied from. Upload it instead.')
+      }
+      if (!blob.type.startsWith('image/')) throw new Error('That is not a picture.')
+      const extension = blob.type.split('/')[1]?.replace('jpeg', 'jpg') ?? 'png'
+      return onUploadMedia(new File([blob], `pasted.${extension}`, { type: blob.type }))
+    }
+    if (src.startsWith('file:')) {
+      throw new Error('This picture is a file on your computer that was not copied with the text. Upload it instead.')
+    }
+    try {
+      const asset = await kaluta.media.importUrl(src, item.alt)
+      const brought = { id: asset.id, url: asset.preview_url || asset.url, kind: asset.kind || 'image' }
+      // A file of the writer's now, attached on Post like one uploaded here.
+      onAdoptMedia?.([brought])
+      return brought
+    } catch (err) {
+      throw new Error(err instanceof ApiError ? err.message : 'The picture could not be copied from its site.')
+    }
+  }
+
+  /** Bring one picture in, sharing the work with any other copy of it. */
+  const bringIn = async (item: Pending) => {
+    const figure = placeholderFor(item.ref)
+    if (!figure) return
+    item.status = 'working'
+    item.error = undefined
+    drawPending(figure, item)
+    const key = item.file ? '' : item.src
+    let job = key ? bySource.current.get(key) : undefined
+    if (!job) {
+      job = fetchPicture(item)
+      if (key) {
+        bySource.current.set(key, job)
+        // A failure is not remembered: Retry tries again.
+        job.catch(() => bySource.current.delete(key))
+      }
+    }
+    try {
+      const brought = await job
+      // Taken out (Remove, Undo, a deleted paragraph) while it came in.
+      const now = placeholderFor(item.ref)
+      if (now) fillPending(now, brought)
+      pending.current.delete(item.ref)
+    } catch (err) {
+      item.status = 'failed'
+      item.error = err instanceof Error ? err.message : 'This picture could not be brought in.'
+      const now = placeholderFor(item.ref)
+      if (now) drawPending(now, item)
+    }
+    emit()
+  }
+
+  /** Bring in a paste's pictures, a few at a time, counting as they land. */
+  const bringAll = async (items: Pending[]) => {
+    if (!items.length) return
+    let done = 0
+    setProgress({ done, total: items.length })
+    const queue = [...items]
+    const worker = async () => {
+      for (let item = queue.shift(); item; item = queue.shift()) {
+        await bringIn(item)
+        done += 1
+        setProgress({ done, total: items.length })
+      }
+    }
+    await Promise.all(Array.from({ length: Math.min(PARALLEL_IMPORTS, items.length) }, worker))
+    setProgress(null)
+  }
+
+  /** Put HTML where the writer was, and select nothing in particular. */
+  const insertAtCaret = (html: string) => {
+    const el = editorRef.current
+    if (!el) return
+    el.focus()
+    const selection = window.getSelection()
+    if (savedRange.current && el.contains(savedRange.current.startContainer)) {
+      selection?.removeAllRanges()
+      selection?.addRange(savedRange.current)
+    }
+    document.execCommand('insertHTML', false, html)
+  }
+
+  /**
+   * An article copied from anywhere else: a page, a Google Doc, Word.
+   *
+   * Its structure is converted (lib/articlePaste) and put in as one step, so
+   * one Undo takes the whole paste back out. Each picture arrives as a
+   * placeholder in its place and is then brought in - uploaded when the
+   * clipboard carried it, copied by the server when it is an address - and
+   * the placeholder becomes the picture. One that cannot be brought in stays
+   * as a placeholder saying why, with Retry, Upload a replacement and Remove;
+   * until none are left, Post and Save wait.
+   */
+  const pasteRich = (html: string, files: File[]) => {
+    const converted = convertPastedHtml(html, files, () => `p${Date.now().toString(36)}-${(refCounter.current += 1)}`)
+    let body = converted.html
+    let items: Pending[] = converted.pending.map((item) => ({ ...item, status: 'waiting' }))
+    if (!onUploadMedia && items.length) {
+      // No pictures in this editor: their places go, the words stay.
+      body = body.replace(/<figure data-pending-ref="[^"]*"[^>]*><\/figure>/g, '')
+      items = []
+    }
+    const clean = hydrateArticle(body, (id) => uploaded.current.get(id) ?? mediaFor?.(id) ?? null)
+    insertAtCaret(clean)
+
+    // The server takes so many pictures per article; the ones past that are
+    // marked at once rather than refused at Post.
+    const placed = editorRef.current?.querySelectorAll('figure[data-media-id]').length ?? 0
+    let room = MAX_ARTICLE_MEDIA - placed
+    const toBring: Pending[] = []
+    for (const item of items) {
+      pending.current.set(item.ref, item)
+      const figure = placeholderFor(item.ref)
+      if (!figure) continue
+      if (room <= 0) {
+        item.status = 'failed'
+        item.error = `An article can carry at most ${MAX_ARTICLE_MEDIA} pictures and clips.`
+      } else {
+        room -= 1
+        toBring.push(item)
+      }
+      drawPending(figure, item)
+    }
+    emit()
+    setMediaError(null)
+    void bringAll(toBring)
+  }
+
+  /** The words alone, as paragraphs - whatever else was copied with them. */
+  const pastePlain = (text: string) => {
+    if (!text) return
+    insertAtCaret(plainTextToHtml(text))
+    emit()
+  }
+
+  const pasteAsPlainText = async () => {
+    saveSelection()
+    try {
+      pastePlain(await navigator.clipboard.readText())
+    } catch {
+      setMediaError('The browser did not allow reading the clipboard. Press Ctrl+Shift+V (⌘⇧V on a Mac) instead.')
+    }
+  }
+
+  /** Retry, Upload a replacement, or Remove, on a placeholder that failed. */
+  const pendingAction = (button: Element) => {
+    const figure = button.closest<HTMLElement>('figure[data-pending-ref]')
+    const ref = figure?.getAttribute('data-pending-ref') ?? ''
+    const item = pending.current.get(ref)
+    if (!figure) return
+    const action = button.getAttribute('data-rte-action')
+    if (action === 'remove' || !item) {
+      pending.current.delete(ref)
+      figure.remove()
+      emit()
+      return
+    }
+    if (action === 'retry') {
+      void bringIn(item)
+    } else if (action === 'replace') {
+      replaceTarget.current = figure
+      pickFile('image/*')
+    }
+  }
+
+  /** The file chosen to stand in for a picture that could not be brought in. */
+  const replaceWith = (file: File) => {
+    const figure = replaceTarget.current
+    replaceTarget.current = null
+    const ref = figure?.getAttribute('data-pending-ref') ?? ''
+    const item = pending.current.get(ref)
+    if (!figure || !item || !figure.isConnected) return
+    item.file = file
+    item.src = ''
+    void bringIn(item)
+  }
+
   const onPaste = (event: React.ClipboardEvent) => {
     event.preventDefault()
-    // An article copied from Kinjy: its words, its formatting and its
-    // pictures, rather than the words alone. Recognised by its markers, so a
-    // paste from anywhere else still arrives as plain text - keeping a
-    // stranger's formatting is how junk markup gets in.
+    saveSelection()
+    const text = event.clipboardData.getData('text/plain')
+    if (plainNext.current) {
+      plainNext.current = false
+      pastePlain(text)
+      return
+    }
+    // An article copied from Kinjy: its pictures are markers naming files
+    // that already exist, and the writer's own come along as they are.
     const html = event.clipboardData.getData('text/html')
     if (html && /data-media-id=|data-embed=/.test(html)) {
-      saveSelection()
       void pasteArticle(html)
       return
     }
     const files = Array.from(event.clipboardData.files)
-    if (files.length && onUploadMedia) {
-      saveSelection()
-      void addFiles(files)
-      return
-    }
-    const text = event.clipboardData.getData('text/plain')
+    // A YouTube or Vimeo address on its own becomes the video.
     const embed = onUploadMedia && !/\s/.test(text.trim()) ? embedFromUrl(text) : null
     if (embed) {
-      saveSelection()
       insertFigure({ 'data-embed': embed.provider, 'data-id': embed.id }, null)
+      return
+    }
+    // Anything with formatting - a page, a document - keeps its formatting,
+    // its links and its pictures, in their order.
+    if (html && /<[a-z]/i.test(html)) {
+      pasteRich(html, files)
+      return
+    }
+    if (files.length && onUploadMedia) {
+      void addFiles(files)
       return
     }
     document.execCommand('insertText', false, text)
@@ -571,10 +882,35 @@ export default function RichTextEditor({
               type="file"
               multiple
               hidden
-              onChange={(e) => void addFiles(Array.from(e.target.files ?? []))}
+              onChange={(e) => {
+                const chosen = Array.from(e.target.files ?? [])
+                if (replaceTarget.current) {
+                  if (chosen[0]) replaceWith(chosen[0])
+                  replaceTarget.current = null
+                  e.target.value = ''
+                  return
+                }
+                void addFiles(chosen)
+              }}
             />
             {uploading && <span className={cn('ms-2 text-xs', tok.low)}>Uploading…</span>}
           </>
+        )}
+        <span className="mx-1 h-4 w-px bg-current/15" aria-hidden="true" />
+        <button
+          type="button"
+          onMouseDown={(e) => e.preventDefault()}
+          onClick={() => void pasteAsPlainText()}
+          aria-label="Paste as plain text"
+          title="Paste as plain text (Ctrl+Shift+V)"
+          className={cn(toolButton, tok.mid, tok.hoverBg)}
+        >
+          <ClipboardType size={14} />
+        </button>
+        {progress && (
+          <span className={cn('ms-2 text-xs', tok.low)} role="status">
+            Bringing in pictures: {progress.done} of {progress.total}
+          </span>
         )}
       </div>
       {asking && (
@@ -596,18 +932,35 @@ export default function RichTextEditor({
                 restoreSelection()
               }
             }}
-            placeholder={asking === 'link' ? 'https://…' : 'YouTube or Vimeo address'}
-            aria-label={asking === 'link' ? 'Link address' : 'Video address'}
+            placeholder={
+              asking === 'link'
+                ? 'https://…'
+                : asking === 'caption'
+                  ? 'Caption under the picture'
+                  : asking === 'alt'
+                    ? 'What the picture shows, for people who cannot see it'
+                    : 'YouTube or Vimeo address'
+            }
+            aria-label={
+              asking === 'link'
+                ? 'Link address'
+                : asking === 'caption'
+                  ? 'Caption'
+                  : asking === 'alt'
+                    ? 'Picture description'
+                    : 'Video address'
+            }
+            maxLength={asking === 'caption' || asking === 'alt' ? 300 : undefined}
             className={cn('min-w-0 flex-1 rounded-full border border-current/15 bg-transparent px-3 py-1.5 text-sm focus:outline-none', tok.text)}
           />
           <button
             type="button"
             onMouseDown={(e) => e.preventDefault()}
             onClick={submitAsk}
-            disabled={!askValue.trim()}
+            disabled={!askValue.trim() && asking !== 'caption' && asking !== 'alt'}
             className="rounded-full bg-gradient-to-br from-gold-soft to-gold px-3.5 py-1.5 text-xs font-bold text-ink disabled:opacity-40"
           >
-            {asking === 'link' ? 'Add link' : 'Embed'}
+            {asking === 'link' ? 'Add link' : asking === 'embed' ? 'Embed' : 'Save'}
           </button>
           <button
             type="button"
@@ -624,6 +977,12 @@ export default function RichTextEditor({
       {mediaError && (
         <p role="alert" className="border-b border-current/10 px-3 py-1.5 text-xs text-red-300">
           {mediaError}
+        </p>
+      )}
+      {unresolved > 0 && !progress && (
+        <p role="status" className="border-b border-current/10 px-3 py-1.5 text-xs text-amber-200">
+          {unresolved === 1 ? 'One picture is' : `${unresolved} pictures are`} not in yet. Retry, upload a replacement or
+          remove {unresolved === 1 ? 'it' : 'them'} before publishing.
         </p>
       )}
 
@@ -645,10 +1004,23 @@ export default function RichTextEditor({
           onPaste={onPaste}
           onDrop={onDrop}
           // A click on a picture chooses it; a click anywhere else lets it go.
-          onClick={(event) => selectFigure(figureAt(event.target))}
+          onClick={(event) => {
+            const action = event.target instanceof Element ? event.target.closest('[data-rte-action]') : null
+            if (action && editorRef.current?.contains(action)) {
+              event.preventDefault()
+              pendingAction(action)
+              return
+            }
+            selectFigure(figureAt(event.target))
+          }}
           // A chosen picture goes with Delete or Backspace, as in any editor.
           // Escape lets it go without deleting it.
           onKeyDown={(event) => {
+            // Paste and match style: the paste that follows is words only.
+            if ((event.ctrlKey || event.metaKey) && event.shiftKey && event.key.toLowerCase() === 'v') {
+              plainNext.current = true
+              window.setTimeout(() => (plainNext.current = false), 500)
+            }
             if (!selected.current) return
             if (event.key === 'Delete' || event.key === 'Backspace') {
               event.preventDefault()
@@ -690,6 +1062,56 @@ export default function RichTextEditor({
             label="Picture options"
             onClose={() => setFigureMenu(false)}
           >
+            <button
+              type="button"
+              onClick={() => askAbout('caption')}
+              className="flex w-full items-center gap-2.5 rounded-card-sm px-3 py-2 text-sm hover:bg-white/10"
+            >
+              <Captions size={14} aria-hidden="true" />
+              Caption
+            </button>
+            {selected.current.getAttribute('data-kind') === 'image' && (
+              <button
+                type="button"
+                onClick={() => askAbout('alt')}
+                className="flex w-full items-center gap-2.5 rounded-card-sm px-3 py-2 text-sm hover:bg-white/10"
+              >
+                <ScanText size={14} aria-hidden="true" />
+                Description
+              </button>
+            )}
+            <div className="flex items-center gap-1 px-2 py-1" role="group" aria-label="Alignment">
+              {(
+                [
+                  ['left', AlignLeft, 'To the left'],
+                  ['center', AlignCenter, 'Centred'],
+                  ['right', AlignRight, 'To the right'],
+                  ['wide', StretchHorizontal, 'Full width'],
+                ] as const
+              ).map(([align, Icon, label]) => {
+                const current = selected.current?.getAttribute('data-align') ?? ''
+                return (
+                  <button
+                    key={align}
+                    type="button"
+                    aria-label={label}
+                    title={label}
+                    aria-pressed={current === align}
+                    onClick={() => {
+                      const figure = selected.current
+                      if (figure) setFigureDetail(figure, 'data-align', current === align ? '' : align)
+                      setFigureMenu(false)
+                    }}
+                    className={cn(
+                      'flex h-8 w-8 items-center justify-center rounded-card-sm hover:bg-white/10',
+                      current === align && 'bg-gold/20 text-gold-soft',
+                    )}
+                  >
+                    <Icon size={14} aria-hidden="true" />
+                  </button>
+                )
+              })}
+            </div>
             <button
               type="button"
               onClick={() => {

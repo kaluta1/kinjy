@@ -27,6 +27,7 @@ from common.ids import new_id
 from common.service import create_app
 
 from common import ageclient, classifier, mediasign, stickers
+from common.article_html import sanitize_article
 from common.agesafety import engine as age_engine, rating_strictness
 
 import agefilter
@@ -109,8 +110,13 @@ app = create_app(
 
 # --- schemas ---------------------------------------------------------------
 
+# A post's text; an article (HTML, with tables and pictures) may be longer.
+POST_BODY_MAX = 20000
+ARTICLE_BODY_MAX = 200000
+
+
 class PostIn(BaseModel):
-    body: str = Field(default="", max_length=20000)
+    body: str = Field(default="", max_length=ARTICLE_BODY_MAX)
     # "short" is declared, never inferred. A portrait clip posted to the feed is
     # still a feed post; what makes a short is the author choosing that surface.
     format: str = Field(default="text", pattern="^(text|image|video|audio|article|carousel|short)$")
@@ -971,8 +977,18 @@ def _context(db: OrmSession, principal) -> ranking.Context:
 # Posts
 # ---------------------------------------------------------------------------
 
+def _clean_body(body: str, fmt: str) -> str:
+    """An article keeps only the safe subset of HTML; any other post stays short."""
+    if fmt == "article":
+        return sanitize_article(body)
+    if len(body) > POST_BODY_MAX:
+        raise HTTPException(status_code=422, detail=f"A post is at most {POST_BODY_MAX} characters")
+    return body
+
+
 @app.post("/posts", status_code=201, tags=["posts"])
 async def create_post(payload: PostIn, principal: CurrentUser, db: OrmSession = Depends(get_db)):
+    payload.body = _clean_body(payload.body, payload.format)
     if payload.visibility == "circle":
         _require_own_circle(principal.user_id, payload.circle_id)
     if payload.visibility == "community":
@@ -2353,6 +2369,7 @@ def edit_post(post_id: str, payload: PostIn, principal: CurrentUser, db: OrmSess
             detail="A post can only be edited in the first 24 hours. Older posts stand as written.",
         )
     previous_body = post.body or ""
+    payload.body = _clean_body(payload.body, post.format)
     post.body = payload.body
     post.topics = _merge_topics(payload.topics, payload.body)
     post.edited_at = datetime.now(timezone.utc)

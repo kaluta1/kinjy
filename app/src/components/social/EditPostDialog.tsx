@@ -337,7 +337,7 @@ export default function EditPostDialog({
               disabled={busy || waiting}
               className="rounded-full bg-gradient-to-br from-gold-soft to-gold px-4 py-1.5 text-sm font-bold text-ink disabled:opacity-40"
             >
-              {busy ? 'Saving…' : waiting ? 'Uploading…' : 'Save'}
+              {busy ? 'Saving…' : waiting ? 'Waiting for pictures…' : 'Save'}
             </button>
           </div>
         </footer>

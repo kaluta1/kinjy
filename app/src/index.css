@@ -550,9 +550,19 @@
   .prose-article figure.article-figure {
     @apply my-3 overflow-hidden rounded-card-sm bg-black/20;
   }
-  .prose-article figure.article-figure img,
   .prose-article figure.article-figure video {
     @apply mx-auto block max-h-[70vh] w-full object-contain;
+  }
+  /* A picture at its own size, never stretched past it: a small logo pasted
+     with an article stays a small logo. "Full width" asks for the stretch. */
+  .prose-article figure.article-figure img {
+    @apply mx-auto block h-auto max-h-[70vh] w-auto max-w-full object-contain;
+  }
+  .prose-article figure.article-figure[data-align='wide'] img {
+    @apply w-full;
+  }
+  .prose-article figure.article-figure:has(> img) {
+    @apply bg-transparent;
   }
   .prose-article figure.article-figure iframe {
     @apply block aspect-video w-full border-0;
@@ -593,6 +603,58 @@
     @apply text-gold-soft underline underline-offset-2;
   }
   .prose-article strong, .prose-article b { @apply font-semibold; }
+  .prose-article ul ul { list-style-type: circle; }
+  .prose-article ul ul ul { list-style-type: square; }
+  .prose-article li > ul, .prose-article li > ol { @apply mb-0 mt-1; }
+  .prose-article hr {
+    @apply my-5 border-0 border-t border-current opacity-20;
+  }
+  .prose-article code {
+    @apply rounded bg-black/20 px-1 font-mono text-[0.9em];
+  }
+  .prose-article pre code { @apply bg-transparent p-0; }
+  /* A table pasted with an article: scrolls sideways rather than squeezing. */
+  .prose-article table {
+    @apply my-3 block max-w-full overflow-x-auto border-collapse text-sm;
+  }
+  .prose-article th,
+  .prose-article td {
+    @apply px-2.5 py-1.5 text-start align-top;
+    border: 1px solid color-mix(in srgb, currentColor 20%, transparent);
+  }
+  .prose-article th { @apply bg-black/15 font-semibold; }
+  .prose-article figure.article-figure figcaption {
+    @apply px-3 py-2 text-center text-sm text-text-low;
+  }
+  /* Where the source put a picture. On a phone every picture is full width:
+     a column of text beside a picture is too narrow to read. */
+  @media (min-width: 640px) {
+    .prose-article figure.article-figure[data-align='left'] {
+      @apply float-left me-4 w-[45%];
+    }
+    .prose-article figure.article-figure[data-align='right'] {
+      @apply float-right ms-4 w-[45%];
+    }
+  }
+  .prose-article::after { content: ''; display: table; clear: both; }
+  /* A picture from a pasted article, still on its way in - or stuck. */
+  .prose-article figure.article-pending {
+    @apply flex min-h-24 flex-col items-center justify-center gap-2 p-3 text-center;
+    border: 1px dashed color-mix(in srgb, currentColor 25%, transparent);
+  }
+  .prose-article figure.article-pending[data-status='working'] .article-figure-note {
+    @apply animate-pulse;
+  }
+  .prose-article figure.article-pending[data-status='failed'] {
+    @apply border-red-400/50;
+  }
+  .prose-article .article-pending-actions {
+    @apply flex flex-wrap justify-center gap-2;
+  }
+  .prose-article .article-pending-actions button {
+    @apply rounded-full px-3 py-1 text-xs font-semibold hover:bg-white/10;
+    border: 1px solid color-mix(in srgb, currentColor 25%, transparent);
+  }
 }
 
 @layer base {

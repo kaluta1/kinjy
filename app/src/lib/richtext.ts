@@ -16,8 +16,19 @@
  */
 
 const ALLOWED_TAGS = new Set([
-  'P', 'BR', 'B', 'STRONG', 'I', 'EM', 'U', 'S',
-  'H2', 'H3', 'UL', 'OL', 'LI', 'BLOCKQUOTE', 'A', 'CODE', 'PRE',
+  'P', 'BR', 'B', 'STRONG', 'I', 'EM', 'U', 'S', 'SUB', 'SUP',
+  'H2', 'H3', 'UL', 'OL', 'LI', 'BLOCKQUOTE', 'A', 'CODE', 'PRE', 'HR',
+  'TABLE', 'THEAD', 'TBODY', 'TR', 'TH', 'TD',
+])
+/** Mapped onto what an article has: one title level and one subtitle level. */
+const RENAMED: Record<string, string> = {
+  H1: 'h2', H4: 'h3', H5: 'h3', H6: 'h3', STRIKE: 's', DEL: 's', INS: 'u',
+}
+/** Dropped with everything inside them - their text is not the author's words. */
+const DROPPED = new Set([
+  'SCRIPT', 'STYLE', 'TEMPLATE', 'NOSCRIPT', 'IFRAME', 'OBJECT', 'EMBED', 'SVG', 'MATH', 'HEAD',
+  'TITLE', 'META', 'LINK', 'TEXTAREA', 'SELECT', 'BUTTON', 'FORM', 'INPUT', 'CANVAS', 'IMG',
+  'VIDEO', 'AUDIO', 'PICTURE', 'SOURCE',
 ])
 
 /** Only href on links, and only to schemes that cannot execute anything. */
@@ -100,6 +111,9 @@ function linkifyInto(text: string, out: Node, doc: Document): void {
  */
 const MEDIA_ID_RE = /^mda_[A-Za-z0-9]{6,60}$/
 const FIGURE_KINDS = new Set(['image', 'video'])
+export const FIGURE_ALIGNS = ['left', 'center', 'right', 'wide'] as const
+/** A picture still being brought in by the editor; never saved. */
+const PENDING_RE = /^[a-z0-9-]{1,40}$/
 const EMBED_ID: Record<string, RegExp> = {
   youtube: /^[A-Za-z0-9_-]{11}$/,
   vimeo: /^\d{6,12}$/,
@@ -129,25 +143,42 @@ export function embedFromUrl(raw: string): { provider: string; id: string } | nu
   return provider && EMBED_ID[provider].test(id) ? { provider, id } : null
 }
 
+/** A caption or a description: one line, bounded - the server keeps 300. */
+function shortText(value: string | null): string {
+  return (value ?? '').replace(/\s+/g, ' ').trim().slice(0, 300)
+}
+
+/** What a figure says about itself besides what it shows. */
+function copyFigureDetails(from: Element, to: Element): void {
+  for (const key of ['data-caption', 'data-alt']) {
+    const text = shortText(from.getAttribute(key))
+    if (text) to.setAttribute(key, text)
+  }
+  const align = from.getAttribute('data-align') ?? ''
+  if ((FIGURE_ALIGNS as readonly string[]).includes(align)) to.setAttribute('data-align', align)
+}
+
 /** A clean, empty marker for a figure, or null when it is not one we know. */
-function cleanFigure(element: Element, doc: Document): Element | null {
+function cleanFigure(element: Element, doc: Document, allowPending = false): Element | null {
   const mediaId = element.getAttribute('data-media-id') ?? ''
   const kind = element.getAttribute('data-kind') ?? ''
-  if (MEDIA_ID_RE.test(mediaId) && FIGURE_KINDS.has(kind)) {
-    const figure = doc.createElement('figure')
-    figure.setAttribute('data-media-id', mediaId)
-    figure.setAttribute('data-kind', kind)
-    return figure
-  }
   const provider = element.getAttribute('data-embed') ?? ''
   const id = element.getAttribute('data-id') ?? ''
-  if (EMBED_ID[provider]?.test(id)) {
-    const figure = doc.createElement('figure')
+  const pending = element.getAttribute('data-pending-ref') ?? ''
+  const figure = doc.createElement('figure')
+  if (MEDIA_ID_RE.test(mediaId) && FIGURE_KINDS.has(kind)) {
+    figure.setAttribute('data-media-id', mediaId)
+    figure.setAttribute('data-kind', kind)
+  } else if (EMBED_ID[provider]?.test(id)) {
     figure.setAttribute('data-embed', provider)
     figure.setAttribute('data-id', id)
-    return figure
+  } else if (allowPending && PENDING_RE.test(pending)) {
+    figure.setAttribute('data-pending-ref', pending)
+  } else {
+    return null
   }
-  return null
+  copyFigureDetails(element, figure)
+  return figure
 }
 
 /** The media ids an article places in its text, in order. */
@@ -179,72 +210,103 @@ export function hydrateArticle(
   if (!html.includes('<figure')) return html
   const doc = new DOMParser().parseFromString(`<body>${html}</body>`, 'text/html')
   for (const figure of Array.from(doc.body.querySelectorAll('figure'))) {
+    // The editor fills these in itself, as each picture arrives.
+    if (figure.hasAttribute('data-pending-ref')) continue
     figure.className = 'article-figure'
     figure.setAttribute('contenteditable', 'false')
-    const provider = figure.getAttribute('data-embed')
-    const embedId = figure.getAttribute('data-id') ?? ''
-    if (provider && EMBED_ID[provider]?.test(embedId)) {
-      const frame = doc.createElement('iframe')
-      frame.setAttribute(
-        'src',
-        provider === 'youtube'
-          ? `https://www.youtube-nocookie.com/embed/${embedId}`
-          : `https://player.vimeo.com/video/${embedId}`,
-      )
-      frame.setAttribute('title', provider === 'youtube' ? 'YouTube video' : 'Vimeo video')
-      frame.setAttribute('loading', 'lazy')
-      frame.setAttribute('referrerpolicy', 'strict-origin-when-cross-origin')
-      frame.setAttribute('allow', 'encrypted-media; picture-in-picture; fullscreen')
-      frame.setAttribute('allowfullscreen', '')
-      frame.setAttribute('sandbox', 'allow-scripts allow-same-origin allow-presentation allow-popups')
-      figure.appendChild(frame)
-      continue
-    }
-    const id = figure.getAttribute('data-media-id') ?? ''
-    const item = MEDIA_ID_RE.test(id) ? media(id) : null
-    if (!item) {
-      figure.remove()
-      continue
-    }
-    if (!item.url) {
-      const note = doc.createElement('p')
-      note.className = 'article-figure-note'
-      note.textContent =
-        item.kind === 'video' ? 'Video held back to save data.' : 'Picture held back to save data.'
-      figure.appendChild(note)
-      continue
-    }
-    if (item.kind === 'video' && mountVideos) {
-      // A slot for Kinjy's own player, which the post card mounts into it:
-      // HTML cannot carry a React component, and the browser's controls are
-      // not what a member should get.
-      const slot = doc.createElement('div')
-      slot.className = 'article-video'
-      slot.setAttribute('data-src', item.url)
-      if (item.poster_url) slot.setAttribute('data-poster', item.poster_url)
-      figure.appendChild(slot)
-    } else if (item.kind === 'video') {
-      // In the editor: a still preview, no controls - it is being placed,
-      // not watched.
-      const video = doc.createElement('video')
-      video.setAttribute('src', item.url)
-      video.setAttribute('preload', 'metadata')
-      video.setAttribute('muted', '')
-      video.setAttribute('playsinline', '')
-      if (item.poster_url) video.setAttribute('poster', item.poster_url)
-      figure.appendChild(video)
-    } else {
-      const img = doc.createElement('img')
-      img.setAttribute('src', item.url)
-      img.setAttribute('alt', item.alt_text ?? '')
-      img.setAttribute('loading', 'lazy')
-      figure.appendChild(img)
-    }
+    hydrateOne(figure, doc, media, mountVideos)
   }
   return doc.body.innerHTML
 }
 
-function clean(node: Node, out: Node, doc: Document, inAnchor = false): void {
+/** A caption under a figure, from its marker. */
+function addCaption(figure: Element, doc: Document): void {
+  const caption = figure.getAttribute('data-caption')
+  if (!caption) return
+  const node = doc.createElement('figcaption')
+  node.textContent = caption
+  figure.appendChild(node)
+}
+
+function hydrateOne(
+  figure: Element,
+  doc: Document,
+  media: (id: string) => InlineMedia | null,
+  mountVideos: boolean,
+): void {
+  const provider = figure.getAttribute('data-embed')
+  const embedId = figure.getAttribute('data-id') ?? ''
+  if (provider && EMBED_ID[provider]?.test(embedId)) {
+    const frame = doc.createElement('iframe')
+    frame.setAttribute(
+      'src',
+      provider === 'youtube'
+        ? `https://www.youtube-nocookie.com/embed/${embedId}`
+        : `https://player.vimeo.com/video/${embedId}`,
+    )
+    frame.setAttribute('title', provider === 'youtube' ? 'YouTube video' : 'Vimeo video')
+    frame.setAttribute('loading', 'lazy')
+    frame.setAttribute('referrerpolicy', 'strict-origin-when-cross-origin')
+    frame.setAttribute('allow', 'encrypted-media; picture-in-picture; fullscreen')
+    frame.setAttribute('allowfullscreen', '')
+    frame.setAttribute('sandbox', 'allow-scripts allow-same-origin allow-presentation allow-popups')
+    figure.appendChild(frame)
+    addCaption(figure, doc)
+    return
+  }
+  const id = figure.getAttribute('data-media-id') ?? ''
+  const item = MEDIA_ID_RE.test(id) ? media(id) : null
+  if (!item) {
+    figure.remove()
+    return
+  }
+  if (!item.url) {
+    const note = doc.createElement('p')
+    note.className = 'article-figure-note'
+    note.textContent =
+      item.kind === 'video' ? 'Video held back to save data.' : 'Picture held back to save data.'
+    figure.appendChild(note)
+    addCaption(figure, doc)
+    return
+  }
+  if (item.kind === 'video' && mountVideos) {
+    // A slot for Kinjy's own player, which the post card mounts into it:
+    // HTML cannot carry a React component, and the browser's controls are
+    // not what a member should get.
+    const slot = doc.createElement('div')
+    slot.className = 'article-video'
+    slot.setAttribute('data-src', item.url)
+    if (item.poster_url) slot.setAttribute('data-poster', item.poster_url)
+    figure.appendChild(slot)
+  } else if (item.kind === 'video') {
+    // In the editor: a still preview, no controls - it is being placed,
+    // not watched.
+    const video = doc.createElement('video')
+    video.setAttribute('src', item.url)
+    video.setAttribute('preload', 'metadata')
+    video.setAttribute('muted', '')
+    video.setAttribute('playsinline', '')
+    if (item.poster_url) video.setAttribute('poster', item.poster_url)
+    figure.appendChild(video)
+  } else {
+    const img = doc.createElement('img')
+    img.setAttribute('src', item.url)
+    // The description written for this article first, the file's own next.
+    img.setAttribute('alt', figure.getAttribute('data-alt') || item.alt_text || '')
+    img.setAttribute('loading', 'lazy')
+    figure.appendChild(img)
+  }
+  addCaption(figure, doc)
+}
+
+/** Build one figure in place from its marker - the editor's way in. */
+export function hydrateFigure(figure: Element, media: InlineMedia | null): void {
+  figure.className = 'article-figure'
+  figure.setAttribute('contenteditable', 'false')
+  hydrateOne(figure, figure.ownerDocument, () => media, false)
+}
+
+function clean(node: Node, out: Node, doc: Document, inAnchor = false, allowPending = false): void {
   for (const child of Array.from(node.childNodes)) {
     if (child.nodeType === Node.TEXT_NODE) {
       const text = child.textContent ?? ''
@@ -257,40 +319,59 @@ function clean(node: Node, out: Node, doc: Document, inAnchor = false): void {
     const element = child as Element
     if (element.tagName === 'FIGURE') {
       // Its contents are a preview; only the validated marker is kept.
-      const figure = inAnchor ? null : cleanFigure(element, doc)
+      const figure = inAnchor ? null : cleanFigure(element, doc, allowPending)
       if (figure) out.appendChild(figure)
       continue
     }
-    if (!ALLOWED_TAGS.has(element.tagName)) {
+    if (DROPPED.has(element.tagName)) continue
+    const tag = RENAMED[element.tagName] ?? element.tagName.toLowerCase()
+    if (!ALLOWED_TAGS.has(tag.toUpperCase())) {
       // Keep the words, drop the wrapper: unwrapping a <div> or a <span> loses
       // styling but never loses the author's text.
-      clean(element, out, doc, inAnchor)
+      clean(element, out, doc, inAnchor, allowPending)
       continue
     }
 
-    const copy = doc.createElement(element.tagName.toLowerCase())
-    if (element.tagName === 'A') {
+    const copy = doc.createElement(tag)
+    if (tag === 'a') {
       const href = safeHref(element.getAttribute('href') ?? '')
-      if (!href) {
+      if (!href || inAnchor) {
         // The wrapper goes but its text stays, and that text is now loose in
         // the document - so it is linkified like any other loose text.
-        clean(element, out, doc, inAnchor)
+        clean(element, out, doc, inAnchor, allowPending)
         continue
       }
       copy.setAttribute('href', href)
       copy.setAttribute('rel', 'noopener noreferrer nofollow')
       copy.setAttribute('target', '_blank')
     }
-    clean(element, copy, doc, inAnchor || element.tagName === 'A')
+    if (tag === 'th' || tag === 'td') {
+      for (const key of ['colspan', 'rowspan']) {
+        const value = Number(element.getAttribute(key))
+        if (Number.isInteger(value) && value > 1 && value <= 20) copy.setAttribute(key, String(value))
+      }
+    }
+    clean(element, copy, doc, inAnchor || tag === 'a', allowPending)
     out.appendChild(copy)
   }
 }
 
-export function sanitizeHtml(html: string): string {
+/** A run of empty paragraphs: one is spacing, five are a word processor's. */
+function collapseEmptyRuns(container: Element): void {
+  const isEmpty = (node: Element | null) =>
+    !!node && node.tagName === 'P' && !node.textContent?.replace(/\u00a0/g, '').trim() && !node.querySelector('figure')
+  for (const p of Array.from(container.querySelectorAll('p'))) {
+    if (!p.isConnected || !isEmpty(p)) continue
+    while (isEmpty(p.nextElementSibling)) p.nextElementSibling!.remove()
+  }
+}
+
+export function sanitizeHtml(html: string, { allowPending = false }: { allowPending?: boolean } = {}): string {
   if (!html) return ''
   const doc = new DOMParser().parseFromString(`<body>${html}</body>`, 'text/html')
   const container = doc.createElement('div')
-  clean(doc.body, container, doc)
+  clean(doc.body, container, doc, false, allowPending)
+  collapseEmptyRuns(container)
   return container.innerHTML
 }
 
@@ -302,7 +383,7 @@ export function htmlToText(html: string): string {
 
 /** Does this body actually contain markup, or is it plain text? */
 export function looksLikeHtml(value: string): boolean {
-  return /<(p|br|h2|h3|ul|ol|li|blockquote|strong|b|em|i|a|code|pre|figure)\b/i.test(value)
+  return /<(p|br|h[1-6]|ul|ol|li|blockquote|strong|b|em|i|u|s|a|code|pre|figure|table|hr)\b/i.test(value)
 }
 
 /**
