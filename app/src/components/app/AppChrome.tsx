@@ -78,7 +78,12 @@ export function AppTopBar() {
   const me = useMyProfile()
 
   return (
-    <div className={cn('border-x-0 border-t-0 border-b', tok.card)}>
+    // relative z-20: the notifications and language menus open from this bar
+    // and hang over the modules bar below it. Both bars blur what is behind
+    // them, which gives each its own layer, and the second one in the page
+    // was painted over the first one's menus - everywhere but Messages, which
+    // has no modules bar.
+    <div className={cn('relative z-20 border-x-0 border-t-0 border-b', tok.card)}>
     <div className="mx-auto flex h-[64px] w-full max-w-[1320px] items-center gap-3 px-4 md:h-[72px] md:gap-6 md:px-6">
       {/* Home, which inside the app means the feed. The logo used to leave for
           the marketing site, so the one thing every app puts a member back on
@@ -328,7 +333,7 @@ export function AppChipBar({ pathname, search }: { pathname: string; search: str
   const onBar = all.filter((m) => pinned.includes(m.key) || active === m.key)
 
   return (
-    <div className={cn('relative border-x-0 border-t-0 border-b', tok.card)}>
+    <div className={cn('relative z-10 border-x-0 border-t-0 border-b', tok.card)}>
       <div className="mx-auto flex h-[56px] w-full max-w-[1320px] items-center gap-2 px-4 md:h-[60px] md:px-6">
         <div
           data-chip-rail=""
