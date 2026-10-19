@@ -4,6 +4,7 @@ import { BadgeCheck, ExternalLink, FlaskConical, Lock } from 'lucide-react'
 import { useApi } from '@/hooks/useApi'
 import { ApiError, kaluta, type KycStatus, type OrderPayment } from '@/lib/api'
 import InPagePayment from '@/components/payments/InPagePayment'
+import { inPage } from '@/lib/payrail'
 import { Badge, Panel, PanelState } from './primitives'
 
 const TONE = {
@@ -205,7 +206,7 @@ export default function Verification() {
                       </button>
                     </div>
                   )}
-                  {payment && payment.rail === 'soncopay' && (
+                  {payment && inPage(payment.rail) && (
                     <div className="rounded-2xl border border-[var(--cloud-border)] p-4">
                       <InPagePayment
                         paymentId={payment.payment_id}
@@ -220,7 +221,7 @@ export default function Verification() {
                       />
                     </div>
                   )}
-                  {payment && !payment.mock && payment.rail !== 'soncopay' && (
+                  {payment && !payment.mock && !inPage(payment.rail) && (
                     <div className="space-y-2 rounded-2xl border border-white/10 p-3 text-sm text-text-mid">
                       {payment.checkout_url && /^https?:\/\//i.test(payment.checkout_url) && (
                         <a

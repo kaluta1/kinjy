@@ -3,6 +3,7 @@ import { CheckCircle2, Copy, ExternalLink, FlaskConical, ShieldCheck } from 'luc
 import { ghostBtn, primaryBtn } from '@/components/commerce/ActionSheet'
 import { ApiError, kaluta, type OrderPayment } from '@/lib/api'
 import InPagePayment from '@/components/payments/InPagePayment'
+import { inPage } from '@/lib/payrail'
 
 /**
  * Pays for one order, from "Pay" to "held in escrow".
@@ -113,7 +114,7 @@ export default function PaymentPanel({
         </div>
       )}
 
-      {payment && payment.rail === 'soncopay' && (
+      {payment && inPage(payment.rail) && (
         <InPagePayment
           paymentId={payment.payment_id}
           fallbackUrl={payment.checkout_url}
@@ -126,7 +127,7 @@ export default function PaymentPanel({
         />
       )}
 
-      {payment && !payment.mock && payment.rail !== 'soncopay' && (
+      {payment && !payment.mock && !inPage(payment.rail) && (
         <div className="space-y-3 rounded-2xl border border-white/10 bg-ink-2/40 p-3">
           {payment.checkout_url && /^https?:\/\//i.test(payment.checkout_url) && (
             <a

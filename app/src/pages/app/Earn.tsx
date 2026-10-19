@@ -12,6 +12,7 @@ import {
 } from '@/lib/api'
 import { FEATURES } from '@/lib/features'
 import InPagePayment from '@/components/payments/InPagePayment'
+import { inPage } from '@/lib/payrail'
 
 const usd = (value: string | number) =>
   `$${Number(value).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
@@ -43,7 +44,7 @@ export default function Earn() {
     setNote(null)
     try {
       const payment = await kaluta.referralPool.join()
-      if (payment.rail === 'soncopay') {
+      if (inPage(payment.rail)) {
         // Paid right here, on Kinjy's page.
         setSeatPayment(payment)
         return
