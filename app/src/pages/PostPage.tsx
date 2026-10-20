@@ -1,9 +1,10 @@
+import { useState } from 'react'
 import { Link, useParams, useSearchParams } from 'react-router'
 import { ArrowRight } from 'lucide-react'
 import PostCard from '@/components/social/PostCard'
 import { useApi } from '@/hooks/useApi'
 import { useAuth } from '@/hooks/useAuth'
-import { kaluta, type Post } from '@/lib/api'
+import { kaluta, membersOnlyCommunity, type Post } from '@/lib/api'
 import { pendingRef, refFromSearch } from '@/lib/share'
 import PublicShell from '@/components/landing/PublicShell'
 import { Eyebrow } from '@/components/landing/PageKit'
@@ -27,7 +28,18 @@ export default function PostPage() {
   const { postId = '' } = useParams()
   const [params] = useSearchParams()
   const { user } = useAuth()
-  const post = useApi<Post>(() => kaluta.posts.get(postId), [postId])
+  // A community post opened by somebody outside the group: the server names
+  // the community, so the page can send them there to join instead of
+  // calling the link broken.
+  const [community, setCommunity] = useState<{ slug: string; name: string } | null>(null)
+  const post = useApi<Post>(
+    () =>
+      kaluta.posts.get(postId).catch((err: unknown) => {
+        setCommunity(membersOnlyCommunity(err))
+        throw err
+      }),
+    [postId],
+  )
 
   // Remembering the invitation is ReferralWatch's job now, for every page
   // rather than only this one - a second copy here is how the two drift
@@ -42,7 +54,36 @@ export default function PostPage() {
       <section className="mx-auto w-full max-w-2xl px-5 pb-16 pt-10 sm:pt-14">
         {post.loading && <p className="text-sm text-[var(--kl-low)]" role="status">Loading…</p>}
 
-        {post.error && (
+        {post.error && community && (
+          <div className="rounded-[20px] border border-[var(--kl-paper-2)] bg-[var(--kl-surface)] p-8 shadow-[0_24px_48px_-34px_var(--kl-shadow)]">
+            <h1 className="text-[clamp(28px,4vw,40px)] font-bold leading-[1.05] tracking-[-0.04em]">
+              This post is in {community.name}
+            </h1>
+            <p className="mt-4 text-[1rem] leading-relaxed text-[var(--kl-mid)]">
+              Only its members can read it. Join the community to see this post and everything else shared there.
+            </p>
+            <div className="mt-6 flex flex-wrap gap-3">
+              {user ? (
+                <Link to={`/communities/${community.slug}`} className={`${KL_BTN_GOLD} !py-3 !text-[15px]`}>
+                  See the community
+                  <ArrowRight size={15} aria-hidden="true" />
+                </Link>
+              ) : (
+                <>
+                  <Link to={joinHref} className={`${KL_BTN_GOLD} !py-3 !text-[15px]`}>
+                    Create your account
+                    <ArrowRight size={15} aria-hidden="true" />
+                  </Link>
+                  <Link to={`/join?mode=signin&next=${encodeURIComponent(`/communities/${community.slug}`)}`} className={`${KL_BTN_GHOST} !py-3 !text-[15px]`}>
+                    Sign in
+                  </Link>
+                </>
+              )}
+            </div>
+          </div>
+        )}
+
+        {post.error && !community && (
           <div className="rounded-[20px] border border-[var(--kl-paper-2)] bg-[var(--kl-surface)] p-8 shadow-[0_24px_48px_-34px_var(--kl-shadow)]">
             <Eyebrow>Post</Eyebrow>
             <h1 className="mt-4 text-[clamp(28px,4vw,40px)] font-bold leading-[1.05] tracking-[-0.04em]">

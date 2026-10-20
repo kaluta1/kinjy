@@ -2044,10 +2044,49 @@ def backfill_classifications(limit: int = 500, db: OrmSession = Depends(get_db))
     }
 
 
+def _members_only_or(exc: HTTPException, db: OrmSession, post_id: str) -> None:
+    """Raise the answer for a link to a community post the viewer cannot read.
+
+    A member may share a post from their group anywhere. Somebody outside the
+    group then gets told where it is and that joining opens it - not "not
+    found", which reads as a broken link. Not for a secret community: its
+    existence is what it keeps from strangers, so that link stays a 404. Only
+    the community's name is said, never anything of the post.
+    """
+    post = db.get(models.Post, post_id)
+    if (
+        post is not None
+        and post.status == "published"
+        and post.visibility == "community"
+        and post.community_id
+    ):
+        try:
+            community = _community_summary(post.community_id)
+        except HTTPException:
+            community = {}
+        if community.get("slug") and community.get("kind") in ("public", "private", "paid"):
+            raise HTTPException(
+                status_code=403,
+                detail={
+                    "message": f"This post is in {community.get('name')}. Join the community to read it.",
+                    "code": "community_members_only",
+                    "community": {
+                        "slug": community["slug"],
+                        "name": community.get("name"),
+                        "kind": community.get("kind"),
+                    },
+                },
+            )
+    raise exc
+
+
 @app.get("/posts/{post_id}", tags=["posts"])
 def get_post(post_id: str, principal: MaybeUser, db: OrmSession = Depends(get_db)):
     viewer = principal.user_id if principal else None
-    post = _readable_post(db, post_id, viewer)
+    try:
+        post = _readable_post(db, post_id, viewer)
+    except HTTPException as exc:
+        _members_only_or(exc, db, post_id)
     prefs = _viewer_prefs(viewer)
     age = _viewer_age(viewer)
     # A direct link bypasses the feed entirely, so the same gate runs here.

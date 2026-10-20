@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { Navigate, Link, useSearchParams, useParams } from 'react-router'
+import { Navigate, Link, useNavigate, useSearchParams, useParams } from 'react-router'
 import { PenLine, RefreshCw, Sparkles, TrendingUp } from 'lucide-react'
 import { useAuth } from '@/hooks/useAuth'
 import AppShell, { RailCard } from '@/components/app/AppShell'
@@ -10,7 +10,7 @@ import Suggestions from '@/components/social/Suggestions'
 import PostCard from '@/components/social/PostCard'
 import PostDialog from '@/components/social/PostDialog'
 import PostSkeleton, { PostSkeletonList } from '@/components/social/PostSkeleton'
-import { ApiError, kaluta, type Algorithm, type FeedMode, type FeedPage, type Post } from '@/lib/api'
+import { ApiError, kaluta, membersOnlyCommunity, type Algorithm, type FeedMode, type FeedPage, type Post } from '@/lib/api'
 import { FEATURES } from '@/lib/features'
 import { slotAboveOrb } from '@/lib/floating'
 import { useTopic } from '@/hooks/useRealtime'
@@ -148,6 +148,7 @@ export default function SocialHub() {
   // notifications already sent carry the query form and will for as long as
   // anybody's bell has unread items in it.
   const sharedPostId = routePostId ?? params.get('post') ?? undefined
+  const navigate = useNavigate()
   const [loadingMore, setLoadingMore] = useState(false)
   const observer = useRef<IntersectionObserver | null>(null)
   // Cards report themselves as seen from here rather than each card firing its
@@ -265,12 +266,17 @@ export default function SocialHub() {
         if (!cancelled) setOpenPost(post)
       })
       // A post that is gone, or not for this viewer, simply leaves the feed
-      // showing - which is a better landing than an error page.
-      .catch(() => undefined)
+      // showing - which is a better landing than an error page. A post in a
+      // community they have not joined takes them to that community, where
+      // joining (or asking to) is one button.
+      .catch((err: unknown) => {
+        const community = membersOnlyCommunity(err)
+        if (!cancelled && community) navigate(`/communities/${community.slug}`, { replace: true })
+      })
     return () => {
       cancelled = true
     }
-  }, [sharedPostId])
+  }, [sharedPostId, navigate])
 
   // These three sit above the early returns below, and must stay there.
   // A hook after a conditional return runs on some renders and not others,

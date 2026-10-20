@@ -44,12 +44,27 @@ export const tokens = {
   },
 }
 
+/**
+ * The group a post lives in, when the answer to opening it was "members
+ * only" - so the page can send the reader there to join.
+ */
+export function membersOnlyCommunity(err: unknown): { slug: string; name: string; kind: string } | null {
+  if (!(err instanceof ApiError) || err.status !== 403) return null
+  const detail = (err.detail as { detail?: { code?: string; community?: { slug: string; name: string; kind: string } } } | null)
+    ?.detail
+  return detail?.code === 'community_members_only' && detail.community ? detail.community : null
+}
+
 /** Pull a readable message out of FastAPI's error shapes. */
 function messageFrom(status: number, body: unknown): string {
   if (typeof body === 'string' && body) return body
   if (body && typeof body === 'object' && 'detail' in body) {
     const detail = (body as { detail: unknown }).detail
     if (typeof detail === 'string') return detail
+    // A structured answer carries its sentence in `message`.
+    if (detail && typeof detail === 'object' && typeof (detail as { message?: unknown }).message === 'string') {
+      return (detail as { message: string }).message
+    }
     // 422 validation errors arrive as a list of {loc, msg}
     if (Array.isArray(detail)) {
       return detail

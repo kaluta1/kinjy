@@ -394,7 +394,9 @@ export default function PostCard({
   // Only a public post has a link worth giving away: everything else answers
   // 404 to the person who receives it, which is a worse experience than not
   // offering the button.
-  const shareable = target.visibility === 'public'
+  // A group's post can be shared too: its members read it from the link,
+  // anybody else is told which community it is in and how to join.
+  const shareable = target.visibility === 'public' || target.visibility === 'community'
   const myRef = withRef ? me?.referral_code ?? null : null
   const shareUrl = postUrl(target.id, myRef)
   // What the networks put beside the link. The post's own words where there
@@ -810,7 +812,7 @@ export default function PostCard({
           title={
             shareable
               ? 'Share this outside Kinjy'
-              : 'Only a public post can be shared outside Kinjy'
+              : 'Only a public or community post can be shared'
           }
           className="inline-flex items-center gap-1.5 rounded-full px-3 py-1.5 text-xs font-semibold text-text-mid hover:text-text-hi disabled:opacity-40"
         >
@@ -928,6 +930,13 @@ export default function PostCard({
               </a>
             ))}
           </div>
+
+          {target.visibility === 'community' && (
+            <p className="text-xs leading-relaxed text-text-low">
+              This post is in a community. Its members open it from the link; anybody else is shown the community
+              and how to join it.
+            </p>
+          )}
 
           {/* The link is shown rather than only copied. A member about to put
               their name on something in a group chat should be able to read
