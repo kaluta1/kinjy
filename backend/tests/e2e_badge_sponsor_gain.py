@@ -47,6 +47,9 @@ sponsor = register("Demo Sponsor")
 member = register("Demo Invited", referral_code=sponsor["code"])
 
 print("The sponsor sees what they earned")
+# A sponsor earns only once their own verification is active
+# (e2e_commission_requires_kyc.py covers the other side).
+httpx.post(f"http://localhost:8201/internal/users/{sponsor['id']}/kyc", params={"verified": "true"}).raise_for_status()
 pay = c.post("/payments/checkout", headers=H(member), json={"purpose": "kyc_fee", "amount": "10.00"}).json()
 r = c.post(f"/payments/{pay['payment_id']}/mock-settle", headers=H(member))
 check("the fee is paid (test mode)", r.status_code == 200, r.text[:160])

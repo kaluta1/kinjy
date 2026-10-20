@@ -1,11 +1,13 @@
 import { useState } from 'react'
-import { Crown, Dices, Info, TrendingUp, Users } from 'lucide-react'
+import { Link } from 'react-router'
+import { BadgeCheck, Crown, Dices, Info, TrendingUp, Users } from 'lucide-react'
 import AppShell from '@/components/app/AppShell'
 import { Panel, PanelState, Stat } from '@/components/dashboard/primitives'
 import { useApi } from '@/hooks/useApi'
 import {
   ApiError,
   kaluta,
+  type KycStatus,
   type LeaderBoard,
   type MyLeaderStanding,
   type ReferralPoolState,
@@ -26,6 +28,8 @@ const usd = (value: string | number) =>
  */
 export default function Earn() {
   const standing = useApi<MyLeaderStanding>(() => kaluta.leaders.me(), [])
+  // Commissions start with the member's own verification; until then they go to Kinjy.
+  const kyc = useApi<KycStatus>(() => kaluta.account.kyc(), [])
   const board = useApi<LeaderBoard>(() => kaluta.leaders.standings(), [])
   const [poolTick, setPoolTick] = useState(0)
   const pool = useApi<ReferralPoolState>(() => kaluta.referralPool.mine(), [poolTick])
@@ -76,6 +80,22 @@ export default function Earn() {
           above you earns on them.
         </p>
       </header>
+
+      {kyc.data && kyc.data.status !== 'verified' && (
+        <div className="mb-5 flex flex-wrap items-center gap-4 rounded-card border border-gold/40 bg-gold/10 p-4">
+          <BadgeCheck size={22} className="shrink-0 text-gold-soft" aria-hidden="true" />
+          <p className="min-w-0 flex-1 text-sm leading-relaxed text-text-mid">
+            <span className="font-semibold text-text-hi">Verify your account to start earning.</span> Until your
+            verification is active, the commissions on the members you sponsored go to Kinjy.
+          </p>
+          <Link
+            to="/dashboard?tab=verification"
+            className="rounded-full bg-gradient-to-br from-gold-soft to-gold px-4 py-2 text-sm font-bold text-ink"
+          >
+            {kyc.data.status === 'pending' ? 'See my verification' : 'Verify my account'}
+          </Link>
+        </div>
+      )}
 
       <div className="grid grid-cols-[minmax(0,1fr)] gap-5 lg:grid-cols-2">
         {/* --- Kinjy Leaders ------------------------------------------- */}

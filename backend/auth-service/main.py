@@ -1145,6 +1145,18 @@ def age_review_queue(
     }
 
 
+def _kyc_active(user: models.User) -> bool:
+    """Verified, and not past the date the verification runs out."""
+    if not user.kyc_verified:
+        return False
+    until = user.kyc_verified_until
+    if until is None:
+        return True
+    if until.tzinfo is None:
+        until = until.replace(tzinfo=timezone.utc)
+    return until > datetime.now(timezone.utc)
+
+
 @app.get("/internal/sponsor/{user_id}", response_model=schemas.SponsorOut, tags=["internal"])
 def sponsor(user_id: str, db: OrmSession = Depends(get_db)):
     """The one member paid on this member's activity.
@@ -1163,6 +1175,10 @@ def sponsor(user_id: str, db: OrmSession = Depends(get_db)):
     parent = db.get(models.User, user.invited_by)
     if parent is None or parent.status == "deleted":
         return schemas.SponsorOut(user_id=user_id, sponsor_id=None, source="none")
+    # Earning starts with the sponsor's own verification: until it is active
+    # the commission is Kinjy's, booked as unclaimed so it stays visible.
+    if settings.COMMISSION_REQUIRES_KYC and not _kyc_active(parent):
+        return schemas.SponsorOut(user_id=user_id, sponsor_id=None, source="unverified")
 
     assigned = db.scalar(
         select(models.PoolAssignment).where(models.PoolAssignment.new_member_id == user_id)

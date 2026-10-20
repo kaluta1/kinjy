@@ -72,6 +72,8 @@ def available(user):
 
 sponsor = register("Demo Sponsor")
 member = register("Demo Member", referral_code=sponsor["code"])
+# A sponsor earns only once their own verification is active.
+httpx.post(f"http://localhost:8201/internal/users/{sponsor['id']}/kyc", params={"verified": "true"}).raise_for_status()
 
 print("The KYC fee, through Kaluta Pay")
 r = c.post("/payments/checkout", headers=H(member), json={"purpose": "kyc_fee", "amount": "10.00",
@@ -135,6 +137,8 @@ print("A member who signed up without a link")
 loner = register("Demo Loner")
 # Assigned a sponsor by the referral pool (or none when it is empty).
 pooled = httpx.get(f"http://localhost:8201/internal/users/{loner['id']}").json().get("invited_by")
+if pooled:
+    httpx.post(f"http://localhost:8201/internal/users/{pooled}/kyc", params={"verified": "true"}).raise_for_status()
 pay2 = c.post("/payments/checkout", headers=H(loner), json={"purpose": "kyc_fee", "amount": "10.00"}).json()
 inv2 = next(i for i in state()["kp_invoices"].values() if i["order_ref"] == pay2["payment_id"])
 httpx.post(f"{FAKE}/_ctl/kp_paid", json={"id": inv2["id"]})

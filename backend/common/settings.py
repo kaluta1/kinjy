@@ -180,6 +180,11 @@ KALUTAPAY_BASE_URL = _str("KALUTAPAY_BASE_URL", "https://kalutagroup.com")
 # written to the ledger, so it paid nobody.
 KYC_FEE_COMMISSIONABLE = _str("KYC_FEE_COMMISSIONABLE", "1") not in ("0", "false", "no")
 
+# A sponsor earns commissions only while their own identity check is valid.
+# Until then (or once it lapses) their share goes to Kinjy, recorded as
+# unclaimed. "0" turns the rule off: every sponsor earns, verified or not.
+COMMISSION_REQUIRES_KYC = _str("COMMISSION_REQUIRES_KYC", "1") not in ("0", "false", "no")
+
 # Kaluta KYC: the identity check behind KinjyKYC. Blank key => verification
 # cannot start, and says so, rather than pretending to.
 KALUTA_KYC_API_KEY = _str("KALUTA_KYC_API_KEY")

@@ -309,11 +309,14 @@ async def mock_settle(payment_id: str, principal: CurrentUser, db: OrmSession = 
 
 
 def _sponsor_of(user_id: str) -> str | None:
-    """Who sponsored this member - given to Kaluta Pay with the payer."""
+    """Who is paid on this member's activity - given to Kaluta Pay with the payer.
+
+    The same answer the ledger gets: nobody while the sponsor is not verified.
+    """
     try:
-        response = httpx.get(f"{AUTH_URL}/internal/users/{user_id}", timeout=5)
+        response = httpx.get(f"{AUTH_URL}/internal/sponsor/{user_id}", timeout=5)
         response.raise_for_status()
-        return response.json().get("invited_by")
+        return response.json().get("sponsor_id")
     except Exception:
         return None
 

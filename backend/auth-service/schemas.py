@@ -159,7 +159,7 @@ class SponsorOut(BaseModel):
 
     user_id: str
     sponsor_id: str | None
-    source: str  # invitation|referral_pool|none
+    source: str  # invitation|referral_pool|unverified|none
 
 
 class PoolSeatIn(BaseModel):
