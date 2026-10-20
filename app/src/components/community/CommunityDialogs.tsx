@@ -1,6 +1,6 @@
 import { useEffect, useState, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
-import { Globe, Lock, X } from 'lucide-react'
+import { Check, Globe, Lock, X } from 'lucide-react'
 import MemberQueue from '@/components/community/MemberQueue'
 import ProfileImagePicker from '@/components/dashboard/ProfileImagePicker'
 import MemberAvatar from '@/components/social/MemberAvatar'
@@ -88,6 +88,25 @@ export function CommunitySettingsDialog({
   const [description, setDescription] = useState(community.description ?? '')
   const [busy, setBusy] = useState(false)
   const [note, setNote] = useState<{ ok: boolean; text: string } | null>(null)
+  // The name and description have their answer next to their own button:
+  // the shared note sits at the bottom of the window, out of sight from here,
+  // and a Save that seems to do nothing gets pressed again and again.
+  const [saving, setSaving] = useState(false)
+  const [saved, setSaved] = useState<{ ok: boolean; text: string } | null>(null)
+
+  const save = async () => {
+    setSaving(true)
+    setSaved(null)
+    try {
+      await kaluta.communities.edit(community.id, { name: name.trim(), description: description.trim() })
+      setSaved({ ok: true, text: 'Saved' })
+      onChanged()
+    } catch (err) {
+      setSaved({ ok: false, text: err instanceof ApiError ? err.message : 'Could not save' })
+    } finally {
+      setSaving(false)
+    }
+  }
 
   const run = async (action: () => Promise<string>) => {
     setBusy(true)
@@ -128,10 +147,7 @@ export function CommunitySettingsDialog({
         <form
           onSubmit={(event) => {
             event.preventDefault()
-            void run(async () => {
-              await kaluta.communities.edit(community.id, { name: name.trim(), description: description.trim() })
-              return 'Saved.'
-            })
+            void save()
           }}
           className="space-y-3"
         >
@@ -139,7 +155,10 @@ export function CommunitySettingsDialog({
             <span className="mb-1 block text-sm font-semibold text-text-mid">Name</span>
             <input
               value={name}
-              onChange={(e) => setName(e.target.value)}
+              onChange={(e) => {
+                setName(e.target.value)
+                setSaved(null)
+              }}
               maxLength={140}
               className="w-full rounded-[14px] border border-[var(--cloud-border)] bg-text-hi/[0.05] px-4 py-2.5 text-[0.95rem] text-text-hi focus:border-gold/60 focus:outline-none"
             />
@@ -148,19 +167,33 @@ export function CommunitySettingsDialog({
             <span className="mb-1 block text-sm font-semibold text-text-mid">Description</span>
             <textarea
               value={description}
-              onChange={(e) => setDescription(e.target.value)}
+              onChange={(e) => {
+                setDescription(e.target.value)
+                setSaved(null)
+              }}
               rows={4}
               maxLength={4000}
               className="w-full resize-y rounded-[14px] border border-[var(--cloud-border)] bg-text-hi/[0.05] px-4 py-2.5 text-[0.95rem] text-text-hi focus:border-gold/60 focus:outline-none"
             />
           </label>
-          <button
-            type="submit"
-            disabled={busy || name.trim().length < 2}
-            className="rounded-full bg-gradient-to-br from-gold-soft to-gold px-5 py-2.5 text-sm font-bold text-ink disabled:opacity-40"
-          >
-            Save
-          </button>
+          <div className="flex flex-wrap items-center gap-3">
+            <button
+              type="submit"
+              disabled={saving || busy || name.trim().length < 2}
+              className="rounded-full bg-gradient-to-br from-gold-soft to-gold px-5 py-2.5 text-sm font-bold text-ink disabled:opacity-40"
+            >
+              {saving ? 'Saving…' : 'Save'}
+            </button>
+            {saved && (
+              <span
+                role={saved.ok ? 'status' : 'alert'}
+                className={cn('inline-flex items-center gap-1 text-sm', saved.ok ? 'text-emerald-200' : 'text-red-200')}
+              >
+                {saved.ok && <Check size={14} aria-hidden="true" />}
+                {saved.text}
+              </span>
+            )}
+          </div>
         </form>
 
         {community.kind !== 'paid' && (
