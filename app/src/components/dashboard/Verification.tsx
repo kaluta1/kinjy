@@ -1,7 +1,8 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useSearchParams } from 'react-router'
 import { BadgeCheck, ExternalLink, FlaskConical, Lock } from 'lucide-react'
 import { useApi } from '@/hooks/useApi'
+import { useAuth } from '@/hooks/useAuth'
 import { ApiError, kaluta, type KycStatus, type OrderPayment } from '@/lib/api'
 import InPagePayment from '@/components/payments/InPagePayment'
 import { inPage } from '@/lib/payrail'
@@ -28,6 +29,19 @@ const TONE = {
  */
 export default function Verification() {
   const kyc = useApi<KycStatus>(() => kaluta.account.kyc(), [])
+  // The badge at the top of the page reads the signed-in account, loaded once.
+  // When the check's answer differs from it (the verdict just came in, or the
+  // verification ran out), the account is read again so both say the same.
+  const { user, refresh } = useAuth()
+  const verifiedNow = kyc.data ? kyc.data.status === 'verified' : null
+  // Once per answer: if the two still disagree after that, reading again would loop.
+  const synced = useRef<boolean | null>(null)
+  useEffect(() => {
+    if (verifiedNow === null || !user || Boolean(user.kyc_verified) === verifiedNow) return
+    if (synced.current === verifiedNow) return
+    synced.current = verifiedNow
+    void refresh()
+  }, [verifiedNow, user, refresh])
   const [params, setParams] = useSearchParams()
   const [starting, setStarting] = useState(false)
   const [message, setMessage] = useState<string | null>(null)
