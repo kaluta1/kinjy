@@ -3,6 +3,7 @@ import type { ReactNode } from 'react'
 import { Navigate, Routes, Route, useLocation } from 'react-router'
 import RouteSkeleton from './components/app/RouteSkeleton'
 import ReferralWatch from './components/app/ReferralWatch'
+import RouteErrorBoundary from './components/app/RouteErrorBoundary'
 import Layout from './components/Layout'
 import Home from './pages/Home'
 import { useAuth } from './hooks/useAuth'
@@ -117,12 +118,15 @@ function SharedPost() {
 }
 
 export default function App() {
+  // Keyed on the address: a page that failed is forgotten when the member goes elsewhere.
+  const location = useLocation()
   return (
     <Layout>
       {/* The invitation follows the visitor from whichever page the link
           pointed at to wherever they sign up. Outside Suspense: it must not
           be unmounted and remounted while a route's chunk loads. */}
       <ReferralWatch />
+      <RouteErrorBoundary key={location.pathname}>
       <Suspense fallback={<PageFallback />}>
         <Routes>
           <Route path="/" element={<Home />} />
@@ -196,6 +200,7 @@ export default function App() {
           <Route path="*" element={<Home />} />
         </Routes>
       </Suspense>
+      </RouteErrorBoundary>
     </Layout>
   )
 }
