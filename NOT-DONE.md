@@ -267,6 +267,15 @@ Checked on production 2026-08-20, promise by promise.
   - a Vimeo embed showed a grey frame in the local browser (YouTube played) -
     the embed code predates this work, not investigated.
 
+- **Group post notifications (19/10)**: every active member is told, unless
+  they turned it off on the group's page. Not done:
+  - one notification per member, sent one by one on a thread: fine for
+    hundreds, slow for tens of thousands (no bulk endpoint in messaging);
+  - no digest ("5 new posts in X") - a busy group sends one per post;
+  - only on publication: an edit, a comment or a reaction in the group does
+    not notify the group;
+  - Messages group chats are separate and unchanged.
+
 ## 6. Unverified in this environment
 
 The browser pane does not composite frames here, so these were built but never
