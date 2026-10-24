@@ -8,6 +8,7 @@ import CheckoutSheet from '@/components/commerce/CheckoutSheet'
 import OrderRecent from '@/components/commerce/OrderRecent'
 import FilterSheet, { NO_FILTERS, countFilters, type MarketFilters } from '@/components/commerce/FilterSheet'
 import ProductCard, { ProductCardSkeleton } from '@/components/commerce/ProductCard'
+import KinjyServiceCard, { poolServiceMatches } from '@/components/commerce/KinjyServiceCard'
 import { kaluta, type Product } from '@/lib/api'
 import { cn } from '@/lib/utils'
 
@@ -28,6 +29,8 @@ const PAGE = 24
 
 export default function Marketplace() {
   const { user } = useAuth()
+  // Kinjy's own service, shown first among services: the referral pool.
+  const pool = useApi(() => kaluta.referralPool.state(), [])
   const [query, setQuery] = useState('')
   const [search, setSearch] = useState('')
   const [kind, setKind] = useState<string>('')
@@ -223,6 +226,7 @@ export default function Marketplace() {
       )}
 
       <div className="mt-4 grid grid-cols-1 gap-3 min-[480px]:grid-cols-2 xl:grid-cols-3">
+        {!mine && poolServiceMatches(search, kind) && <KinjyServiceCard unitPrice={pool.data?.unit_price ?? null} />}
         {firstLoad && Array.from({ length: 6 }, (_, i) => <ProductCardSkeleton key={i} />)}
         {items.map((product) => (
           <ProductCard

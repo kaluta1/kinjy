@@ -1619,8 +1619,14 @@ export interface ReferralPoolState {
   seats_taken: number
   seats_left: number
   units_sold: number
-  units_left: number
+  /** The cap counts members; units per member are not capped. */
+  cap_counts: 'members'
+  members: number
+  members_left: number
+  /** Open to new members. */
   open: boolean
+  /** Whether the reader may buy: members already in always can. */
+  can_buy: boolean
   active_seats: number
   active_units: number
   current_round: {
@@ -1640,6 +1646,35 @@ export interface ReferralPoolState {
   } & PoolMemberUnits) | null
   note: string
   rotation_note: string
+}
+
+export interface AdminJournal {
+  id: string
+  kind: string
+  reference: string | null
+  amount: string
+  currency: string
+  created_at: string
+  description?: string | null
+  reverses_journal_id?: string | null
+  entries: Array<{ account: string; beneficiary_id: string | null; role: string | null; debit: string; credit: string; reason: string | null }>
+}
+
+export interface FraudSignals {
+  window_days: number
+  note: string
+  counts: { sponsor_shared_ip: number; signup_bursts: number; age_probing: number }
+  sponsor_shared_ip: Array<{
+    member_id: string
+    member_handle: string
+    created_at: string
+    sponsor_id: string
+    sponsor_handle: string
+    ip: string
+    via_pool: boolean
+  }>
+  signup_bursts: Array<{ ip: string; day: string; accounts: number; first_at: string; last_at: string }>
+  age_probing: Array<{ subject: string; refusals: number; jurisdiction: string | null; last_at: string; later_allowed: boolean }>
 }
 
 /** A member's units, as the pool counts them. */
@@ -3021,6 +3056,78 @@ export const kaluta = {
       ),
   },
 
+  /** Admin console: everything the admin dashboard reads, by service. */
+  adminConsole: {
+    users: (q = '', offset = 0) =>
+      api.get<{
+        total: number
+        items: Array<AuthUser & { country: string | null; created_at: string; invited_by: string | null }>
+      }>(
+        `/admin/users?limit=50&offset=${offset}${q ? `&q=${encodeURIComponent(q)}` : ''}`,
+      ),
+    journals: (kind = '', offset = 0) =>
+      api.get<{ total: number; items: AdminJournal[] }>(
+        `/admin/journals?limit=50&offset=${offset}${kind ? `&kind=${encodeURIComponent(kind)}` : ''}`,
+      ),
+    trialBalance: () =>
+      api.get<{ accounts: Array<{ account: string; debit: string; credit: string; balance: string }> }>('/admin/trial-balance'),
+    reconcile: () =>
+      api.get<{ checked: number; drift_count: number; drift: Array<Record<string, unknown>> }>('/admin/reconcile'),
+    reverseJournal: (journalId: string, reason: string) =>
+      api.post<AdminJournal>(`/admin/journals/${journalId}/reverse?reason=${encodeURIComponent(reason)}`, {}),
+    kyc: (status = '') =>
+      api.get<{
+        year: number
+        counts: Record<string, number>
+        items: Array<{
+          user_id: string
+          year: number
+          fee_paid: boolean
+          fee_payment_id: string | null
+          attempts: number
+          max_attempts: number
+          status: string
+          provider_reference: string | null
+        }>
+      }>(`/admin/kyc${status ? `?status=${status}` : ''}`),
+    fraud: (days = 30) => api.get<FraudSignals>(`/admin/fraud/signals?days=${days}`),
+    contactRisk: () =>
+      api.get<{
+        window_days: number
+        items: Array<{ sender_id: string; distinct_minors_refused: number; total_attempts: number; risk_score: number; note: string }>
+      }>('/admin/contact-risk'),
+    refunds: () =>
+      api.get<{
+        items: Array<{
+          id: string
+          order_id: string
+          user_id: string
+          amount: string
+          status: string
+          rail: string
+          failure_reason: string | null
+          created_at: string
+        }>
+      }>('/admin/refunds?limit=100'),
+    disputes: () => api.get<{ items: Array<Record<string, unknown>> } | Array<Record<string, unknown>>>('/admin/disputes'),
+    resolveDispute: (disputeId: string, outcome: 'release_to_seller' | 'refund_buyer' | 'split', note: string, refundAmount?: string) =>
+      api.post<Record<string, unknown>>(`/admin/disputes/${disputeId}/resolve`, {
+        outcome,
+        note,
+        refund_amount: refundAmount || undefined,
+      }),
+    leadersSnapshot: (period: string) =>
+      api.post<Record<string, unknown>>(`/admin/leaders-pool/snapshot?period=${period}`, {}),
+    leadersReviewed: (period: string) =>
+      api.post<Record<string, unknown>>(`/admin/leaders-pool/${period}/reviewed`, {}),
+    leadersPay: (period: string) => api.post<Record<string, unknown>>(`/admin/leaders-pool/pay?period=${period}`, {}),
+    services: () =>
+      api.get<{ healthy: number; total: number; services: Record<string, { status: string; error?: string }> }>('/status'),
+    aiObservability: () => api.get<Record<string, unknown>>('/admin/ai/observability'),
+    reconcileSplits: () => api.post<Record<string, unknown>>('/admin/payments/splits/reconcile', {}),
+    reconcileWithdrawals: () => api.post<Record<string, unknown>>('/admin/payouts/withdrawals/reconcile', {}),
+  },
+
   /** Admin: the referral pool's purchases, units, rounds and assignments. */
   poolAdmin: {
     overview: () =>
@@ -3031,8 +3138,21 @@ export const kaluta = {
       api.get<{ items: PoolAdminMember[]; total: number }>(`/admin/referral-pool/members?offset=${offset}&limit=100`),
     purchases: (status?: string) =>
       api.get<{ items: PoolPurchase[] }>(`/admin/referral-pool/purchases${status ? `?status=${status}` : ''}`),
+    /** Units only: for purchases with no Kinjy payment behind them (migrated by hand). */
     reverse: (purchaseId: string, units: number, kind: 'refund' | 'reversal', reason: string) =>
       api.post<PoolPurchase>(`/admin/referral-pool/purchases/${purchaseId}/reverse`, { units, kind, reason }),
+    /**
+     * The whole refund of units bought with a payment: units off, revenue and
+     * commissions mirrored pro rata, the amount owed on the buyer's balance.
+     * `requestId` makes a retry finish the same refund instead of a second one.
+     */
+    refundPayment: (paymentId: string, units: number, kind: 'refund' | 'reversal', reason: string, requestId: string) =>
+      api.post<{ refund_id: string; status: string; amount: string }>(`/admin/pool-refunds/${paymentId}`, {
+        units,
+        kind,
+        reason,
+        request_id: requestId,
+      }),
     review: (purchaseId: string, decision: 'approve' | 'reject', note: string) =>
       api.post<PoolPurchase>(`/admin/referral-pool/purchases/${purchaseId}/review`, { decision, note }),
     rounds: () => api.get<{ items: PoolRound[] }>('/admin/referral-pool/rounds'),

@@ -20,7 +20,7 @@ const Commerce = lazy(() => import('./pages/Commerce'))
 const Pricing = lazy(() => import('./pages/Pricing'))
 const Payments = lazy(() => import('./pages/Payments'))
 const Assistant = lazy(() => import('./pages/Assistant'))
-const Admin = lazy(() => import('./pages/Admin'))
+const AdminDashboard = lazy(() => import('./pages/AdminDashboard'))
 const Safety = lazy(() => import('./pages/Safety'))
 const Developers = lazy(() => import('./pages/Developers'))
 const AppDemo = lazy(() => import('./pages/AppDemo'))
@@ -29,8 +29,6 @@ const LinkUnavailable = lazy(() => import('./pages/ShortLink'))
 const ShortLinkPage = lazy(() => import('./pages/ShortLink').then((m) => ({ default: m.ShortLinkPage })))
 const ResetPassword = lazy(() => import('./pages/ResetPassword'))
 const PayoutWalletConfirm = lazy(() => import('./pages/PayoutWalletConfirm'))
-const PayoutWallets = lazy(() => import('./pages/app/PayoutWallets'))
-const PoolAdmin = lazy(() => import('./pages/app/PoolAdmin'))
 const PostPage = lazy(() => import('./pages/PostPage'))
 const Dashboard = lazy(() => import('./pages/Dashboard'))
 const SocialHub = lazy(() => import('./pages/SocialHub'))
@@ -45,6 +43,7 @@ const FamilyTreeApp = lazy(() => import('./pages/app/FamilyTree'))
 const Graveyard = lazy(() => import('./pages/app/Graveyard'))
 const MemorialPublic = lazy(() => import('./pages/MemorialPublic'))
 const Marketplace = lazy(() => import('./pages/app/Marketplace'))
+const MarketPoolService = lazy(() => import('./pages/app/MarketPoolService'))
 const MarketOrders = lazy(() => import('./pages/app/MarketOrders'))
 const MarketOrder = lazy(() => import('./pages/app/MarketOrder'))
 const MarketDispute = lazy(() => import('./pages/app/MarketDispute'))
@@ -142,7 +141,9 @@ export default function App() {
           <Route path="/pricing" element={<Pricing />} />
           <Route path="/payments" element={<Payments />} />
           <Route path="/assistant" element={gated('assistant', <Assistant />, '/')} />
-          <Route path="/admin" element={<Admin />} />
+          {/* The admin dashboard: one menu, a section per address. */}
+          <Route path="/admin" element={<AdminDashboard />} />
+          <Route path="/admin/:section" element={<AdminDashboard />} />
           <Route path="/safety" element={<Safety />} />
           <Route path="/developers" element={<Developers />} />
           <Route path="/app" element={<AppDemo />} />
@@ -182,6 +183,7 @@ export default function App() {
           <Route path="/market/orders" element={gated('marketplace', <MarketOrders />, '/hub')} />
           <Route path="/market/orders/:id" element={gated('marketplace', <MarketOrder />, '/hub')} />
           <Route path="/market/orders/:id/dispute" element={gated('marketplace', <MarketDispute />, '/hub')} />
+          <Route path="/market/services/referral-pool" element={gated('marketplace', <MarketPoolService />, '/hub')} />
           <Route path="/market/products/:id" element={gated('marketplace', <MarketProduct />, '/hub')} />
           <Route path="/market/sell" element={gated('marketplace', <MarketSell />, '/hub')} />
           <Route path="/market/seller" element={gated('marketplace', <MarketSeller />, '/hub')} />
@@ -199,8 +201,6 @@ export default function App() {
               anybody who is not staff, so the route itself is not the guard. */}
           <Route path="/trust-safety" element={<TrustSafety />} />
           <Route path="/team" element={<Team />} />
-          <Route path="/admin/wallets" element={<PayoutWallets />} />
-          <Route path="/admin/referral-pool" element={<PoolAdmin />} />
           {/* Where the appeal notification sends the member. */}
           <Route path="/moderation" element={<Moderation />} />
           {/* Every avatar in the app links here. */}

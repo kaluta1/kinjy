@@ -291,7 +291,8 @@ export default function Navbar() {
                   label: t(l.key, { defaultValue: l.fallback }),
                 })),
                 { to: '/assistant', label: 'Kinjy Assistant' },
-                { to: '/admin', label: 'Admin Console' },
+                // Only for the people it is for: the dashboard refuses anybody else.
+                ...(user?.role === 'admin' || user?.role === 'superadmin' ? [{ to: '/admin', label: 'Admin Console' }] : []),
                 { to: '/app', label: 'The App' },
                 user
                   ? { to: '/dashboard', label: t('nav.dashboard', { defaultValue: 'Dashboard' }) }

@@ -17,7 +17,7 @@ from decimal import Decimal
 import httpx
 from fastapi import Depends, Header, HTTPException, Request
 from pydantic import BaseModel, Field
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session as OrmSession
 
 from common import economy, events, settings
@@ -834,9 +834,9 @@ def join_referral_pool(
     """Start payment for one or more pool units: units x the unit price.
 
     Quantity and price are settled here, not by the client, and checked again
-    when the units are credited. Room in the pool is checked before taking
-    money and again at settlement: the gap between the two is exactly where
-    the last units get sold to somebody else.
+    when the units are credited. Room for a new member is checked before
+    taking money and again at settlement (the cap counts members): the gap
+    between the two is exactly where the last place goes to somebody else.
     """
     agefeatures.require(principal.user_id, "referral_pool")
     units = (payload or JoinPoolIn()).units
@@ -847,23 +847,12 @@ def join_referral_pool(
         )
 
     try:
-        state = httpx.get(
-            f"{AUTH_URL}/auth/referral-pool",
-            headers={"X-Internal-For": principal.user_id},
-            timeout=5,
-        ).json()
+        verdict = httpx.get(f"{AUTH_URL}/internal/referral-pool/can-buy/{principal.user_id}", timeout=5).json()
     except Exception as exc:
         log.error("referral pool status unavailable: %s", exc)
         raise HTTPException(status_code=503, detail="The referral pool is unavailable right now")
-
-    left = int(state.get("units_left", state.get("seats_left", 0)))
-    if not state.get("open") or left <= 0:
-        raise HTTPException(
-            status_code=409,
-            detail=f"The referral pool is full ({state.get('cap'):,} units) and closed to new purchases.",
-        )
-    if units > left:
-        raise HTTPException(status_code=409, detail=f"Only {left} unit{'s' if left != 1 else ''} left in the pool")
+    if not verdict.get("allowed"):
+        raise HTTPException(status_code=409, detail=verdict.get("reason") or "The referral pool is full")
 
     return checkout(
         CheckoutIn(
@@ -954,6 +943,135 @@ def reconcile_pool_purchases() -> int:
             done += fulfil_pool_purchase(intent)
             db.commit()
     return done
+
+
+class PoolRefundIn(BaseModel):
+    units: int = Field(ge=1)
+    kind: str = Field(default="refund", pattern="^(refund|reversal)$")
+    reason: str = Field(min_length=3, max_length=300)
+    # Made once per refund form by the admin page: the same request sent
+    # twice (a double click, a retry after a timeout) refunds once.
+    request_id: str = Field(pattern=r"^[A-Za-z0-9_-]{8,36}$")
+
+
+@app.post("/admin/pool-refunds/{payment_id}", tags=["admin"])
+def refund_pool_units(
+    payment_id: str, payload: PoolRefundIn, admin: AdminUser, db: OrmSession = Depends(get_db)
+):
+    """Refund pool units bought with one payment, all the way.
+
+    1. The units come off (auth-service): unused quota in the current round
+       goes with them; referrals already received stay.
+    2. The ledger mirrors the same share of the payment: revenue, the buyer's
+       sponsor's commission and the Leaders share come back pro rata.
+    3. The money is owed to the buyer on their Kinjy balance, which they
+       withdraw like any balance. Neither Kaluta Pay nor Sonco Pay can send a
+       payment back to the payer, so this is the refund path that exists.
+
+    Each step is idempotent on the request, so a retry finishes what a
+    failure interrupted and never refunds twice.
+    """
+    intent = db.get(models.PaymentIntent, payment_id)
+    if intent is None or intent.purpose != "referral_pool" or intent.settled_at is None:
+        raise HTTPException(status_code=404, detail="No settled pool payment with that id")
+    refund_id = f"rfd_{payload.request_id}"[:40]
+    refund = db.get(models.Refund, refund_id)
+    if refund is not None and refund.status == "credited_to_balance":
+        return {"refund_id": refund.id, "status": refund.status, "amount": str(refund.amount)}
+
+    try:
+        reversed_ = httpx.post(
+            f"{AUTH_URL}/internal/referral-pool/purchases/{payment_id}/reverse",
+            json={"units": payload.units, "kind": payload.kind, "reason": payload.reason, "reference": refund_id},
+            timeout=10,
+        )
+    except Exception as exc:
+        log.error("pool refund %s: auth-service unreachable: %s", refund_id, exc)
+        raise HTTPException(status_code=503, detail="Could not reach the pool. Nothing was refunded; try again.")
+    if reversed_.status_code >= 400:
+        detail = reversed_.json().get("detail") if reversed_.headers.get("content-type", "").startswith("application/json") else None
+        raise HTTPException(status_code=reversed_.status_code if reversed_.status_code < 500 else 502,
+                            detail=detail or "The pool refused the refund")
+    unit_price = Decimal(str(reversed_.json()["unit_price"]))
+    amount = economy.money(unit_price * payload.units)
+
+    if refund is None:
+        refund = models.Refund(
+            id=refund_id, order_id=payment_id, user_id=intent.user_id, amount=amount, currency="USD",
+            rail="kinjy_balance", custody_ref=intent.id, reason=f"{payload.kind}: {payload.reason}"[:500],
+            status="pending",
+        )
+        db.add(refund)
+        db.commit()
+    try:
+        httpx.post(
+            f"{LEDGER_URL}/internal/post/payment-refund",
+            json={"payment_id": payment_id, "member_id": intent.user_id, "amount": str(amount),
+                  "reason": f"{payload.units} pool unit(s), {payload.kind}: {payload.reason}",
+                  "idempotency_key": f"pool-refund:{refund_id}"},
+            timeout=10,
+        ).raise_for_status()
+    except Exception as exc:
+        refund.status = "failed"
+        refund.failure_reason = f"ledger: {exc}"[:200]
+        db.commit()
+        log.error("pool refund %s: units off but the ledger refused: %s", refund_id, exc)
+        raise HTTPException(
+            status_code=502,
+            detail="The units are off, but the accounting step failed. Send the same refund again to finish it.",
+        )
+    refund.status = "credited_to_balance"
+    refund.settled_at = datetime.now(timezone.utc)
+    refund.failure_reason = None
+    db.commit()
+    notify(intent.user_id, "pool_refund", f"{usd_text(amount)} refunded to your Kinjy balance",
+           body=f"{payload.units} referral pool unit(s) were refunded. You can withdraw the amount like any balance.",
+           link="/earn")
+    log.info("pool refund %s by %s: %s units, %s", refund_id, admin.user_id, payload.units, amount)
+    return {"refund_id": refund.id, "status": refund.status, "amount": str(amount)}
+
+
+def usd_text(amount: Decimal) -> str:
+    return f"${amount:,.2f}"
+
+
+@app.get("/admin/kyc", tags=["admin"])
+def admin_kyc(
+    _: AdminUser, status: str | None = None, year: int | None = None, limit: int = 100, offset: int = 0,
+    db: OrmSession = Depends(get_db),
+):
+    """KinjyKYC records: fee, attempts and result per member and year. Only the
+    result is held here - the documents stay with Kaluta KYC."""
+    q = select(models.KycRecord)
+    if status:
+        q = q.where(models.KycRecord.status == status)
+    if year:
+        q = q.where(models.KycRecord.year == year)
+    rows = db.scalars(q.order_by(models.KycRecord.id.desc()).offset(max(0, offset)).limit(max(1, min(limit, 200)))).all()
+    counts = dict(
+        db.execute(
+            select(models.KycRecord.status, func.count()).where(
+                models.KycRecord.year == (year or date.today().year)
+            ).group_by(models.KycRecord.status)
+        ).all()
+    )
+    fees = db.scalar(
+        select(func.count()).select_from(models.KycRecord).where(
+            models.KycRecord.year == (year or date.today().year), models.KycRecord.fee_paid.is_(True)
+        )
+    ) or 0
+    return {
+        "year": year or date.today().year,
+        "counts": {**counts, "fee_paid": fees},
+        "items": [
+            {
+                "user_id": r.user_id, "year": r.year, "fee_paid": r.fee_paid, "fee_payment_id": r.fee_payment_id,
+                "attempts": r.attempts, "max_attempts": r.MAX_ATTEMPTS_PER_YEAR, "status": r.status,
+                "provider_reference": r.provider_reference,
+            }
+            for r in rows
+        ],
+    }
 
 
 # --- escrow ----------------------------------------------------------------

@@ -205,11 +205,22 @@ export default function ProfileCard() {
           {(user?.role === 'admin' || user?.role === 'superadmin') && (
             <li>
               <Link
-                to="/admin/wallets"
+                to="/admin"
+                className={cn('flex w-full items-center gap-2 rounded-full px-3 py-1.5 text-xs font-semibold', tok.mid, tok.hoverBg)}
+              >
+                <LayoutGrid size={12} className="text-gold" aria-hidden="true" />
+                Admin dashboard
+              </Link>
+            </li>
+          )}
+          {(user?.role === 'admin' || user?.role === 'superadmin') && (
+            <li>
+              <Link
+                to="/admin/payouts"
                 className={cn('flex w-full items-center gap-2 rounded-full px-3 py-1.5 text-xs font-semibold', tok.mid, tok.hoverBg)}
               >
                 <Wallet size={12} className="text-gold" aria-hidden="true" />
-                Payout wallets
+                Payouts
               </Link>
             </li>
           )}

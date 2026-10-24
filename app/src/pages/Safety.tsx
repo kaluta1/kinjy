@@ -56,9 +56,6 @@ export default function Safety() {
           <Link to="/app" className={KL_BTN_GOLD}>
             See account controls in the app <ArrowRight size={17} aria-hidden="true" />
           </Link>
-          <Link to="/admin" className={KL_BTN_GHOST}>
-            Admin console <ArrowRight size={17} aria-hidden="true" />
-          </Link>
         </div>
       </ClosingStage>
     </PublicShell>

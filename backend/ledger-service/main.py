@@ -398,6 +398,34 @@ def post_referral_pool_entry(payload: PoolEntryIn, db: OrmSession = Depends(get_
     return _journal_out(journal, db)
 
 
+class PaymentRefundIn(BaseModel):
+    """Part of a payment refunded onto the payer's Kinjy balance."""
+
+    payment_id: str
+    member_id: str
+    amount: Decimal = Field(gt=0)
+    reason: str = ""
+    idempotency_key: str
+
+
+@app.post("/internal/post/payment-refund", tags=["postings"])
+def post_payment_refund(payload: PaymentRefundIn, db: OrmSession = Depends(get_db)):
+    """Mirror a share of the payment's journal (``payment:{id}``), revenue and
+    commissions included, and owe the refunded amount to the payer."""
+    journal = db.scalar(select(models.Journal).where(models.Journal.idempotency_key == f"payment:{payload.payment_id}"))
+    if journal is None:
+        raise HTTPException(status_code=404, detail="No journal for that payment")
+    try:
+        refund = posting.refund_to_balance(
+            db, journal, amount=payload.amount, member_id=payload.member_id, reason=payload.reason,
+            idempotency_key=payload.idempotency_key, created_by="payment-service",
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    db.commit()
+    return _journal_out(refund, db)
+
+
 @app.post("/internal/post/escrow", tags=["postings"])
 def post_escrow(payload: EscrowIn, db: OrmSession = Depends(get_db)):
     """Record custody of buyer money, or its release/refund.

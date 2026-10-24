@@ -19,7 +19,7 @@ from datetime import datetime, timedelta, timezone
 from fastapi import Depends, HTTPException, Request, status
 from fastapi.responses import HTMLResponse, RedirectResponse
 from pydantic import BaseModel, Field
-from sqlalchemy import func, or_, select
+from sqlalchemy import func, or_, select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session as OrmSession
 
@@ -1371,6 +1371,13 @@ def _purchase_out(p: models.ReferralPoolPurchase) -> dict:
     }
 
 
+@app.get("/internal/referral-pool/can-buy/{member_id}", tags=["internal"])
+def referral_pool_can_buy(member_id: str, db: OrmSession = Depends(get_db)):
+    """Asked by payment-service before taking money: the cap counts members."""
+    allowed, why = referral_pool.can_buy(db, member_id)
+    return {"allowed": allowed, "reason": why}
+
+
 @app.post("/internal/referral-pool/purchases", tags=["internal"])
 def credit_referral_pool_purchase(payload: PoolPurchaseIn, db: OrmSession = Depends(get_db)):
     """Credit units for a settled payment. Called by payment-service only.
@@ -1701,6 +1708,91 @@ def admin_pool_retry(member_id: str, admin: AdminUser, db: OrmSession = Depends(
     db.commit()
     log.info("referral pool: %s retried %s -> %s", admin.user_id, member_id, assignment.sponsor_id if assignment else None)
     return {"assigned": assignment is not None, "sponsor_id": assignment.sponsor_id if assignment else None}
+
+
+@app.get("/admin/fraud/signals", tags=["admin"])
+def admin_fraud_signals(_: AdminUser, days: int = 30, db: OrmSession = Depends(get_db)):
+    """Signals worth a human look, computed from what Kinjy actually records.
+
+    Signals, not findings: two people in one household share an address, and
+    a school can register a class in an afternoon. Each list says what was
+    measured so the reviewer can judge it.
+
+    * sponsor_shared_ip - a member and their sponsor signed in from the same
+      address: the shape of a self-referral (one person, two accounts).
+    * signup_bursts - five or more new accounts first seen from one address in
+      24 hours: the shape of a sign-up farm.
+    * age_probing - one identity refused at the age gate several times: the
+      shape of somebody trying dates until one passes.
+
+    Addresses come from sessions, which record the visitor's forwarded address
+    (registration attempts record the gateway's, and are not used for this).
+    """
+    days = max(1, min(days, 90))
+    since = _now() - timedelta(days=days)
+    shared = db.execute(
+        text(
+            f"""
+            SELECT u.id AS member_id, u.handle AS member_handle, u.created_at,
+                   sp.id AS sponsor_id, sp.handle AS sponsor_handle, s1.ip,
+                   EXISTS (SELECT 1 FROM {models.SCHEMA}.pool_assignments pa WHERE pa.new_member_id = u.id) AS via_pool
+              FROM {models.SCHEMA}.users u
+              JOIN {models.SCHEMA}.users sp ON sp.id = u.invited_by
+              JOIN {models.SCHEMA}.sessions s1 ON s1.user_id = u.id AND s1.ip IS NOT NULL
+              JOIN {models.SCHEMA}.sessions s2 ON s2.user_id = sp.id AND s2.ip = s1.ip
+             WHERE u.created_at >= :since
+             GROUP BY u.id, u.handle, u.created_at, sp.id, sp.handle, s1.ip
+             ORDER BY u.created_at DESC
+             LIMIT 200
+            """
+        ),
+        {"since": since},
+    ).mappings().all()
+    bursts = db.execute(
+        text(
+            f"""
+            WITH first_seen AS (
+                SELECT DISTINCT ON (s.user_id) s.user_id, s.ip, u.created_at
+                  FROM {models.SCHEMA}.sessions s JOIN {models.SCHEMA}.users u ON u.id = s.user_id
+                 WHERE u.created_at >= :since AND s.ip IS NOT NULL
+                 ORDER BY s.user_id, s.created_at
+            )
+            SELECT ip, date_trunc('day', created_at) AS day, count(*) AS accounts,
+                   min(created_at) AS first_at, max(created_at) AS last_at
+              FROM first_seen
+             GROUP BY ip, date_trunc('day', created_at)
+            HAVING count(*) >= 5
+             ORDER BY count(*) DESC
+             LIMIT 100
+            """
+        ),
+        {"since": since},
+    ).mappings().all()
+    probing = db.execute(
+        text(
+            f"""
+            SELECT left(subject_hash, 10) AS subject, count(*) AS refusals,
+                   max(jurisdiction) AS jurisdiction, max(created_at) AS last_at,
+                   bool_or(EXISTS (SELECT 1 FROM {models.SCHEMA}.registration_attempts a2
+                                    WHERE a2.subject_hash = a.subject_hash AND a2.outcome = 'allowed')) AS later_allowed
+              FROM {models.SCHEMA}.registration_attempts a
+             WHERE outcome = 'under_minimum' AND created_at >= :since
+             GROUP BY subject_hash
+            HAVING count(*) >= 2
+             ORDER BY count(*) DESC
+             LIMIT 100
+            """
+        ),
+        {"since": since},
+    ).mappings().all()
+    return {
+        "window_days": days,
+        "sponsor_shared_ip": [dict(r) for r in shared],
+        "signup_bursts": [dict(r) for r in bursts],
+        "age_probing": [dict(r) for r in probing],
+        "counts": {"sponsor_shared_ip": len(shared), "signup_bursts": len(bursts), "age_probing": len(probing)},
+        "note": "Signals for review, not findings about anybody.",
+    }
 
 
 # ---------------------------------------------------------------------------

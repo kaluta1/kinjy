@@ -210,6 +210,87 @@ def reverse(db: OrmSession, journal_id: str, *, reason: str, created_by: str | N
     return reversal
 
 
+def refund_to_balance(
+    db: OrmSession,
+    journal: models.Journal,
+    *,
+    amount: Decimal,
+    member_id: str,
+    reason: str,
+    idempotency_key: str,
+    created_by: str | None = None,
+) -> models.Journal:
+    """Refund part (or all) of a payment onto the payer's Kinjy balance.
+
+    Every line of the original journal is mirrored in proportion
+    (``amount / journal.amount``): the revenue, the sponsor's commission and
+    the Leaders share come back by the same fraction, and each clawed-back
+    commission leaves the beneficiary's wallet. The cash line is not mirrored
+    as cash - nothing has left yet - but as a liability to the payer, which
+    they withdraw like any balance. Rounding is absorbed by the revenue line,
+    so the journal always balances to the cent.
+    """
+    existing = find_existing(db, idempotency_key)
+    if existing is not None:
+        return existing
+    original_total = Decimal(journal.amount)
+    amount = Decimal(amount).quantize(Decimal("0.01"))
+    if amount <= 0 or amount > original_total:
+        raise ValueError(f"refund {amount} outside 0..{original_total}")
+    ratio = amount / original_total
+
+    refund = models.Journal(
+        id=new_id("jrn"),
+        kind="refund",
+        reference=journal.reference,
+        description=f"Refund of {amount} of {journal.id}: {reason}"[:500],
+        currency=journal.currency,
+        amount=amount,
+        reverses_journal_id=journal.id,
+        idempotency_key=idempotency_key,
+        created_by=created_by,
+    )
+    db.add(refund)
+    db.flush()
+
+    lines: list[models.Entry] = []
+    for row in db.scalars(select(models.Entry).where(models.Entry.journal_id == journal.id)).all():
+        debit = (Decimal(row.credit or 0) * ratio).quantize(Decimal("0.01"))
+        credit = (Decimal(row.debit or 0) * ratio).quantize(Decimal("0.01"))
+        if row.account == models.ACC_CASH:
+            # Owed back to the payer, not paid out yet.
+            lines.append(models.Entry(
+                id=new_id("led"), journal_id=refund.id, account=models.ACC_MEMBER_PAYABLE,
+                beneficiary_id=member_id, role="refund", debit=Decimal("0"), credit=amount,
+                currency=row.currency, reason="refund_to_balance",
+            ))
+            continue
+        if not debit and not credit:
+            continue
+        lines.append(models.Entry(
+            id=new_id("led"), journal_id=refund.id, account=row.account, beneficiary_id=row.beneficiary_id,
+            role=row.role, debit=debit, credit=credit, currency=row.currency, reason=f"refund:{row.reason}",
+        ))
+        if debit and row.beneficiary_id and row.account == models.ACC_MEMBER_PAYABLE:
+            wallet = get_wallet(db, row.beneficiary_id, row.currency)
+            wallet.available -= debit
+            wallet.lifetime_earned -= debit
+
+    gap = sum((e.credit for e in lines), Decimal("0")) - sum((e.debit for e in lines), Decimal("0"))
+    if gap:
+        revenue = next((e for e in lines if e.account.startswith("revenue:") and e.debit), None)
+        if revenue is None:
+            raise ValueError("no revenue line to absorb rounding")
+        revenue.debit += gap
+    for e in lines:
+        db.add(e)
+    payer = get_wallet(db, member_id, journal.currency)
+    payer.available += amount
+    db.flush()
+    assert_balanced(db, refund.id)
+    return refund
+
+
 # ---------------------------------------------------------------------------
 # Custodial escrow
 # ---------------------------------------------------------------------------

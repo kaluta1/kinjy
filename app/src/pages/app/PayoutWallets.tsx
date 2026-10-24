@@ -1,6 +1,5 @@
 import { useState } from 'react'
 import { Check, ShieldCheck, X } from 'lucide-react'
-import AppShell from '@/components/app/AppShell'
 import { useApi } from '@/hooks/useApi'
 import { useAuth } from '@/hooks/useAuth'
 import { ApiError, kaluta, type PayoutWalletStatus } from '@/lib/api'
@@ -58,17 +57,7 @@ export default function PayoutWallets() {
   const forbidden = wallets.error && /403|access required|forbidden/i.test(wallets.error)
 
   return (
-    <AppShell>
-      <header className="mb-6">
-        <h1 className="text-[clamp(32px,4.5vw,48px)] font-bold leading-[1.05] tracking-[-0.04em] text-text-hi">
-          Payout wallets
-        </h1>
-        <p className="mt-2 max-w-2xl text-[0.95rem] leading-relaxed text-text-low">
-          Wallets members want their commissions paid to, in USDT on BSC. Each one was confirmed from the member’s
-          e-mail before it reached you. Check the address and the account, then approve or refuse.
-        </p>
-      </header>
-
+    <>
       {forbidden ? (
         <p role="alert" className="rounded-2xl bg-warning/10 px-5 py-4 text-sm text-text-hi">
           This page is for Kinjy admins. Your account does not have access.
@@ -182,6 +171,6 @@ export default function PayoutWallets() {
           </ul>
         </div>
       )}
-    </AppShell>
+    </>
   )
 }

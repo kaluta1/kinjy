@@ -1435,27 +1435,36 @@ Dashboard → Short links tab at 375 px and 1280 px, light and dark). What is *n
 - The share buttons on posts, communities and group chats keep their own
   "credit me" box (on by default, as before); only the new tool starts neutral.
 
-## Referral pool units — 2026-10-24, not deployed yet
+## Referral pool units — 2026-10-24 (deployed 13:45; rules of 24/10 afternoon not yet)
 
-Units, rounds (weighted rotation without replacement), purchases, refunds,
-migration, member panel on /earn and admin page /admin/referral-pool.
-Verified locally: `backend/tests/e2e_pool_units.py` 71/71. Open business points:
+Units, rounds (weighted rotation without replacement), purchases, migration,
+member panel on /earn, service page on the market, admin section.
+Decisions taken by the user on 24/10 and built (`e2e_pool_rules.py`):
+the cap counts **members**; a refund is **automatic** (units off, ledger
+mirrored pro rata, amount owed on the buyer's Kinjy balance); accounts that
+are not active are **excluded automatically**. Still open:
 
-- **The cap counts units** (10,000 units = what 10,000 one-unit seats were).
-  If it should count members instead, `units_sold` in referral_pool.py changes.
-- **Refunds move units, not money.** Units come off in auth-service; the rail
-  refund and the ledger reversal are separate steps. The ledger can only
-  reverse a whole journal, so a *partial* refund of a multi-unit payment has
-  no automatic revenue/commission reversal.
-- **No rail notifies refunds yet.** `/internal/referral-pool/purchases/{payment}/reverse`
-  is ready (idempotent on `reference`); nothing calls it except the admin page.
-- **Eligibility is the seat status only**, as before: a deleted or deactivated
-  account with active units still receives referrals until an admin suspends it.
+- **Money cannot go back through the payment rail.** Neither Kaluta Pay nor
+  Sonco Pay has a refund-to-payer API: a refund is credited to the member's
+  Kinjy balance and withdrawn like any balance (USDT, approved wallet).
+- **No rail notifies refunds yet**: an admin records them from the dashboard.
 - **No unit expiry** existed and none was added.
-- **Sign-ups with nobody eligible** keep the existing fallback (no sponsor,
-  commission unclaimed); they are recorded and an admin retry can place them
-  later — commission between the two stays unclaimed.
-- **Registration is serialised per auth worker** (async handler doing blocking
-  work, pre-existing): 24 simultaneous sign-ups locally queue past the
-  gateway's 30 s. Allocation itself is safe under real parallelism (tested
-  with 40 threads on separate sessions).
+- **Sign-ups with nobody eligible** keep the existing fallback (no sponsor);
+  recorded, and an admin retry can place them later.
+- **Registration is serialised per auth worker** (pre-existing): 24
+  simultaneous sign-ups queue past the gateway's 30 s locally.
+
+## Admin dashboard — 2026-10-24, not deployed yet
+
+/admin is now the real dashboard (the demo with invented figures is gone).
+Every section reads live data. Limits of that data:
+
+- **Fraud signals** are three measured patterns (sponsor on the same address,
+  5+ sign-ups from one address a day, repeated age-gate refusals) plus contact
+  risk. Addresses come from sessions; behind a shared NAT or a school they
+  flag innocent people - signals, not findings. Click fraud is not measured:
+  ad clicks are not recorded per device.
+- **AI Watch** stays hidden with the assistant (FEATURES.assistant = false).
+- **System** shows real service health, reconciliation, feature flags and
+  ai-service observability; the demo's eval harness, performance budgets and
+  visual CI had no data source and were dropped, not faked.

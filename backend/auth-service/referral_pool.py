@@ -40,9 +40,10 @@ During a round
   round in which somebody was refunded or suspended is fair to everybody
   else, but not "complete" for the member who left it.
 
-The pool's boundary (``REFERRAL_POOL_CAP``) counts units sold, as it counted
-seats when one seat was one $100 entry: the pool closes to new purchases at
-that number, and units already held keep working.
+The pool's boundary (``REFERRAL_POOL_CAP``) counts **members**: once that
+many members hold a place, nobody new can join, while members already in can
+keep buying units. Only members whose **account is active** take part - a
+deleted or deactivated account leaves the round at once and keeps its units.
 
 Integrity
 ---------
@@ -123,6 +124,20 @@ def units_sold(db: OrmSession) -> int:
         )
         or 0
     )
+
+
+def members_count(db: OrmSession) -> int:
+    return int(db.scalar(select(func.count()).select_from(models.ReferralPoolSeat)) or 0)
+
+
+def can_buy(db: OrmSession, member_id: str) -> tuple[bool, str | None]:
+    """Whether this member may buy units now: always if they already have a
+    place, otherwise only while the pool has room for another member."""
+    if db.scalar(select(models.ReferralPoolSeat.id).where(models.ReferralPoolSeat.member_id == member_id)):
+        return True, None
+    if members_count(db) >= settings.REFERRAL_POOL_CAP:
+        return False, f"The referral pool is full ({settings.REFERRAL_POOL_CAP:,} members) and closed to new members."
+    return True, None
 
 
 def active_units(db: OrmSession, member_id: str | None = None) -> int:
@@ -218,6 +233,7 @@ def state(db: OrmSession, member_id: str | None = None) -> dict:
     """Everything the pool screen needs."""
     sold = units_sold(db)
     cap = settings.REFERRAL_POOL_CAP
+    members = members_count(db)
     current = open_round(db)
     live = active_units(db)
     mine = None
@@ -238,14 +254,17 @@ def state(db: OrmSession, member_id: str | None = None) -> dict:
         "unit_price": str(unit_price()),
         "currency": "USD",
         "max_units_per_purchase": max_units_per_purchase(),
+        # The cap counts members; units per member are not capped.
         "cap": cap,
-        # Kept under their old names for the pages that read them: a "seat"
-        # was one $100 entry, which is what a unit is.
-        "seats_taken": sold,
-        "seats_left": max(cap - sold, 0),
+        "cap_counts": "members",
+        "members": members,
+        "members_left": max(cap - members, 0),
+        "seats_taken": members,
+        "seats_left": max(cap - members, 0),
         "units_sold": sold,
-        "units_left": max(cap - sold, 0),
-        "open": sold < cap,
+        # Open to new members; members already in can always buy more.
+        "open": members < cap,
+        "can_buy": mine is not None or members < cap,
         "active_seats": live,
         "active_units": live,
         "current_round": None
@@ -319,8 +338,9 @@ def credit_purchase(
             raise PoolError("mismatch", "This payment was already credited differently")
         return existing, False
 
-    if units_sold(db) + units > settings.REFERRAL_POOL_CAP:
-        raise PoolError("pool_full", "The referral pool is full")
+    allowed, why = can_buy(db, member_id)
+    if not allowed:
+        raise PoolError("pool_full", why or "The referral pool is full")
 
     seat = _seat_for(db, member_id)
     if seat.price_paid in (None, "", "0"):
@@ -448,8 +468,9 @@ def _start_round(db: OrmSession) -> models.ReferralPoolRound | None:
             SELECT p.member_id, s.id AS seat_id, SUM(p.units - p.units_reversed) AS units
               FROM {SCHEMA}.referral_pool_purchases p
               JOIN {SCHEMA}.referral_pool_seats s ON s.member_id = p.member_id
+              JOIN {SCHEMA}.users u ON u.id = p.member_id
              WHERE p.pool_id = :pool AND p.status IN ('credited', 'partially_reversed')
-               AND p.active_from_round <= :number AND s.status = 'active'
+               AND p.active_from_round <= :number AND s.status = 'active' AND u.status = 'active'
              GROUP BY p.member_id, s.id
             HAVING SUM(p.units - p.units_reversed) > 0
             """
@@ -480,8 +501,9 @@ _CANDIDATES = f"""
     SELECT q.member_id, q.quota_total - q.assigned AS rem
       FROM {SCHEMA}.referral_pool_quotas q
       JOIN {SCHEMA}.referral_pool_seats s ON s.member_id = q.member_id
+      JOIN {SCHEMA}.users u ON u.id = q.member_id
      WHERE q.round_id = :round AND q.excluded_at IS NULL AND q.quota_total > q.assigned
-       AND s.status = 'active' AND q.member_id <> :new_member
+       AND s.status = 'active' AND u.status = 'active' AND q.member_id <> :new_member
 """
 
 
@@ -510,7 +532,19 @@ def _draw(db: OrmSession, rnd: models.ReferralPoolRound, new_member_id: str) -> 
 
 
 def _exclude_ineligible(db: OrmSession, rnd: models.ReferralPoolRound) -> None:
-    """Quota left on seats that are no longer active is taken away for good."""
+    """Quota left on seats or accounts that are no longer active is taken away for good."""
+    db.execute(
+        text(
+            f"""
+            UPDATE {SCHEMA}.referral_pool_quotas q
+               SET quota_total = q.assigned, excluded_at = now(), excluded_reason = 'account_' || u.status
+              FROM {SCHEMA}.users u
+             WHERE q.round_id = :round AND u.id = q.member_id AND u.status <> 'active'
+               AND q.excluded_at IS NULL
+            """
+        ),
+        {"round": rnd.id},
+    )
     db.execute(
         text(
             f"""

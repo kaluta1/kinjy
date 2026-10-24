@@ -1,6 +1,5 @@
 import { useState, type ReactNode } from 'react'
 import { RotateCcw } from 'lucide-react'
-import AppShell from '@/components/app/AppShell'
 import { Badge, Panel, PanelState, Stat } from '@/components/dashboard/primitives'
 import { useApi } from '@/hooks/useApi'
 import { ApiError, kaluta, type PoolPurchase, type PoolRound } from '@/lib/api'
@@ -26,7 +25,7 @@ const INPUT =
   'rounded-full border border-[var(--cloud-border)] bg-transparent px-3 py-1.5 text-sm text-text-hi focus:border-gold/50 focus:outline-none'
 
 /**
- * Admin: the referral pool.
+ * Admin dashboard section: the referral pool.
  *
  * Purchases and the units they carry, every member's weight and share of the
  * round being dealt, the rounds themselves, who was sent to whom, the unit
@@ -40,17 +39,7 @@ export default function PoolAdmin() {
   const forbidden = overview.error && /403|access required|forbidden/i.test(overview.error)
 
   return (
-    <AppShell>
-      <header className="mb-6">
-        <h1 className="text-[clamp(32px,4.5vw,48px)] font-bold leading-[1.05] tracking-[-0.04em] text-text-hi">
-          Referral pool
-        </h1>
-        <p className="mt-2 max-w-2xl text-[0.95rem] leading-relaxed text-text-low">
-          Units, rounds and assignments. Sign-ups without a valid invitation are dealt in rounds: each member receives
-          as many as they held units when the round began, in a random order.
-        </p>
-      </header>
-
+    <>
       {forbidden ? (
         <p role="alert" className="rounded-2xl bg-warning/10 px-5 py-4 text-sm text-text-hi">
           This page is for Kinjy admins. Your account does not have access.
@@ -92,7 +81,7 @@ export default function PoolAdmin() {
           {tab === 'unassigned' && <Unassigned onChanged={overview.reload} />}
         </>
       )}
-    </AppShell>
+    </>
   )
 }
 
@@ -118,9 +107,9 @@ function Overview({ state }: { state: ReturnType<typeof useApi<Awaited<ReturnTyp
           <Panel title="The pool">
             <div className="grid grid-cols-2 gap-6">
               <Stat label="Unit price" value={usd(d.unit_price)} tone="gold" />
-              <Stat label="Members" value={d.members.toLocaleString()} />
+              <Stat label="Units sold" value={d.units_sold.toLocaleString()} />
               <Stat label="Active units" value={d.active_units.toLocaleString()} />
-              <Stat label="Units sold / cap" value={`${d.units_sold.toLocaleString()} / ${d.cap.toLocaleString()}`} tone="muted" />
+              <Stat label="Members / cap" value={`${d.members.toLocaleString()} / ${d.cap.toLocaleString()}`} tone="muted" />
             </div>
           </Panel>
           <Panel title="Round in progress" subtitle={d.rotation_note}>
@@ -267,6 +256,9 @@ function PurchaseRow({ p, onDone, onError }: { p: PoolPurchase; onDone: (t: stri
   const [kind, setKind] = useState<'refund' | 'reversal'>('refund')
   const [reason, setReason] = useState('')
   const [busy, setBusy] = useState(false)
+  // One id per refund form: a retry of the same refund finishes it, never doubles it.
+  const [requestId, setRequestId] = useState(() => crypto.randomUUID())
+  const paid = p.payment_ref.startsWith('pmt_')
 
   const run = async (fn: () => Promise<unknown>, text: string) => {
     setBusy(true)
@@ -274,6 +266,7 @@ function PurchaseRow({ p, onDone, onError }: { p: PoolPurchase; onDone: (t: stri
       await fn()
       setOpen(null)
       setReason('')
+      setRequestId(crypto.randomUUID())
       onDone(text)
     } catch (err) {
       onError(err instanceof ApiError ? err.message : 'That did not work')
@@ -334,11 +327,22 @@ function PurchaseRow({ p, onDone, onError }: { p: PoolPurchase; onDone: (t: stri
             disabled={busy || reason.trim().length < 3}
             className="rounded-full bg-red-500/80 px-3.5 py-1.5 text-xs font-bold text-white disabled:opacity-40"
             onClick={() =>
-              run(() => kaluta.poolAdmin.reverse(p.id, units, kind, reason.trim()), `${units} unit(s) taken off. Unused quota this round goes with them.`)
+              paid
+                ? run(
+                    () => kaluta.poolAdmin.refundPayment(p.payment_ref, units, kind, reason.trim(), requestId),
+                    `${units} unit(s) refunded: ${usd(Number(p.unit_price) * units)} owed on the member's Kinjy balance, commissions reversed in proportion.`,
+                  )
+                : run(() => kaluta.poolAdmin.reverse(p.id, units, kind, reason.trim()), `${units} unit(s) taken off (no Kinjy payment to refund).`)
             }
           >
-            Take off {units} unit(s)
+            {paid ? `Refund ${units} unit(s) — ${usd(Number(p.unit_price) * units)}` : `Take off ${units} unit(s)`}
           </button>
+          {paid && (
+            <p className="caption w-full">
+              Units off, revenue and commissions reversed in proportion, the amount credited to the member's balance
+              (withdrawable). Neither payment provider can send money back to the payer directly.
+            </p>
+          )}
         </div>
       )}
       {open === 'review' && (
