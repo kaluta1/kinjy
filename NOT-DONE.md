@@ -1434,3 +1434,28 @@ Dashboard → Short links tab at 375 px and 1280 px, light and dark). What is *n
   posts/articles and communities get their own title, text and picture.
 - The share buttons on posts, communities and group chats keep their own
   "credit me" box (on by default, as before); only the new tool starts neutral.
+
+## Referral pool units — 2026-10-24, not deployed yet
+
+Units, rounds (weighted rotation without replacement), purchases, refunds,
+migration, member panel on /earn and admin page /admin/referral-pool.
+Verified locally: `backend/tests/e2e_pool_units.py` 71/71. Open business points:
+
+- **The cap counts units** (10,000 units = what 10,000 one-unit seats were).
+  If it should count members instead, `units_sold` in referral_pool.py changes.
+- **Refunds move units, not money.** Units come off in auth-service; the rail
+  refund and the ledger reversal are separate steps. The ledger can only
+  reverse a whole journal, so a *partial* refund of a multi-unit payment has
+  no automatic revenue/commission reversal.
+- **No rail notifies refunds yet.** `/internal/referral-pool/purchases/{payment}/reverse`
+  is ready (idempotent on `reference`); nothing calls it except the admin page.
+- **Eligibility is the seat status only**, as before: a deleted or deactivated
+  account with active units still receives referrals until an admin suspends it.
+- **No unit expiry** existed and none was added.
+- **Sign-ups with nobody eligible** keep the existing fallback (no sponsor,
+  commission unclaimed); they are recorded and an admin retry can place them
+  later — commission between the two stays unclaimed.
+- **Registration is serialised per auth worker** (async handler doing blocking
+  work, pre-existing): 24 simultaneous sign-ups locally queue past the
+  gateway's 30 s. Allocation itself is safe under real parallelism (tested
+  with 40 threads on separate sessions).

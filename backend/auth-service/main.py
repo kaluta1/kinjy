@@ -53,6 +53,54 @@ MIGRATIONS = [
     f"CREATE UNIQUE INDEX IF NOT EXISTS uq_share_link_active ON {models.SCHEMA}.share_links "
     "(member_id, destination, with_invitation) WHERE disabled_at IS NULL",
     f"CREATE INDEX IF NOT EXISTS ix_share_links_member_created ON {models.SCHEMA}.share_links (member_id, created_at)",
+    # Referral pool units and rounds. The new tables come from create_all; the
+    # assignment audit gains its round columns (null on older rows, which are
+    # kept as they were).
+    f"ALTER TABLE {models.SCHEMA}.pool_assignments ADD COLUMN IF NOT EXISTS pool_id VARCHAR(20)",
+    f"ALTER TABLE {models.SCHEMA}.pool_assignments ADD COLUMN IF NOT EXISTS round_id VARCHAR(40)",
+    f"ALTER TABLE {models.SCHEMA}.pool_assignments ADD COLUMN IF NOT EXISTS round_number INTEGER",
+    f"ALTER TABLE {models.SCHEMA}.pool_assignments ADD COLUMN IF NOT EXISTS quota_total INTEGER",
+    f"ALTER TABLE {models.SCHEMA}.pool_assignments ADD COLUMN IF NOT EXISTS quota_remaining_before INTEGER",
+    f"CREATE INDEX IF NOT EXISTS ix_auth_pool_assignments_round_id ON {models.SCHEMA}.pool_assignments (round_id)",
+    # Seats bought before units: one confirmed $100 entry is one unit. A seat
+    # with no payment reference, another price or another currency cannot be
+    # matched to a confirmed entry: it is migrated under review (counting for
+    # nothing) for an administrator to settle. A refunded seat becomes a
+    # reversed unit. Runs once per seat (the payment_ref is unique).
+    rf"""INSERT INTO {models.SCHEMA}.referral_pool_purchases
+          (id, pool_id, member_id, seat_id, payment_ref, units, units_reversed, unit_price, amount, currency,
+           status, source, active_from_round, review_note, created_at)
+        SELECT 'rpp_mig_' || s.id, 'main', s.member_id, s.id, COALESCE(s.payment_ref, 'migration:' || s.id),
+               1, CASE WHEN s.status = 'refunded' THEN 1 ELSE 0 END, {settings.REFERRAL_POOL_ENTRY_USD},
+               CASE WHEN s.price_paid ~ '^[0-9]+(\.[0-9]+)?$' THEN s.price_paid::numeric ELSE 0 END, s.currency,
+               CASE WHEN s.payment_ref IS NULL OR s.currency <> 'USD' OR s.price_paid !~ '^[0-9]+(\.[0-9]+)?$'
+                         OR s.price_paid::numeric <> {settings.REFERRAL_POOL_ENTRY_USD} THEN 'review'
+                    WHEN s.status = 'refunded' THEN 'reversed'
+                    ELSE 'credited' END,
+               'migration', 1,
+               CASE WHEN s.payment_ref IS NULL THEN 'migrated seat with no payment reference'
+                    WHEN s.currency <> 'USD' OR s.price_paid !~ '^[0-9]+(\.[0-9]+)?$'
+                         OR s.price_paid::numeric <> {settings.REFERRAL_POOL_ENTRY_USD}
+                    THEN 'migrated seat paid ' || s.price_paid || ' ' || s.currency
+                    ELSE NULL END,
+               s.created_at
+          FROM {models.SCHEMA}.referral_pool_seats s
+         WHERE NOT EXISTS (SELECT 1 FROM {models.SCHEMA}.referral_pool_purchases p WHERE p.seat_id = s.id)""",
+    f"""INSERT INTO {models.SCHEMA}.referral_pool_unit_ledger
+          (pool_id, member_id, purchase_id, delta, kind, reason, actor, reference, created_at)
+        SELECT p.pool_id, p.member_id, p.id, CASE WHEN p.status = 'review' THEN 0 ELSE p.units END, 'migration',
+               COALESCE(p.review_note, 'one confirmed seat = one unit'), 'migration', 'migration:' || p.id,
+               p.created_at
+          FROM {models.SCHEMA}.referral_pool_purchases p
+         WHERE p.source = 'migration'
+           AND NOT EXISTS (SELECT 1 FROM {models.SCHEMA}.referral_pool_unit_ledger l WHERE l.reference = 'migration:' || p.id)""",
+    f"""INSERT INTO {models.SCHEMA}.referral_pool_unit_ledger
+          (pool_id, member_id, purchase_id, delta, kind, reason, actor, reference, created_at)
+        SELECT p.pool_id, p.member_id, p.id, -1, 'refund', 'seat refunded before units', 'migration',
+               'migration-refund:' || p.id, p.created_at
+          FROM {models.SCHEMA}.referral_pool_purchases p
+         WHERE p.source = 'migration' AND p.status = 'reversed'
+           AND NOT EXISTS (SELECT 1 FROM {models.SCHEMA}.referral_pool_unit_ledger l WHERE l.reference = 'migration-refund:' || p.id)""",
 ]
 
 app = create_app(
@@ -218,11 +266,14 @@ async def register(payload: schemas.RegisterIn, request: Request, db: OrmSession
         db, subject, "allowed", jurisdiction=payload.country, ip=client_ip,
     )
 
+    # The pool only after invitation attribution has found nobody: a valid
+    # personal invitation always wins, and an established sponsor is never
+    # replaced (this is the account's first and only attribution).
     if inviter_id is None:
-        seat = referral_pool.draw_seat(db, user.id)
-        if seat is not None:
-            user.invited_by = seat.member_id
-            inviter_id = seat.member_id
+        assignment = referral_pool.allocate(db, user.id)
+        if assignment is not None:
+            user.invited_by = assignment.sponsor_id
+            inviter_id = assignment.sponsor_id
 
     # No device label: the member's *name* is not a device name, and passing it
     # here made the device manager list "Demo K." instead of the browser.
@@ -1234,7 +1285,7 @@ async def delete_account(
 
 @app.get("/auth/referral-pool", tags=["referral-pool"])
 def referral_pool_state(principal: MaybeUser, db: OrmSession = Depends(get_db)):
-    """Seats sold, seats left, and this member's own seat if they hold one.
+    """Unit price, units sold, the round in progress, and this member's units.
 
     Readable signed out so the programme page can show the real counter rather
     than a number baked into the page.
@@ -1268,6 +1319,7 @@ def referral_pool_assignments(
                 if r.new_member_id in members
                 else None,
                 "seats_in_draw": r.seats_in_draw,
+                "round_number": r.round_number,
                 "assigned_at": r.created_at,
             }
             for r in rows
@@ -1275,46 +1327,380 @@ def referral_pool_assignments(
     }
 
 
-@app.post("/internal/referral-pool/seats", tags=["internal"])
-def grant_referral_pool_seat(payload: schemas.PoolSeatIn, db: OrmSession = Depends(get_db)):
-    """Seat a member whose entry payment has settled.
+class PoolPurchaseIn(BaseModel):
+    """A settled payment for pool units, handed over by payment-service."""
 
-    Called by payment-service, never by the client: the seat follows the money.
-    """
-    if db.get(models.User, payload.member_id) is None:
-        raise HTTPException(status_code=404, detail="User not found")
+    member_id: str
+    payment_ref: str = Field(min_length=1, max_length=80)
+    units: int
+    amount: str
+    currency: str = "USD"
 
-    seat, error = referral_pool.grant_seat(
-        db,
-        payload.member_id,
-        price_paid=payload.amount,
-        payment_ref=payload.payment_ref,
-        currency=payload.currency,
-    )
-    if error == "pool_full":
-        db.rollback()
-        raise HTTPException(status_code=409, detail="The referral pool is full")
-    db.commit()
+
+class PoolReverseIn(BaseModel):
+    units: int = Field(ge=1)
+    kind: str = Field(pattern="^(refund|reversal)$")
+    reason: str = Field(default="", max_length=300)
+    # The rail's own id for the refund, so the same notification moves units once.
+    reference: str | None = Field(default=None, max_length=80)
+
+
+_POOL_ERRORS = {"pool_full": 409, "mismatch": 409, "too_many": 409}
+
+
+def _pool_error(exc: referral_pool.PoolError) -> HTTPException:
+    return HTTPException(status_code=_POOL_ERRORS.get(exc.code, 400), detail=str(exc))
+
+
+def _purchase_out(p: models.ReferralPoolPurchase) -> dict:
     return {
-        "seat_id": seat.id,
-        "seat_number": seat.seat_number,
-        "status": seat.status,
-        "already_seated": error == "already_seated",
+        "id": p.id,
+        "member_id": p.member_id,
+        "payment_ref": p.payment_ref,
+        "units": p.units,
+        "units_reversed": p.units_reversed,
+        "active_units": p.active_units,
+        "unit_price": str(p.unit_price),
+        "amount": str(p.amount),
+        "currency": p.currency,
+        "status": p.status,
+        "source": p.source,
+        "active_from_round": p.active_from_round,
+        "review_note": p.review_note,
+        "created_at": p.created_at,
     }
 
 
+@app.post("/internal/referral-pool/purchases", tags=["internal"])
+def credit_referral_pool_purchase(payload: PoolPurchaseIn, db: OrmSession = Depends(get_db)):
+    """Credit units for a settled payment. Called by payment-service only.
+
+    Idempotent: the same payment twice credits once (``created`` false).
+    """
+    if db.get(models.User, payload.member_id) is None:
+        raise HTTPException(status_code=404, detail="User not found")
+    try:
+        purchase, created = referral_pool.credit_purchase(
+            db, payload.member_id, payment_ref=payload.payment_ref, units=payload.units,
+            amount=payload.amount, currency=payload.currency,
+        )
+    except referral_pool.PoolError as exc:
+        db.rollback()
+        raise _pool_error(exc)
+    db.commit()
+    return {**_purchase_out(purchase), "created": created}
+
+
+@app.post("/internal/referral-pool/seats", tags=["internal"])
+def grant_referral_pool_seat(payload: schemas.PoolSeatIn, db: OrmSession = Depends(get_db)):
+    """The pre-units call (one $100 seat): one unit. Kept so a payment-service
+    still running the old code during a deploy credits correctly."""
+    if not payload.payment_ref:
+        raise HTTPException(status_code=400, detail="A payment reference is required")
+    result = credit_referral_pool_purchase(
+        PoolPurchaseIn(member_id=payload.member_id, payment_ref=payload.payment_ref, units=1,
+                       amount=payload.amount, currency=payload.currency),
+        db,
+    )
+    return {**result, "already_seated": not result["created"]}
+
+
+@app.post("/internal/referral-pool/purchases/{payment_ref}/reverse", tags=["internal"])
+def reverse_referral_pool_purchase(payment_ref: str, payload: PoolReverseIn, db: OrmSession = Depends(get_db)):
+    """A rail reported a refund or a reversal of a pool payment."""
+    purchase = db.scalar(
+        select(models.ReferralPoolPurchase).where(models.ReferralPoolPurchase.payment_ref == payment_ref)
+    )
+    if purchase is None:
+        raise HTTPException(status_code=404, detail="No pool purchase for that payment")
+    try:
+        entry, created = referral_pool.reverse_units(
+            db, purchase, units=payload.units, kind=payload.kind, reason=payload.reason or payload.kind,
+            actor="payment-service", reference=payload.reference,
+        )
+    except referral_pool.PoolError as exc:
+        db.rollback()
+        raise _pool_error(exc)
+    db.commit()
+    return {**_purchase_out(purchase), "reversal_created": created}
+
+
 @app.post("/admin/referral-pool/seats/{seat_id}/status", tags=["admin"])
-def set_seat_status(seat_id: str, status: str, _: AdminUser, db: OrmSession = Depends(get_db)):
-    """Suspend or restore a seat. A suspended seat stops receiving assignments
-    but keeps its history — fraud review needs the record, not a deletion."""
+def set_seat_status(seat_id: str, status: str, admin: AdminUser, db: OrmSession = Depends(get_db)):
+    """Suspend or restore a member's place in the pool. A suspended member
+    stops receiving assignments at once - the unused part of their current
+    round goes - but keeps their history: fraud review needs the record."""
     if status not in ("active", "suspended", "refunded"):
         raise HTTPException(status_code=400, detail="status must be active, suspended or refunded")
     seat = db.get(models.ReferralPoolSeat, seat_id)
     if seat is None:
         raise HTTPException(status_code=404, detail="Seat not found")
     seat.status = status
+    if status != "active":
+        referral_pool.exclude_member(db, seat.member_id, f"seat_{status}")
     db.commit()
+    log.info("referral pool: %s set seat %s to %s", admin.user_id, seat.id, status)
     return {"seat_id": seat.id, "status": seat.status}
+
+
+@app.get("/admin/referral-pool/overview", tags=["admin"])
+def admin_pool_overview(_: AdminUser, db: OrmSession = Depends(get_db)):
+    """The pool at a glance, and what needs a decision."""
+    base = referral_pool.state(db)
+    review = db.scalar(
+        select(func.count()).select_from(models.ReferralPoolPurchase).where(models.ReferralPoolPurchase.status == "review")
+    ) or 0
+    unassigned = db.scalar(
+        select(func.count()).select_from(models.ReferralPoolUnassigned).where(
+            models.ReferralPoolUnassigned.resolved_at.is_(None)
+        )
+    ) or 0
+    members = db.scalar(select(func.count()).select_from(models.ReferralPoolSeat)) or 0
+    return {**base, "members": members, "purchases_under_review": review, "unassigned_open": unassigned}
+
+
+@app.get("/admin/referral-pool/members", tags=["admin"])
+def admin_pool_members(_: AdminUser, limit: int = 100, offset: int = 0, db: OrmSession = Depends(get_db)):
+    """Every pool member: units, current round share, referrals received."""
+    limit = max(1, min(limit, 200))
+    current = referral_pool.open_round(db)
+    seats = db.scalars(
+        select(models.ReferralPoolSeat).order_by(models.ReferralPoolSeat.seat_number).offset(max(0, offset)).limit(limit)
+    ).all()
+    ids = [s.member_id for s in seats] or [""]
+    users = {u.id: u for u in db.scalars(select(models.User).where(models.User.id.in_(ids))).all()}
+    quotas = {}
+    if current is not None:
+        quotas = {
+            q.member_id: q
+            for q in db.scalars(
+                select(models.ReferralPoolQuota).where(
+                    models.ReferralPoolQuota.round_id == current.id, models.ReferralPoolQuota.member_id.in_(ids)
+                )
+            ).all()
+        }
+    items = []
+    for seat in seats:
+        quota = quotas.get(seat.member_id)
+        units = referral_pool.member_units(db, seat.member_id)
+        user = users.get(seat.member_id)
+        items.append({
+            "seat_id": seat.id,
+            "seat_number": seat.seat_number,
+            "member_id": seat.member_id,
+            "handle": user.handle if user else None,
+            "display_name": user.display_name if user else None,
+            "status": seat.status,
+            **units,
+            "round_quota_total": quota.quota_total if quota else 0,
+            "round_assigned": quota.assigned if quota else 0,
+            "round_excluded_reason": quota.excluded_reason if quota else None,
+        })
+    total = db.scalar(select(func.count()).select_from(models.ReferralPoolSeat)) or 0
+    return {"items": items, "total": total}
+
+
+@app.get("/admin/referral-pool/purchases", tags=["admin"])
+def admin_pool_purchases(
+    _: AdminUser, status: str | None = None, member_id: str | None = None,
+    limit: int = 100, offset: int = 0, db: OrmSession = Depends(get_db),
+):
+    q = select(models.ReferralPoolPurchase)
+    if status:
+        q = q.where(models.ReferralPoolPurchase.status == status)
+    if member_id:
+        q = q.where(models.ReferralPoolPurchase.member_id == member_id)
+    rows = db.scalars(
+        q.order_by(models.ReferralPoolPurchase.created_at.desc()).offset(max(0, offset)).limit(max(1, min(limit, 200)))
+    ).all()
+    return {"items": [_purchase_out(p) for p in rows]}
+
+
+class PoolAdminReverseIn(BaseModel):
+    units: int = Field(ge=1)
+    kind: str = Field(pattern="^(refund|reversal)$")
+    reason: str = Field(min_length=3, max_length=300)
+
+
+@app.post("/admin/referral-pool/purchases/{purchase_id}/reverse", tags=["admin"])
+def admin_reverse_purchase(
+    purchase_id: str, payload: PoolAdminReverseIn, admin: AdminUser, db: OrmSession = Depends(get_db)
+):
+    """Record a refund or a payment reversal against one purchase's units.
+
+    Units only: the money itself is refunded on the rail, and the revenue
+    journal reversed in the ledger, as for any other payment.
+    """
+    purchase = db.get(models.ReferralPoolPurchase, purchase_id)
+    if purchase is None:
+        raise HTTPException(status_code=404, detail="Purchase not found")
+    try:
+        referral_pool.reverse_units(
+            db, purchase, units=payload.units, kind=payload.kind, reason=payload.reason, actor=admin.user_id
+        )
+    except referral_pool.PoolError as exc:
+        db.rollback()
+        raise _pool_error(exc)
+    db.commit()
+    log.info("referral pool: %s reversed %s units of %s (%s)", admin.user_id, payload.units, purchase.id, payload.kind)
+    return _purchase_out(purchase)
+
+
+class PoolReviewIn(BaseModel):
+    decision: str = Field(pattern="^(approve|reject)$")
+    note: str = Field(min_length=3, max_length=300)
+
+
+@app.post("/admin/referral-pool/purchases/{purchase_id}/review", tags=["admin"])
+def admin_review_purchase(purchase_id: str, payload: PoolReviewIn, admin: AdminUser, db: OrmSession = Depends(get_db)):
+    """Settle a migrated record that could not be matched to one confirmed $100
+    entry. Approved units join at the next round boundary."""
+    referral_pool._lock(db)
+    purchase = db.get(models.ReferralPoolPurchase, purchase_id, with_for_update=True)
+    if purchase is None:
+        raise HTTPException(status_code=404, detail="Purchase not found")
+    if purchase.status != "review":
+        raise HTTPException(status_code=409, detail="This purchase is not waiting for review")
+    current = referral_pool.open_round(db)
+    if payload.decision == "approve":
+        purchase.status = "credited"
+        purchase.active_from_round = (current.number if current else referral_pool._last_round_number(db)) + 1
+        delta = purchase.units
+    else:
+        purchase.status = "rejected"
+        delta = 0
+    purchase.review_note = f"{payload.decision}: {payload.note}"[:300]
+    db.add(models.ReferralPoolUnitEntry(
+        pool_id=purchase.pool_id, member_id=purchase.member_id, purchase_id=purchase.id, delta=delta,
+        kind="review", reason=purchase.review_note, actor=admin.user_id,
+    ))
+    db.commit()
+    return _purchase_out(purchase)
+
+
+@app.get("/admin/referral-pool/rounds", tags=["admin"])
+def admin_pool_rounds(_: AdminUser, limit: int = 30, db: OrmSession = Depends(get_db)):
+    rows = db.scalars(
+        select(models.ReferralPoolRound).order_by(models.ReferralPoolRound.number.desc()).limit(max(1, min(limit, 200)))
+    ).all()
+    return {
+        "items": [
+            {
+                "id": r.id, "number": r.number, "status": r.status, "members": r.members,
+                "units_snapshot": r.units_snapshot, "assigned": r.assigned,
+                "remaining": referral_pool.round_remaining(db, r.id), "started_at": r.started_at,
+                "closed_at": r.closed_at, "close_reason": r.close_reason,
+            }
+            for r in rows
+        ]
+    }
+
+
+@app.get("/admin/referral-pool/rounds/{round_id}/quotas", tags=["admin"])
+def admin_pool_round_quotas(round_id: str, _: AdminUser, db: OrmSession = Depends(get_db)):
+    rows = db.scalars(
+        select(models.ReferralPoolQuota).where(models.ReferralPoolQuota.round_id == round_id)
+        .order_by(models.ReferralPoolQuota.units_snapshot.desc())
+    ).all()
+    users = {u.id: u for u in db.scalars(select(models.User).where(models.User.id.in_([r.member_id for r in rows] or [""]))).all()}
+    return {
+        "items": [
+            {
+                "member_id": q.member_id, "handle": users[q.member_id].handle if q.member_id in users else None,
+                "units_snapshot": q.units_snapshot, "quota_total": q.quota_total, "assigned": q.assigned,
+                "remaining": q.quota_total - q.assigned, "excluded_at": q.excluded_at,
+                "excluded_reason": q.excluded_reason,
+            }
+            for q in rows
+        ]
+    }
+
+
+@app.get("/admin/referral-pool/assignments", tags=["admin"])
+def admin_pool_assignments(
+    _: AdminUser, round_number: int | None = None, limit: int = 100, offset: int = 0,
+    db: OrmSession = Depends(get_db),
+):
+    q = select(models.PoolAssignment)
+    if round_number is not None:
+        q = q.where(models.PoolAssignment.round_number == round_number)
+    rows = db.scalars(
+        q.order_by(models.PoolAssignment.created_at.desc()).offset(max(0, offset)).limit(max(1, min(limit, 200)))
+    ).all()
+    ids = {r.sponsor_id for r in rows} | {r.new_member_id for r in rows}
+    users = {u.id: u for u in db.scalars(select(models.User).where(models.User.id.in_(ids or {""}))).all()}
+    handle = lambda i: users[i].handle if i in users else None  # noqa: E731
+    return {
+        "items": [
+            {
+                "new_member_id": r.new_member_id, "new_member_handle": handle(r.new_member_id),
+                "sponsor_id": r.sponsor_id, "sponsor_handle": handle(r.sponsor_id),
+                "round_number": r.round_number, "quota_total": r.quota_total,
+                "quota_remaining_before": r.quota_remaining_before, "eligible_quota_in_draw": r.seats_in_draw,
+                "assigned_at": r.created_at,
+            }
+            for r in rows
+        ]
+    }
+
+
+@app.get("/admin/referral-pool/ledger", tags=["admin"])
+def admin_pool_ledger(
+    _: AdminUser, member_id: str | None = None, kind: str | None = None, limit: int = 100,
+    db: OrmSession = Depends(get_db),
+):
+    """The unit ledger: purchases, migrations, reviews, refunds and reversals."""
+    q = select(models.ReferralPoolUnitEntry)
+    if member_id:
+        q = q.where(models.ReferralPoolUnitEntry.member_id == member_id)
+    if kind:
+        q = q.where(models.ReferralPoolUnitEntry.kind == kind)
+    rows = db.scalars(q.order_by(models.ReferralPoolUnitEntry.id.desc()).limit(max(1, min(limit, 500)))).all()
+    return {
+        "items": [
+            {
+                "id": e.id, "member_id": e.member_id, "purchase_id": e.purchase_id, "delta": e.delta,
+                "kind": e.kind, "reason": e.reason, "actor": e.actor, "reference": e.reference,
+                "created_at": e.created_at,
+            }
+            for e in rows
+        ]
+    }
+
+
+@app.get("/admin/referral-pool/unassigned", tags=["admin"])
+def admin_pool_unassigned(_: AdminUser, include_resolved: bool = False, db: OrmSession = Depends(get_db)):
+    q = select(models.ReferralPoolUnassigned)
+    if not include_resolved:
+        q = q.where(models.ReferralPoolUnassigned.resolved_at.is_(None))
+    rows = db.scalars(q.order_by(models.ReferralPoolUnassigned.created_at.desc()).limit(200)).all()
+    return {
+        "items": [
+            {
+                "new_member_id": r.new_member_id, "reason": r.reason, "attempts": r.attempts,
+                "created_at": r.created_at, "last_attempt_at": r.last_attempt_at, "resolved_at": r.resolved_at,
+            }
+            for r in rows
+        ]
+    }
+
+
+@app.post("/admin/referral-pool/unassigned/{member_id}/retry", tags=["admin"])
+def admin_pool_retry(member_id: str, admin: AdminUser, db: OrmSession = Depends(get_db)):
+    """Try the pool again for a sign-up it could not place. Never for a member
+    who has a sponsor: an established relationship is not replaced."""
+    user = db.get(models.User, member_id)
+    if user is None:
+        raise HTTPException(status_code=404, detail="User not found")
+    db.refresh(user, with_for_update=True)
+    if user.invited_by:
+        raise HTTPException(status_code=409, detail="This member already has a sponsor")
+    assignment = referral_pool.allocate(db, member_id)
+    if assignment is not None:
+        user.invited_by = assignment.sponsor_id
+    db.commit()
+    log.info("referral pool: %s retried %s -> %s", admin.user_id, member_id, assignment.sponsor_id if assignment else None)
+    return {"assigned": assignment is not None, "sponsor_id": assignment.sponsor_id if assignment else None}
 
 
 # ---------------------------------------------------------------------------

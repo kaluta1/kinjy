@@ -118,11 +118,13 @@ LEADERS_POOL_SIZE = _int("LEADERS_POOL_SIZE", 10000)
 # single advertising dollar never pays commission twice.
 CREATOR_SHARE_PCT = _dec("CREATOR_SHARE_PCT", "40")
 
-# Referral pool: members buy a seat, and sign-ups that arrive with no personal
-# invitation link are assigned to seats at random. The pool closes to new
-# entrants once it is full.
+# Referral pool: members buy units at REFERRAL_POOL_ENTRY_USD each, and
+# sign-ups that arrive with no personal invitation are dealt to members in
+# proportion to their units (auth-service/referral_pool.py). The cap counts
+# units sold; the pool closes to new purchases once it is reached.
 REFERRAL_POOL_ENTRY_USD = _dec("REFERRAL_POOL_ENTRY_USD", "100")
 REFERRAL_POOL_CAP = _int("REFERRAL_POOL_CAP", 10000)
+REFERRAL_POOL_MAX_UNITS_PER_PURCHASE = _int("REFERRAL_POOL_MAX_UNITS_PER_PURCHASE", 100)
 
 # --- Escrow / custody -------------------------------------------------------
 # Buyer money is held by an authorised financial institution, not by Kinjy, and

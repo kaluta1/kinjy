@@ -1,15 +1,18 @@
 from __future__ import annotations
 
 from datetime import date, datetime, timezone
+from decimal import Decimal
 
 from sqlalchemy import (
     Boolean,
+    CheckConstraint,
     Date,
     DateTime,
     ForeignKey,
     Index,
     Integer,
     LargeBinary,
+    Numeric,
     String,
     Text,
     UniqueConstraint,
@@ -217,8 +220,152 @@ class PoolAssignment(Base):
     seat_id: Mapped[str] = mapped_column(String(40), index=True)
     sponsor_id: Mapped[str] = mapped_column(String(40), index=True)
     new_member_id: Mapped[str] = mapped_column(String(40), index=True)
+    # Before rounds: the seats in the draw. Since: the round's whole remaining
+    # quota at the moment of the draw (the denominator of the odds).
     seats_in_draw: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    # Rounds. Null on assignments made before them, which are kept as they were.
+    pool_id: Mapped[str | None] = mapped_column(String(20))
+    round_id: Mapped[str | None] = mapped_column(String(40), index=True)
+    round_number: Mapped[int | None] = mapped_column(Integer)
+    # The receiving member's quota in that round, and what was left of it
+    # just before this assignment.
+    quota_total: Mapped[int | None] = mapped_column(Integer)
+    quota_remaining_before: Mapped[int | None] = mapped_column(Integer)
+
+
+POOL_ID = "main"
+
+
+class ReferralPoolPurchase(Base):
+    """One confirmed payment for pool units: what a member's weight is made of.
+
+    ``payment_ref`` is unique, so a payment notified twice credits once. Units
+    join the allocation from round ``active_from_round`` - the round after the
+    one open when they were credited - and stop counting the moment they are
+    reversed. ``units_reversed`` never exceeds ``units``.
+    """
+
+    __tablename__ = "referral_pool_purchases"
+    __table_args__ = (
+        UniqueConstraint("payment_ref", name="uq_pool_purchase_payment"),
+        CheckConstraint("units >= 0", name="ck_pool_purchase_units"),
+        CheckConstraint("units_reversed >= 0 AND units_reversed <= units", name="ck_pool_purchase_reversed"),
+        Index("ix_pool_purchase_member", "pool_id", "member_id"),
+        {"schema": SCHEMA},
+    )
+
+    id: Mapped[str] = mapped_column(String(40), primary_key=True, default=lambda: new_id("rpp"))
+    pool_id: Mapped[str] = mapped_column(String(20), default=POOL_ID)
+    member_id: Mapped[str] = mapped_column(String(40))
+    seat_id: Mapped[str | None] = mapped_column(String(40))
+    payment_ref: Mapped[str] = mapped_column(String(80))
+    units: Mapped[int] = mapped_column(Integer)
+    units_reversed: Mapped[int] = mapped_column(Integer, default=0)
+    unit_price: Mapped[Decimal] = mapped_column(Numeric(18, 2))
+    amount: Mapped[Decimal] = mapped_column(Numeric(18, 2))
+    currency: Mapped[str] = mapped_column(String(10), default="USD")
+    # credited | partially_reversed | reversed | review (a migrated record that
+    # could not be matched to one confirmed $100 entry: it counts for nothing
+    # until an administrator settles it).
+    status: Mapped[str] = mapped_column(String(20), default="credited", index=True)
+    source: Mapped[str] = mapped_column(String(20), default="payment")  # payment|migration
+    active_from_round: Mapped[int] = mapped_column(Integer, default=1)
+    review_note: Mapped[str | None] = mapped_column(String(300))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+    @property
+    def active_units(self) -> int:
+        if self.status not in ("credited", "partially_reversed"):
+            return 0
+        return max(self.units - self.units_reversed, 0)
+
+
+class ReferralPoolUnitEntry(Base):
+    """The unit ledger: every change to a member's units, never edited."""
+
+    __tablename__ = "referral_pool_unit_ledger"
+    __table_args__ = (
+        Index("ix_pool_unit_ledger_member", "pool_id", "member_id", "created_at"),
+        {"schema": SCHEMA},
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    pool_id: Mapped[str] = mapped_column(String(20), default=POOL_ID)
+    member_id: Mapped[str] = mapped_column(String(40))
+    purchase_id: Mapped[str] = mapped_column(String(40), index=True)
+    delta: Mapped[int] = mapped_column(Integer)
+    kind: Mapped[str] = mapped_column(String(20))  # purchase|migration|refund|reversal|review
+    reason: Mapped[str | None] = mapped_column(String(300))
+    actor: Mapped[str | None] = mapped_column(String(40))  # payment-service, or the admin's id
+    # Idempotency for reversals: the same refund notified twice moves units once.
+    reference: Mapped[str | None] = mapped_column(String(80), unique=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
+class ReferralPoolRound(Base):
+    """One complete rotation: every eligible unit, snapshot at the start, used once.
+
+    At most one round per pool is open - the partial unique index refuses a
+    second, so two registrations racing to open the next round cannot both.
+    """
+
+    __tablename__ = "referral_pool_rounds"
+    __table_args__ = (
+        UniqueConstraint("pool_id", "number", name="uq_pool_round_number"),
+        Index("uq_pool_round_open", "pool_id", unique=True, postgresql_where=text("status = 'open'")),
+        {"schema": SCHEMA},
+    )
+
+    id: Mapped[str] = mapped_column(String(40), primary_key=True, default=lambda: new_id("rnd"))
+    pool_id: Mapped[str] = mapped_column(String(20), default=POOL_ID)
+    number: Mapped[int] = mapped_column(Integer)
+    status: Mapped[str] = mapped_column(String(10), default="open")  # open|closed
+    members: Mapped[int] = mapped_column(Integer, default=0)
+    units_snapshot: Mapped[int] = mapped_column(Integer, default=0)
+    assigned: Mapped[int] = mapped_column(Integer, default=0)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    close_reason: Mapped[str | None] = mapped_column(String(40))  # complete|no_eligible_quota
+
+
+class ReferralPoolQuota(Base):
+    """A member's share of one round: their units at the snapshot, and how
+    many of them are used. ``assigned`` can never pass ``quota_total``.
+
+    ``quota_total`` only ever shrinks during a round - a refund or a loss of
+    eligibility takes the unused part away; nothing already assigned moves.
+    """
+
+    __tablename__ = "referral_pool_quotas"
+    __table_args__ = (
+        CheckConstraint("assigned >= 0 AND assigned <= quota_total", name="ck_pool_quota_bounds"),
+        {"schema": SCHEMA},
+    )
+
+    round_id: Mapped[str] = mapped_column(String(40), primary_key=True)
+    member_id: Mapped[str] = mapped_column(String(40), primary_key=True)
+    seat_id: Mapped[str] = mapped_column(String(40))
+    units_snapshot: Mapped[int] = mapped_column(Integer)
+    quota_total: Mapped[int] = mapped_column(Integer)
+    assigned: Mapped[int] = mapped_column(Integer, default=0)
+    excluded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    excluded_reason: Mapped[str | None] = mapped_column(String(80))
+
+
+class ReferralPoolUnassigned(Base):
+    """A sign-up the pool could not place, and why. Kept for review and retry."""
+
+    __tablename__ = "referral_pool_unassigned"
+    __table_args__ = {"schema": SCHEMA}
+
+    new_member_id: Mapped[str] = mapped_column(String(40), primary_key=True)
+    pool_id: Mapped[str] = mapped_column(String(20), default=POOL_ID)
+    reason: Mapped[str] = mapped_column(String(120))  # pool_empty|error:<detail>
+    attempts: Mapped[int] = mapped_column(Integer, default=1)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    last_attempt_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class UserAgeProfile(Base):

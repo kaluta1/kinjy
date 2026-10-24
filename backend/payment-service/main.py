@@ -57,6 +57,9 @@ MIGRATIONS = [
     f"ALTER TABLE {_T}.kyc_records ADD COLUMN IF NOT EXISTS verification_url VARCHAR(500)",
     f"ALTER TABLE {_T}.kyc_records ADD COLUMN IF NOT EXISTS session_expires_at TIMESTAMPTZ",
     f"ALTER TABLE {_T}.payment_intents ADD COLUMN IF NOT EXISTS split_status VARCHAR(20)",
+    # A settled referral-pool payment whose units (and revenue) are recorded.
+    # Null on a settled one means the reconciler still owes it the credit.
+    f"ALTER TABLE {_T}.payment_intents ADD COLUMN IF NOT EXISTS fulfilled_at TIMESTAMPTZ",
 ]
 
 
@@ -65,6 +68,18 @@ def _start_reconciler():
     # a delivery lost - are read back every five minutes.
     asyncio.get_event_loop().create_task(payouts.reconcile_loop())
     asyncio.get_event_loop().create_task(_splits_loop())
+    asyncio.get_event_loop().create_task(_pool_loop())
+
+
+async def _pool_loop() -> None:
+    # Pool payments that settled while auth-service or the ledger was down:
+    # their units are credited here. Both calls are idempotent.
+    while True:
+        await asyncio.sleep(120)
+        try:
+            await asyncio.to_thread(reconcile_pool_purchases)
+        except Exception as exc:
+            log.error("pool reconciler: %s", exc)
 
 
 async def _splits_loop() -> None:
@@ -107,7 +122,7 @@ PURPOSE_LABELS = {
     "ad_credit": "Kinjy ad credit",
     "kyc_fee": "KinjyKYC annual verification",
     "tribute": "Kinjy tribute",
-    "referral_pool": "Kinjy referral pool seat",
+    "referral_pool": "Kinjy referral pool units",
 }
 
 
@@ -166,6 +181,13 @@ def checkout(payload: CheckoutIn, principal: CurrentUser, db: OrmSession = Depen
         )
         if paid is not None:
             raise HTTPException(status_code=409, detail="This year's verification fee is already paid")
+
+    if payload.purpose == "referral_pool":
+        # The quantity is in the reference, the price is the server's: a
+        # client cannot buy units for less, or claim more than it paid for.
+        units = pool_units(payload.reference)
+        if units is None or economy.money(payload.amount) != pool_price(units):
+            raise HTTPException(status_code=400, detail="Pool units are bought from the pool page")
 
     # Sonco Pay, once configured, takes every payment: a client asking for
     # another rail does not get to pick a different door.
@@ -732,37 +754,7 @@ async def _on_settled(intent: models.PaymentIntent, db: OrmSession) -> None:
             log.error("could not open escrow for order %s: %s", intent.reference, exc)
 
     elif intent.purpose == "referral_pool":
-        # Seat first, revenue second. If the seat cannot be granted — the pool
-        # filled up between checkout and settlement — no revenue is recognised
-        # and the payment is refunded instead of quietly kept.
-        try:
-            response = httpx.post(
-                f"{AUTH_URL}/internal/referral-pool/seats",
-                json={
-                    "member_id": intent.user_id,
-                    "amount": str(intent.amount),
-                    "currency": "USD",
-                    "payment_ref": intent.id,
-                },
-                timeout=8,
-            )
-            if response.status_code == 409:
-                intent.status = "refund_due"
-                log.error("referral pool full; payment %s must be refunded", intent.id)
-            else:
-                response.raise_for_status()
-                httpx.post(
-                    f"{LEDGER_URL}/internal/post/referral-pool-entry",
-                    json={
-                        "member_id": intent.user_id,
-                        "amount": str(intent.amount),
-                        "reference": intent.id,
-                        "idempotency_key": f"payment:{intent.id}",
-                    },
-                    timeout=10,
-                ).raise_for_status()
-        except Exception as exc:
-            log.error("referral pool seat failed for payment %s: %s", intent.id, exc)
+        fulfil_pool_purchase(intent)
 
     elif intent.purpose == "kyc_fee":
         year = date.today().year
@@ -828,17 +820,31 @@ def referral_pool_status(principal: CurrentUser):
         raise HTTPException(status_code=503, detail="The referral pool is unavailable right now")
 
 
+class JoinPoolIn(BaseModel):
+    units: int = Field(default=1, ge=1)
+
+
 @app.post("/payments/referral-pool/join", status_code=201, tags=["referral-pool"])
 def join_referral_pool(
-    principal: CurrentUser, rail: str | None = None, db: OrmSession = Depends(get_db)
+    principal: CurrentUser,
+    payload: JoinPoolIn | None = None,
+    rail: str | None = None,
+    db: OrmSession = Depends(get_db),
 ):
-    """Start payment for a seat.
+    """Start payment for one or more pool units: units x the unit price.
 
-    The pool is checked before taking money, and again at settlement: the gap
-    between the two is exactly where the last seat gets sold to somebody else,
-    and a member should not discover that after paying.
+    Quantity and price are settled here, not by the client, and checked again
+    when the units are credited. Room in the pool is checked before taking
+    money and again at settlement: the gap between the two is exactly where
+    the last units get sold to somebody else.
     """
     agefeatures.require(principal.user_id, "referral_pool")
+    units = (payload or JoinPoolIn()).units
+    if units > settings.REFERRAL_POOL_MAX_UNITS_PER_PURCHASE:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Buy at most {settings.REFERRAL_POOL_MAX_UNITS_PER_PURCHASE} units at a time",
+        )
 
     try:
         state = httpx.get(
@@ -850,23 +856,104 @@ def join_referral_pool(
         log.error("referral pool status unavailable: %s", exc)
         raise HTTPException(status_code=503, detail="The referral pool is unavailable right now")
 
-    if not state.get("open"):
+    left = int(state.get("units_left", state.get("seats_left", 0)))
+    if not state.get("open") or left <= 0:
         raise HTTPException(
             status_code=409,
-            detail=f"The referral pool is full ({state.get('cap'):,} seats) and closed to new members.",
+            detail=f"The referral pool is full ({state.get('cap'):,} units) and closed to new purchases.",
         )
+    if units > left:
+        raise HTTPException(status_code=409, detail=f"Only {left} unit{'s' if left != 1 else ''} left in the pool")
 
     return checkout(
         CheckoutIn(
             purpose="referral_pool",
-            amount=Decimal(str(settings.REFERRAL_POOL_ENTRY_USD)),
-            reference="referral_pool",
+            amount=pool_price(units),
+            reference=f"referral_pool:{units}",
             rail=rail,
             return_path="/earn",
         ),
         principal,
         db,
     )
+
+
+def pool_units(reference: str | None) -> int | None:
+    """Units a pool payment is for. "referral_pool" alone is a pre-units seat: one."""
+    if reference == "referral_pool":
+        return 1
+    if not reference or not reference.startswith("referral_pool:"):
+        return None
+    raw = reference.split(":", 1)[1]
+    if not raw.isdigit():
+        return None
+    units = int(raw)
+    return units if 1 <= units <= settings.REFERRAL_POOL_MAX_UNITS_PER_PURCHASE else None
+
+
+def pool_price(units: int) -> Decimal:
+    return economy.money(Decimal(str(settings.REFERRAL_POOL_ENTRY_USD)) * units)
+
+
+def fulfil_pool_purchase(intent: models.PaymentIntent) -> bool:
+    """Credit a settled pool payment's units, then post its revenue.
+
+    Units first, revenue second: if the units cannot be credited (the pool
+    filled up between checkout and settlement) no revenue is recognised and
+    the payment is marked for refund instead of quietly kept. Both calls are
+    idempotent on the payment, so a duplicate notification or a reconciler
+    pass credits nothing twice. Returns True once both have landed.
+    """
+    if intent.fulfilled_at is not None or intent.status == "refund_due":
+        return intent.fulfilled_at is not None
+    units = pool_units(intent.reference)
+    if units is None:
+        intent.status = "refund_due"
+        log.error("pool payment %s has no readable quantity (%r)", intent.id, intent.reference)
+        return False
+    try:
+        response = httpx.post(
+            f"{AUTH_URL}/internal/referral-pool/purchases",
+            json={"member_id": intent.user_id, "payment_ref": intent.id, "units": units,
+                  "amount": str(intent.amount), "currency": "USD"},
+            timeout=8,
+        )
+        if response.status_code in (400, 409):
+            intent.status = "refund_due"
+            log.error("pool units refused for payment %s (%s): must be refunded", intent.id, response.text[:200])
+            return False
+        response.raise_for_status()
+        httpx.post(
+            f"{LEDGER_URL}/internal/post/referral-pool-entry",
+            json={"member_id": intent.user_id, "amount": str(intent.amount), "reference": intent.id,
+                  "idempotency_key": f"payment:{intent.id}"},
+            timeout=10,
+        ).raise_for_status()
+    except Exception as exc:
+        log.error("pool units for payment %s not credited yet: %s", intent.id, exc)
+        return False
+    intent.fulfilled_at = datetime.now(timezone.utc)
+    return True
+
+
+def reconcile_pool_purchases() -> int:
+    """Settled pool payments whose units were never credited."""
+    from common.database import SessionLocal
+
+    done = 0
+    with SessionLocal() as db:
+        rows = db.scalars(
+            select(models.PaymentIntent).where(
+                models.PaymentIntent.purpose == "referral_pool",
+                models.PaymentIntent.settled_at.is_not(None),
+                models.PaymentIntent.fulfilled_at.is_(None),
+                models.PaymentIntent.status == "finished",
+            ).limit(100)
+        ).all()
+        for intent in rows:
+            done += fulfil_pool_purchase(intent)
+            db.commit()
+    return done
 
 
 # --- escrow ----------------------------------------------------------------

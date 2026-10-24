@@ -1611,21 +1611,87 @@ export interface MyLeaderStanding {
 
 export interface ReferralPoolState {
   entry_price: string
+  /** The price of one unit (the same as entry_price). */
+  unit_price: string
   currency: string
+  max_units_per_purchase: number
   cap: number
   seats_taken: number
   seats_left: number
+  units_sold: number
+  units_left: number
   open: boolean
   active_seats: number
-  my_seat: {
+  active_units: number
+  current_round: {
+    number: number
+    started_at: string
+    units_snapshot: number
+    assigned: number
+    remaining: number
+  } | null
+  my_seat: ({
     seat_id: string
     seat_number: number
     status: string
     assigned_count: number
     last_assigned_at: string | null
     joined_at: string
-  } | null
+  } & PoolMemberUnits) | null
   note: string
+  rotation_note: string
+}
+
+/** A member's units, as the pool counts them. */
+export interface PoolMemberUnits {
+  total_active_units: number
+  units_in_current_round: number
+  round_quota_remaining: number
+  units_awaiting_next_round: number
+  units_under_review: number
+  referrals_received: number
+}
+
+export interface PoolPurchase {
+  id: string
+  member_id: string
+  payment_ref: string
+  units: number
+  units_reversed: number
+  active_units: number
+  unit_price: string
+  amount: string
+  currency: string
+  status: 'credited' | 'partially_reversed' | 'reversed' | 'review' | 'rejected'
+  source: 'payment' | 'migration'
+  active_from_round: number
+  review_note: string | null
+  created_at: string
+}
+
+export interface PoolAdminMember extends PoolMemberUnits {
+  seat_id: string
+  seat_number: number
+  member_id: string
+  handle: string | null
+  display_name: string | null
+  status: string
+  round_quota_total: number
+  round_assigned: number
+  round_excluded_reason: string | null
+}
+
+export interface PoolRound {
+  id: string
+  number: number
+  status: 'open' | 'closed'
+  members: number
+  units_snapshot: number
+  assigned: number
+  remaining: number
+  started_at: string
+  closed_at: string | null
+  close_reason: string | null
 }
 
 /* --- WebAuthn wire format ------------------------------------------------ */
@@ -2947,11 +3013,78 @@ export const kaluta = {
           assigned_at: string
         }>
       }>('/auth/referral-pool/assignments'),
-    join: () =>
+    /** Start paying for `units` units: units x the unit price, set by the server. */
+    join: (units = 1) =>
       api.post<{ payment_id: string; rail: string; amount: string; checkout_url?: string; mock?: boolean }>(
         '/payments/referral-pool/join',
-        {},
+        { units },
       ),
+  },
+
+  /** Admin: the referral pool's purchases, units, rounds and assignments. */
+  poolAdmin: {
+    overview: () =>
+      api.get<ReferralPoolState & { members: number; purchases_under_review: number; unassigned_open: number }>(
+        '/admin/referral-pool/overview',
+      ),
+    members: (offset = 0) =>
+      api.get<{ items: PoolAdminMember[]; total: number }>(`/admin/referral-pool/members?offset=${offset}&limit=100`),
+    purchases: (status?: string) =>
+      api.get<{ items: PoolPurchase[] }>(`/admin/referral-pool/purchases${status ? `?status=${status}` : ''}`),
+    reverse: (purchaseId: string, units: number, kind: 'refund' | 'reversal', reason: string) =>
+      api.post<PoolPurchase>(`/admin/referral-pool/purchases/${purchaseId}/reverse`, { units, kind, reason }),
+    review: (purchaseId: string, decision: 'approve' | 'reject', note: string) =>
+      api.post<PoolPurchase>(`/admin/referral-pool/purchases/${purchaseId}/review`, { decision, note }),
+    rounds: () => api.get<{ items: PoolRound[] }>('/admin/referral-pool/rounds'),
+    quotas: (roundId: string) =>
+      api.get<{
+        items: Array<{
+          member_id: string
+          handle: string | null
+          units_snapshot: number
+          quota_total: number
+          assigned: number
+          remaining: number
+          excluded_at: string | null
+          excluded_reason: string | null
+        }>
+      }>(`/admin/referral-pool/rounds/${roundId}/quotas`),
+    assignments: (roundNumber?: number) =>
+      api.get<{
+        items: Array<{
+          new_member_id: string
+          new_member_handle: string | null
+          sponsor_id: string
+          sponsor_handle: string | null
+          round_number: number | null
+          quota_total: number | null
+          quota_remaining_before: number | null
+          eligible_quota_in_draw: number
+          assigned_at: string
+        }>
+      }>(`/admin/referral-pool/assignments${roundNumber ? `?round_number=${roundNumber}` : ''}`),
+    ledger: (kind?: string) =>
+      api.get<{
+        items: Array<{
+          id: number
+          member_id: string
+          purchase_id: string
+          delta: number
+          kind: string
+          reason: string | null
+          actor: string | null
+          reference: string | null
+          created_at: string
+        }>
+      }>(`/admin/referral-pool/ledger${kind ? `?kind=${kind}` : ''}`),
+    unassigned: () =>
+      api.get<{
+        items: Array<{ new_member_id: string; reason: string; attempts: number; created_at: string; resolved_at: string | null }>
+      }>('/admin/referral-pool/unassigned'),
+    retry: (memberId: string) =>
+      api.post<{ assigned: boolean; sponsor_id: string | null }>(`/admin/referral-pool/unassigned/${memberId}/retry`, {}),
+    setSeatStatus: (seatId: string, status: 'active' | 'suspended' | 'refunded') =>
+      api.post<{ seat_id: string; status: string }>(`/admin/referral-pool/seats/${seatId}/status?status=${status}`, {}),
   },
 
   ads: {

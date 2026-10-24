@@ -30,6 +30,7 @@ const ShortLinkPage = lazy(() => import('./pages/ShortLink').then((m) => ({ defa
 const ResetPassword = lazy(() => import('./pages/ResetPassword'))
 const PayoutWalletConfirm = lazy(() => import('./pages/PayoutWalletConfirm'))
 const PayoutWallets = lazy(() => import('./pages/app/PayoutWallets'))
+const PoolAdmin = lazy(() => import('./pages/app/PoolAdmin'))
 const PostPage = lazy(() => import('./pages/PostPage'))
 const Dashboard = lazy(() => import('./pages/Dashboard'))
 const SocialHub = lazy(() => import('./pages/SocialHub'))
@@ -199,6 +200,7 @@ export default function App() {
           <Route path="/trust-safety" element={<TrustSafety />} />
           <Route path="/team" element={<Team />} />
           <Route path="/admin/wallets" element={<PayoutWallets />} />
+          <Route path="/admin/referral-pool" element={<PoolAdmin />} />
           {/* Where the appeal notification sends the member. */}
           <Route path="/moderation" element={<Moderation />} />
           {/* Every avatar in the app links here. */}

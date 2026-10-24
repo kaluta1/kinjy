@@ -52,6 +52,7 @@ const APP_ROUTES = [
   '/trust-safety',
   '/team',
   '/admin/wallets',
+  '/admin/referral-pool',
   '/moderation',
   // Covers /settings/supervision, which the notifications link to.
   '/settings',
