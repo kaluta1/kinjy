@@ -4,7 +4,7 @@ import { useLayoutEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import VideoPlayer from './VideoPlayer'
 import { useTranslation } from 'react-i18next'
-import { Check, Columns2, Eye, EyeOff, Flag, HelpCircle, Languages, Link2, Lock, MapPin, MessageCircle, Pencil, Repeat2, Share2, SlidersHorizontal, Trash2 } from 'lucide-react'
+import { Bookmark, BookmarkCheck, Check, Columns2, Eye, EyeOff, Flag, HelpCircle, History, Languages, Link2, Lock, MapPin, MessageCircle, Pencil, Pin, PinOff, Repeat2, Share2, ShieldX, SlidersHorizontal, Trash2 } from 'lucide-react'
 import { ApiError, kaluta, type Post, type WhyFactor } from '@/lib/api'
 import { useTopic } from '@/hooks/useRealtime'
 import EditPostDialog from './EditPostDialog'
@@ -257,6 +257,8 @@ export default function PostCard({
   onOpen,
   canEngage = true,
   onRefused,
+  steward = false,
+  onCommunityChanged,
 }: {
   post: Post
   algorithmId: string
@@ -276,6 +278,10 @@ export default function PostCard({
   canEngage?: boolean
   /** Why an action did not happen, for the page to show. */
   onRefused?: (reason: string) => void
+  /** The reader runs this post's community: pin, unpin and remove it (the server checks again). */
+  steward?: boolean
+  /** After a steward action, so the community page can reload. */
+  onCommunityChanged?: () => void
   /**
    * Open this post in a dialog. Given by the feed; absent inside the dialog
    * itself, where the card must not be able to open another copy of itself.
@@ -501,6 +507,58 @@ export default function PostCard({
     }
   }
 
+  // Saved to read again: private to the reader.
+  const [bookmarked, setBookmarked] = useState(Boolean(target.bookmarked))
+  const toggleBookmark = async () => {
+    const next = !bookmarked
+    setBookmarked(next)
+    try {
+      if (next) await kaluta.posts.bookmark(target.id)
+      else await kaluta.posts.unbookmark(target.id)
+    } catch (err) {
+      setBookmarked(!next)
+      onRefused?.(err instanceof ApiError ? err.message : 'Could not save this post')
+    }
+  }
+  // What an edited post said before.
+  const [history, setHistory] = useState<Array<{ body: string; written_at: string | null; replaced_at: string }> | null>(null)
+  const toggleHistory = async () => {
+    if (history) {
+      setHistory(null)
+      return
+    }
+    try {
+      setHistory((await kaluta.posts.revisions(target.id)).items)
+    } catch (err) {
+      onRefused?.(err instanceof ApiError ? err.message : 'Could not load the history')
+    }
+  }
+  const [acceptedId, setAcceptedId] = useState<string | null>(target.accepted_comment_id ?? null)
+  const accept = async (commentId: string | null) => {
+    try {
+      setAcceptedId((await kaluta.posts.acceptAnswer(target.id, commentId)).accepted_comment_id)
+    } catch (err) {
+      onRefused?.(err instanceof ApiError ? err.message : 'Could not mark the answer')
+    }
+  }
+  const inCommunity = target.visibility === 'community'
+  const stewardAct = async (fn: () => Promise<unknown>, failed: string) => {
+    try {
+      await fn()
+      onCommunityChanged?.()
+    } catch (err) {
+      onRefused?.(err instanceof ApiError ? err.message : failed)
+    }
+  }
+  const removeAsSteward = () => {
+    const reason = window.prompt('Remove this post from the community. Reason (shown to its author):')
+    if (reason === null) return
+    void stewardAct(async () => {
+      await kaluta.posts.moderate(target.id, 'remove', reason.trim() || undefined)
+      onHidden(target.id)
+    }, 'Could not remove the post')
+  }
+
   const remove = async () => {
     setBusy(true)
     try {
@@ -560,6 +618,11 @@ export default function PostCard({
 
   return (
     <article className="cloud-card p-5" data-post-id={post.id}>
+      {target.pinned && inCommunity && (
+        <p className="caption mb-2 flex items-center gap-1.5 text-gold-soft">
+          <Pin size={12} aria-hidden="true" /> Pinned
+        </p>
+      )}
       {shared && (
         <p className="caption mb-2.5 flex items-center gap-1.5 border-b border-white/8 pb-2.5">
           <Repeat2 size={13} aria-hidden="true" className="text-success" />
@@ -827,6 +890,34 @@ export default function PostCard({
           Share
         </button>
 
+        {currentUserId && (
+          <button
+            type="button"
+            onClick={() => void toggleBookmark()}
+            aria-pressed={bookmarked}
+            title={bookmarked ? 'Saved - only you see this' : 'Save to read again (only you see it)'}
+            className={cn(
+              'inline-flex items-center gap-1.5 rounded-full px-3 py-1.5 text-xs font-semibold',
+              bookmarked ? 'text-gold-soft' : 'text-text-mid hover:text-text-hi',
+            )}
+          >
+            {bookmarked ? <BookmarkCheck size={13} aria-hidden="true" /> : <Bookmark size={13} aria-hidden="true" />}
+            {bookmarked ? 'Saved' : 'Save'}
+          </button>
+        )}
+
+        {target.edited_at && (
+          <button
+            type="button"
+            onClick={() => void toggleHistory()}
+            aria-expanded={history !== null}
+            className="inline-flex items-center gap-1.5 rounded-full px-3 py-1.5 text-xs font-semibold text-text-low hover:text-text-hi"
+          >
+            <History size={13} aria-hidden="true" />
+            Edited
+          </button>
+        )}
+
         {views > 0 && (
           <span
             className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs text-text-low"
@@ -874,6 +965,34 @@ export default function PostCard({
             <Pencil size={13} aria-hidden="true" />
             Edit
           </button>
+        )}
+
+        {steward && inCommunity && (
+          <>
+            <button
+              type="button"
+              onClick={() =>
+                void stewardAct(
+                  () => (target.pinned ? kaluta.posts.unpin(target.id) : kaluta.posts.pin(target.id)),
+                  'Could not change the pin',
+                )
+              }
+              className="inline-flex items-center gap-1.5 rounded-full px-3 py-1.5 text-xs font-semibold text-text-low hover:text-text-hi"
+            >
+              {target.pinned ? <PinOff size={13} aria-hidden="true" /> : <Pin size={13} aria-hidden="true" />}
+              {target.pinned ? 'Unpin' : 'Pin'}
+            </button>
+            {!isOwn && (
+              <button
+                type="button"
+                onClick={removeAsSteward}
+                className="inline-flex items-center gap-1.5 rounded-full px-3 py-1.5 text-xs font-semibold text-text-low hover:text-red-200"
+              >
+                <ShieldX size={13} aria-hidden="true" />
+                Remove
+              </button>
+            )}
+          </>
         )}
 
         {isOwn ? (
@@ -1079,11 +1198,26 @@ export default function PostCard({
       {/* Inline, the way LinkedIn does it: the thread belongs to the post, and
           a modal cuts you off from the very content the replies are about.
           Long threads stay bounded by their own scroll area instead. */}
+      {history && (
+        <section aria-label="Edit history" className="mt-3 space-y-2 rounded-2xl bg-text-hi/[0.04] p-3">
+          {history.length === 0 && <p className="text-xs text-text-low">No earlier version was kept.</p>}
+          {history.map((rev, index) => (
+            <div key={index}>
+              <p className="caption">Before {new Date(rev.replaced_at).toLocaleString()}</p>
+              <p className="mt-1 whitespace-pre-wrap break-words text-sm text-text-mid">{htmlToText(rev.body)}</p>
+            </div>
+          ))}
+        </section>
+      )}
+
       {showComments && (
         <Comments
           postId={target.id}
           currentUserId={currentUserId}
           onCountChange={(delta) => setComments((n) => n + delta)}
+          acceptedId={inCommunity ? acceptedId : null}
+          canAccept={inCommunity && (isOwn || steward)}
+          onAccept={(id) => void accept(id)}
         />
       )}
 

@@ -46,6 +46,8 @@ ROUTES: dict[str, str] = {
     "/api/comments": "http://social-service:8000",
     "/api/moderation": "http://social-service:8000",
     "/api/feed": "http://social-service:8000",
+    # A member's saved posts.
+    "/api/bookmarks": "http://social-service:8000",
     # Link previews for shared posts (the page crawlers read, and its picture).
     "/api/og": "http://social-service:8000",
     # A member's own numbers (social-service /stats/me).
@@ -53,6 +55,8 @@ ROUTES: dict[str, str] = {
     "/api/shorts": "http://social-service:8000",
     "/api/algorithms": "http://social-service:8000",
     "/api/communities": "http://community-service:8000",
+    # Community templates and spaces (24/10).
+    "/api/community-templates": "http://community-service:8000",
     "/api/forums": "http://community-service:8000",
     "/api/discover": "http://community-service:8000",
     "/api/threads": "http://community-service:8000",

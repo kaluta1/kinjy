@@ -23,7 +23,7 @@ import { useAuth } from '@/hooks/useAuth'
 import { useMyProfile } from '@/hooks/useMyProfile'
 import { useAppTheme } from '@/components/appdemo/theme'
 import MemberAvatar from './MemberAvatar'
-import { ApiError, kaluta, type Post, type UploadedMedia } from '@/lib/api'
+import { ApiError, kaluta, type CommunityPostSpace, type Post, type UploadedMedia } from '@/lib/api'
 import RichTextEditor from './RichTextEditor'
 import { MentionList, useMentionSuggest } from './MentionSuggest'
 import { onChange } from '@/lib/live'
@@ -160,7 +160,14 @@ export default function Composer({
    * member where what they are writing will land - the one thing worth saying
    * when the same composer serves several places.
    */
-  community?: { id: string; name: string }
+  community?: {
+    id: string
+    name: string
+    /** The spaces this member may post in, in order (the server checks again). */
+    spaces?: Array<{ id: CommunityPostSpace; label: string }>
+    /** Whether this member's posts wait for a moderator. */
+    requiresApproval?: boolean
+  }
 }) {
   const { i18n } = useTranslation()
   const { user } = useAuth()
@@ -220,6 +227,12 @@ export default function Composer({
   // The author's own declaration. Nothing infers this — a wrong guess either
   // censors an adult or shows a child what they should not see.
   const [mature, setMature] = useState(false)
+  // Inside a community: which space it goes to. Empty = the server's default
+  // (discussions, or articles for an article).
+  const [space, setSpace] = useState<CommunityPostSpace | ''>('')
+  // Publish later: a local date and time from the picker, sent as UTC.
+  const [scheduleOn, setScheduleOn] = useState(false)
+  const [scheduleAt, setScheduleAt] = useState('')
   const [showDetails, setShowDetails] = useState(false)
   const [topics, setTopics] = useState('')
   const [city, setCity] = useState('')
@@ -317,6 +330,8 @@ export default function Composer({
     // next post the member writes.
     setMature(false)
     setShowDetails(false)
+    setScheduleOn(false)
+    setScheduleAt('')
     setError(null)
     setNote(null)
   }
@@ -337,6 +352,15 @@ export default function Composer({
       setError('An article needs a headline.')
       return
     }
+    let publishAt: string | undefined
+    if (scheduleOn) {
+      const when = scheduleAt ? new Date(scheduleAt) : null
+      if (!when || Number.isNaN(when.getTime()) || when.getTime() < Date.now() + 60_000) {
+        setError('Pick a date and time at least a minute from now.')
+        return
+      }
+      publishAt = when.toISOString()
+    }
 
     setBusy(true)
     setError(null)
@@ -356,6 +380,8 @@ export default function Composer({
         // whatever the audience state happens to hold, this post belongs here.
         visibility: community ? 'community' : visibility,
         community_id: community?.id,
+        space: community && space ? space : undefined,
+        publish_at: publishAt,
         circle_id: !community && visibility === 'circle' ? circleId : undefined,
         provenance,
         mature,
@@ -421,6 +447,11 @@ export default function Composer({
       reset()
       // After reset, which clears it — the note is about the post that just
       // went out, not about the empty form replacing it.
+      if (post.status === 'pending') {
+        publishNote = 'Sent. It appears once a moderator approves it.'
+      } else if (post.status === 'scheduled' && post.publish_at) {
+        publishNote = `Scheduled for ${new Date(post.publish_at).toLocaleString()}.`
+      }
       setNote(publishNote)
       setOpen(false)
       onPosted(post)
@@ -500,10 +531,28 @@ export default function Composer({
                 <p className={cn('truncate text-sm font-semibold', tok.text)}>{user?.display_name}</p>
                 <div className="mt-1 flex flex-wrap gap-1">
                   {community ? (
-                    <span className="inline-flex items-center gap-1 rounded-full bg-gold/15 px-2 py-0.5 text-[0.68rem] font-semibold text-gold-soft">
-                      <Users size={10} aria-hidden="true" />
-                      Posting in {community.name}
-                    </span>
+                    <>
+                      <span className="inline-flex items-center gap-1 rounded-full bg-gold/15 px-2 py-0.5 text-[0.68rem] font-semibold text-gold-soft">
+                        <Users size={10} aria-hidden="true" />
+                        Posting in {community.name}
+                      </span>
+                      {(community.spaces?.length ?? 0) > 1 && (
+                        <label className="inline-flex items-center gap-1 text-[0.68rem]">
+                          <span className="sr-only">Space</span>
+                          <select
+                            value={space || (kind === 'article' ? 'articles' : 'discussions')}
+                            onChange={(e) => setSpace(e.target.value as CommunityPostSpace)}
+                            className={cn('rounded-full px-2 py-0.5 text-[0.68rem] font-semibold', tok.subtleBg, tok.mid)}
+                          >
+                            {community.spaces!.map((option) => (
+                              <option key={option.id} value={option.id}>
+                                {option.label}
+                              </option>
+                            ))}
+                          </select>
+                        </label>
+                      )}
+                    </>
                   ) : (
                     VISIBILITY.map((v) => (
                       <button
@@ -818,7 +867,26 @@ export default function Composer({
               </p>
             )}
 
-            <div className="mt-4 flex justify-end gap-2">
+            <div className="mt-4 flex flex-wrap items-center gap-2">
+              <label className={cn('inline-flex items-center gap-1.5 text-xs', tok.mid)}>
+                <input type="checkbox" checked={scheduleOn} onChange={(e) => setScheduleOn(e.target.checked)} />
+                Publish later
+              </label>
+              {scheduleOn && (
+                <input
+                  type="datetime-local"
+                  value={scheduleAt}
+                  onChange={(e) => setScheduleAt(e.target.value)}
+                  aria-label="Publication date and time (your local time)"
+                  className={cn('rounded-full px-3 py-1 text-xs', tok.input, tok.text)}
+                />
+              )}
+              {community?.requiresApproval && (
+                <span className={cn('text-xs', tok.low)}>A moderator approves posts here before they appear.</span>
+              )}
+            </div>
+
+            <div className="mt-3 flex justify-end gap-2">
               <button
                 type="button"
                 onClick={() => {
@@ -834,7 +902,7 @@ export default function Composer({
                 disabled={!canPost}
                 className="rounded-full bg-gradient-to-br from-gold-soft to-gold px-5 py-2 text-xs font-bold text-ink shadow-[inset_0_1px_0_rgba(255,255,255,0.35)] enabled:hover:brightness-110 disabled:opacity-40"
               >
-                {busy ? 'Posting…' : `Post to ${audienceLabel}`}
+                {busy ? 'Posting…' : scheduleOn ? 'Schedule' : `Post to ${audienceLabel}`}
               </button>
             </div>
           </form>

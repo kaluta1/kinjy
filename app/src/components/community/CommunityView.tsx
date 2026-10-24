@@ -1,14 +1,15 @@
 import { useEffect, useState } from 'react'
 import { Link, useLocation } from 'react-router'
-import { ArrowLeft, Bell, BellOff, Globe, Link2, Lock, LogOut, Pencil, Pin, PinOff, UsersRound } from 'lucide-react'
+import { ArrowLeft, Bell, BellOff, ClipboardCheck, Globe, History, Link2, Lock, LogOut, Pencil, Pin, PinOff, ScrollText, UsersRound } from 'lucide-react'
 import Composer from '@/components/social/Composer'
 import LinkQr from '@/components/ui-kit/LinkQr'
 import PostCard from '@/components/social/PostCard'
 import { CommunityMembersDialog, CommunitySettingsDialog } from '@/components/community/CommunityDialogs'
+import { AuditDialog, PendingPostsDialog } from '@/components/community/CommunityModeration'
 import { useApi } from '@/hooks/useApi'
 import { useAuth } from '@/hooks/useAuth'
-import { ApiError, kaluta, type Post } from '@/lib/api'
-import { copyLink, siteOrigin } from '@/lib/share'
+import { ApiError, kaluta, type CommunityPostSpace, type Post } from '@/lib/api'
+import { copyLink, pendingLink, siteOrigin } from '@/lib/share'
 import { shortLinkFor } from '@/lib/shortLink'
 import { announce } from '@/lib/live'
 import { cn } from '@/lib/utils'
@@ -55,10 +56,15 @@ export default function CommunityView({
   // they are served by social-service, which knows ids and nothing about
   // community naming. So this waits for the community to resolve.
   const communityId = detail.data?.id ?? ''
+  // Which space is shown (all of them by default) and in what order.
+  const [space, setSpace] = useState<CommunityPostSpace | ''>('')
+  const [sort, setSort] = useState<'latest' | 'top'>('latest')
   const feed = useApi(
-    () => (communityId ? kaluta.communities.feed(communityId) : Promise.resolve(null)),
-    [communityId],
+    () => (communityId ? kaluta.communities.feed(communityId, 20, 0, space || undefined, sort) : Promise.resolve(null)),
+    [communityId, space, sort],
   )
+  const [showQueue, setShowQueue] = useState(false)
+  const [showAudit, setShowAudit] = useState(false)
   const [busy, setBusy] = useState(false)
   const [note, setNote] = useState<string | null>(null)
   const [fresh, setFresh] = useState<Post[]>([])
@@ -85,14 +91,25 @@ export default function CommunityView({
   const isOwner = community?.my_role === 'owner'
   const isSteward = isMember && (isOwner || community?.my_role === 'moderator')
   const pending = community?.pending_count ?? 0
-  // Members see who else is in; anybody may, on a public community.
-  const canSeeMembers = isMember || community?.kind === 'public'
+  // Members see who else is in; anybody may, on a public community - unless
+  // the owner switched the directory off (stewards still see it).
+  const canSeeMembers = (isMember || community?.kind === 'public') && community?.directory_open !== false
+  // The post spaces switched on, and those this reader may post in.
+  const postSpaces = (community?.spaces ?? []).filter((s) => s.enabled && s.posters !== null && s.available)
+  const myPostSpaces = postSpaces
+    .filter((s) => community?.my_can_post?.[s.id as CommunityPostSpace])
+    .map((s) => ({ id: s.id as CommunityPostSpace, label: s.label }))
 
   // The "someone asked to join" notification lands here with ?manage=requests.
   const wantsRequests = new URLSearchParams(location.search).get('manage') === 'requests'
   useEffect(() => {
     if (wantsRequests && isSteward) setShowMembers(true)
   }, [wantsRequests, isSteward])
+  // "A post is waiting for approval" lands here with ?manage=posts.
+  const wantsPosts = new URLSearchParams(location.search).get('manage') === 'posts'
+  useEffect(() => {
+    if (wantsPosts && isSteward) setShowQueue(true)
+  }, [wantsPosts, isSteward])
 
   const refresh = () => {
     detail.reload()
@@ -105,7 +122,8 @@ export default function CommunityView({
     setBusy(true)
     setNote(null)
     try {
-      const result = await kaluta.communities.join(communityId, access)
+      // The invitation link they arrived on, if any: who invited them here.
+      const result = await kaluta.communities.join(communityId, access, pendingLink() || null)
       setNote(
         result.status === 'pending'
           ? 'Request sent — a moderator has to approve it.'
@@ -206,7 +224,10 @@ export default function CommunityView({
     }
   }
 
-  const posts = [...fresh, ...(feed.data?.items ?? [])]
+  // Posts just written sit on top until the feed has them; once it does (a
+  // reload after a pin or an approval), the feed's copy wins and is shown once.
+  const loaded = feed.data?.items ?? []
+  const posts = [...fresh.filter((p) => !loaded.some((l) => l.id === p.id)), ...loaded]
 
   return (
     <div className="space-y-5">
@@ -417,11 +438,43 @@ export default function CommunityView({
             </div>
           </header>
 
-          {isMember ? (
+          {community.rules && (
+            <details className="cloud-card p-4">
+              <summary className="cursor-pointer text-sm font-semibold text-text-hi">
+                <ScrollText size={13} className="me-1.5 inline" aria-hidden="true" />
+                Community rules
+              </summary>
+              <p className="mt-2 whitespace-pre-wrap text-sm text-text-mid">{community.rules}</p>
+            </details>
+          )}
+
+          {isSteward && (
+            <div className="flex flex-wrap gap-2">
+              <button type="button" onClick={() => setShowQueue(true)}
+                className="inline-flex items-center gap-1.5 rounded-full border border-[var(--cloud-border)] px-4 py-2 text-sm font-semibold text-text-mid hover:border-gold/50 hover:text-gold-soft">
+                <ClipboardCheck size={13} aria-hidden="true" /> Posts to approve
+              </button>
+              <button type="button" onClick={() => setShowAudit(true)}
+                className="inline-flex items-center gap-1.5 rounded-full border border-[var(--cloud-border)] px-4 py-2 text-sm font-semibold text-text-mid hover:border-gold/50 hover:text-gold-soft">
+                <History size={13} aria-hidden="true" /> Activity log
+              </button>
+            </div>
+          )}
+
+          {isMember && myPostSpaces.length > 0 ? (
             <Composer
-              community={{ id: community.id, name: community.name }}
-              onPosted={(post) => setFresh((current) => [post, ...current])}
+              community={{
+                id: community.id,
+                name: community.name,
+                spaces: myPostSpaces,
+                requiresApproval: !isSteward && community.post_approval === 'all',
+              }}
+              onPosted={(post) =>
+                post.status === 'published' ? setFresh((current) => [post, ...current]) : feed.reload()
+              }
             />
+          ) : isMember ? (
+            <p className="cloud-card p-4 text-sm text-text-mid">Posting is closed in this community for now.</p>
           ) : (
             <p className="cloud-card p-4 text-sm text-text-mid">
               {/* Said before anything is tapped. Somebody reading an open
@@ -439,6 +492,61 @@ export default function CommunityView({
                     ? 'You can post here once your request is approved.'
                     : 'Join this community to post in it.'}
             </p>
+          )}
+
+          {(feed.data?.my_queued?.length ?? 0) > 0 && (
+            <section aria-label="Your posts not yet published" className="cloud-card space-y-2 p-4">
+              <p className="text-sm font-semibold text-text-hi">Your posts not yet published</p>
+              {feed.data!.my_queued!.map((queued) => (
+                <p key={queued.id} className="text-sm text-text-mid">
+                  <span className="me-2 rounded-full bg-amber-500/15 px-2 py-0.5 text-xs font-semibold text-amber-300">
+                    {queued.status === 'pending'
+                      ? 'Waiting for approval'
+                      : `Scheduled ${queued.publish_at ? new Date(queued.publish_at).toLocaleString() : ''}`}
+                  </span>
+                  <span className="line-clamp-1 inline">{queued.body.replace(/<[^>]+>/g, ' ').slice(0, 120)}</span>
+                </p>
+              ))}
+            </section>
+          )}
+
+          {(postSpaces.length > 1 || feed.data) && (
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div role="tablist" aria-label="Spaces" className="flex flex-wrap gap-1.5">
+                {[{ id: '', label: 'All' }, ...postSpaces].map((s) => (
+                  <button
+                    key={s.id || 'all'}
+                    type="button"
+                    role="tab"
+                    aria-selected={space === s.id}
+                    onClick={() => {
+                      setFresh([])
+                      setSpace(s.id as CommunityPostSpace | '')
+                    }}
+                    className={cn(
+                      'rounded-full px-3.5 py-1.5 text-xs font-semibold',
+                      space === s.id ? 'bg-gold text-ink' : 'bg-text-hi/[0.06] text-text-mid hover:bg-text-hi/[0.1]',
+                    )}
+                  >
+                    {s.label}
+                  </button>
+                ))}
+              </div>
+              <label className="inline-flex items-center gap-1.5 text-xs text-text-low">
+                Order
+                <select
+                  value={sort}
+                  onChange={(e) => {
+                    setFresh([])
+                    setSort(e.target.value as 'latest' | 'top')
+                  }}
+                  className="rounded-full border border-[var(--cloud-border)] bg-transparent px-2.5 py-1 text-xs text-text-hi"
+                >
+                  <option value="latest">Latest</option>
+                  <option value="top">Most engaged</option>
+                </select>
+              </label>
+            </div>
           )}
 
           {/* A 404 here is the private-community answer, not a broken page: the
@@ -473,6 +581,8 @@ export default function CommunityView({
                   onChangeAlgorithm={() => {}}
                   canEngage={canEngage}
                   onRefused={setNote}
+                  steward={isSteward}
+                  onCommunityChanged={refresh}
                 />
               ))}
             </div>
@@ -484,6 +594,10 @@ export default function CommunityView({
               onChanged={refresh}
             />
           )}
+          {showQueue && isSteward && (
+            <PendingPostsDialog communityId={community.id} onClose={() => setShowQueue(false)} onChanged={refresh} />
+          )}
+          {showAudit && isSteward && <AuditDialog communityId={community.id} onClose={() => setShowAudit(false)} />}
           {showMembers && canSeeMembers && (
             <CommunityMembersDialog
               communityId={community.id}

@@ -1,6 +1,7 @@
 """Kinjy · social-service — posts, feed modes, algorithm marketplace, reactions."""
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import html as html_module
 import json
@@ -17,7 +18,8 @@ import httpx
 from fastapi import BackgroundTasks, Depends, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from pydantic import BaseModel, Field
-from sqlalchemy import and_, delete, func, or_, select
+from sqlalchemy import and_, delete, func, or_, select, text, update
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session as OrmSession
 
 from common import events, notify, settings
@@ -97,14 +99,25 @@ MIGRATIONS: list[str] = [
     # existing table has to be stated here.
     f"ALTER TABLE {models.SCHEMA}.comments ADD COLUMN IF NOT EXISTS edited_at TIMESTAMPTZ",
     f"ALTER TABLE {models.SCHEMA}.comment_reactions ADD COLUMN IF NOT EXISTS sticker_id VARCHAR(40)",
+    # Community spaces, pins, scheduled posts and accepted answers (24/10).
+    f"ALTER TABLE {models.SCHEMA}.posts ADD COLUMN IF NOT EXISTS community_space VARCHAR(20)",
+    f"ALTER TABLE {models.SCHEMA}.posts ADD COLUMN IF NOT EXISTS pinned_at TIMESTAMPTZ",
+    f"ALTER TABLE {models.SCHEMA}.posts ADD COLUMN IF NOT EXISTS publish_at TIMESTAMPTZ",
+    f"ALTER TABLE {models.SCHEMA}.posts ADD COLUMN IF NOT EXISTS accepted_comment_id VARCHAR(40)",
+    f"CREATE INDEX IF NOT EXISTS ix_posts_scheduled ON {models.SCHEMA}.posts (publish_at) WHERE status = 'scheduled'",
+    f"CREATE INDEX IF NOT EXISTS ix_posts_community_status ON {models.SCHEMA}.posts (community_id, status, created_at)",
 ]
+
+
+def _start_scheduler() -> None:
+    asyncio.get_event_loop().create_task(_scheduled_loop())
 
 app = create_app(
     name="social-service",
     schema=models.SCHEMA,
     description="Posts, multiple feed modes, the algorithm marketplace, reactions and comments.",
     migrations=MIGRATIONS,
-    on_startup=[seed_algorithms],
+    on_startup=[seed_algorithms, _start_scheduler],
 )
 
 
@@ -133,6 +146,16 @@ class PostIn(BaseModel):
     episode_number: int | None = None
     media: list[dict] = Field(default_factory=list)
     mature: bool = False
+    # A community post's space; by default discussions (articles for an article).
+    space: str | None = Field(default=None, pattern="^(announcements|discussions|articles)$")
+    # Publish later. Up to SCHEDULE_MAX_DAYS ahead, at least a minute away.
+    publish_at: datetime | None = None
+
+
+SCHEDULE_MAX_DAYS = 90
+# Pinned posts per community: the top of a group is not a second feed.
+MAX_PINNED = int(os.getenv("COMMUNITY_MAX_PINNED", "5"))
+SPACE_LABELS = {"announcements": "Announcements", "discussions": "Discussions", "articles": "Articles"}
 
 
 class CommentIn(BaseModel):
@@ -682,7 +705,7 @@ def _post_out(
             # Reposts of restricted posts are refused now, but rows from before
             # that rule must not carry a circle post into a stranger's feed.
             and (original.visibility == "public" or original.author_id == viewer)
-            and original.status not in ("removed", "draft")
+            and original.status not in ("removed", "draft", "pending", "scheduled")
             else None
         ),
         # Resolved once per response by _reposted_by(); a per-card lookup here
@@ -690,6 +713,15 @@ def _post_out(
         "reposted_by_me": post.id in (reposted if reposted is not None else set()),
         "created_at": post.created_at,
         "edited_at": post.edited_at,
+        "status": post.status,
+        "community_space": _space_of(post),
+        "pinned": post.pinned_at is not None,
+        "publish_at": post.publish_at,
+        "accepted_comment_id": post.accepted_comment_id,
+        "bookmarked": bool(viewer) and db.scalar(
+            select(models.PostBookmark.id).where(
+                models.PostBookmark.user_id == viewer, models.PostBookmark.post_id == post.id)
+        ) is not None,
         "media": [
             {
                 "url": signed_media[m.media_id],
@@ -1024,15 +1056,36 @@ async def create_post(payload: PostIn, principal: CurrentUser, db: OrmSession = 
     payload.body = _clean_body(payload.body, payload.format)
     if payload.visibility == "circle":
         _require_own_circle(principal.user_id, payload.circle_id)
+    status = "published"
+    space: str | None = None
+    policy: dict | None = None
     if payload.visibility == "community":
         if not payload.community_id:
             raise HTTPException(status_code=400, detail="A community post needs community_id")
-        _require_membership(principal.user_id, payload.community_id)
+        policy = _community_policy(principal.user_id, payload.community_id)
+        space = payload.space or ("articles" if payload.format == "article" else "discussions")
+        if not policy["can_post"].get(space):
+            if space not in policy.get("spaces", []):
+                raise HTTPException(status_code=403, detail=f"{SPACE_LABELS[space]} is switched off in this community")
+            raise HTTPException(
+                status_code=403, detail=f"Only the people who run this community post in {SPACE_LABELS[space]}")
+        if policy.get("requires_approval"):
+            status = "pending"
     if not payload.body.strip() and not payload.media:
         raise HTTPException(status_code=400, detail="A post needs a body or media")
+    publish_at = None
+    if payload.publish_at is not None:
+        publish_at = _aware(payload.publish_at)
+        now = datetime.now(timezone.utc)
+        if publish_at < now + timedelta(minutes=1):
+            raise HTTPException(status_code=400, detail="Choose a time at least a minute from now")
+        if publish_at > now + timedelta(days=SCHEDULE_MAX_DAYS):
+            raise HTTPException(status_code=400, detail=f"A post can be scheduled up to {SCHEDULE_MAX_DAYS} days ahead")
+        if status == "published":
+            status = "scheduled"
 
     media = _verified_media(payload.media, principal.user_id)
-    data = payload.model_dump(exclude={"topics", "media"})
+    data = payload.model_dump(exclude={"topics", "media", "space", "publish_at"})
     # A circle id only means something on a circle post; elsewhere it would be
     # a stray pointer the audience rule might one day read.
     if payload.visibility != "circle":
@@ -1046,6 +1099,9 @@ async def create_post(payload: PostIn, principal: CurrentUser, db: OrmSession = 
         id=new_id("pst"),
         author_id=principal.user_id,
         topics=_merge_topics(payload.topics, payload.body),
+        status=status,
+        community_space=space,
+        publish_at=publish_at,
         **data,
     )
     db.add(post)
@@ -1090,6 +1146,25 @@ async def create_post(payload: PostIn, principal: CurrentUser, db: OrmSession = 
     _restrict_attached_media([m["media_id"] for m in media])
     db.refresh(post)
 
+    if post.status == "pending":
+        # Waiting for a steward: nobody else hears of it yet.
+        notify.notify_many(
+            [s for s in (policy or {}).get("stewards", []) if s != principal.user_id],
+            kind="community_post_pending",
+            title=f"A post is waiting for approval in {(policy or {}).get('name', 'your community')}",
+            link=f"/communities/{(policy or {}).get('slug', '')}?manage=posts",
+        )
+        return _post_out(post, db, viewer=principal.user_id)
+    if post.status == "scheduled":
+        return _post_out(post, db, viewer=principal.user_id)
+    await _announce(post)
+    return _post_out(post, db, viewer=principal.user_id)
+
+
+async def _announce(post: models.Post) -> None:
+    """Everything that happens when a post becomes visible: the event, the live
+    feed, mentions and the community's notifications. Once, at publication -
+    for a scheduled or approved post that is later than its creation."""
     await events.publish(
         "post.published",
         {"post_id": post.id, "author_id": post.author_id, "format": post.format, "lang": post.lang},
@@ -1107,16 +1182,51 @@ async def create_post(payload: PostIn, principal: CurrentUser, db: OrmSession = 
     # notification would quote it to them anyway.
     told: set[str] = set()
     if post.visibility != "private":
-        told = _notify_mentions(post.body, principal.user_id, post.id, "post")
+        told = _notify_mentions(post.body, post.author_id, post.id, "post")
     # A post in a group is news to the group.
     if post.visibility == "community" and post.community_id:
-        text = htmlish_to_text(post.body) if post.format == "article" else post.body
+        body_text = htmlish_to_text(post.body) if post.format == "article" else post.body
         threading.Thread(
             target=_notify_community_post,
-            args=(post.id, post.author_id, post.community_id, text or "", told),
+            args=(post.id, post.author_id, post.community_id, body_text or "", told),
             daemon=True,
         ).start()
-    return _post_out(post, db, viewer=principal.user_id)
+
+
+async def _scheduled_loop() -> None:
+    """Publish scheduled posts when their time comes. Every minute, every worker:
+    the claim below is atomic, so each post is published - and announced - once."""
+    while True:
+        await asyncio.sleep(60)
+        try:
+            await publish_due_posts()
+        except Exception as exc:  # pragma: no cover - logged, retried next minute
+            log.error("scheduled posts: %s", exc)
+
+
+async def publish_due_posts(limit: int = 50) -> int:
+    with SessionLocal() as db:
+        ids = db.execute(
+            text(
+                f"""
+                UPDATE {models.SCHEMA}.posts SET status = 'published', created_at = now()
+                 WHERE id IN (SELECT id FROM {models.SCHEMA}.posts
+                               WHERE status = 'scheduled' AND publish_at <= now()
+                               ORDER BY publish_at LIMIT :limit FOR UPDATE SKIP LOCKED)
+                 RETURNING id
+                """
+            ),
+            {"limit": limit},
+        ).scalars().all()
+        db.commit()
+        for post_id in ids:
+            post = db.get(models.Post, post_id)
+            if post is not None:
+                try:
+                    await _announce(post)
+                except Exception as exc:
+                    log.warning("announcing scheduled post %s: %s", post_id, exc)
+        return len(ids)
 
 
 # Declared before /posts/{post_id}: FastAPI matches in order, and the
@@ -2451,6 +2561,9 @@ def edit_post(post_id: str, payload: PostIn, principal: CurrentUser, db: OrmSess
         )
     previous_body = post.body or ""
     payload.body = _clean_body(payload.body, post.format)
+    if payload.body != previous_body:
+        # The text as it stood, kept: an edit is visible, and so is what it changed.
+        db.add(models.PostRevision(post_id=post.id, body=previous_body, written_at=post.edited_at or post.created_at))
     post.body = payload.body
     post.topics = _merge_topics(payload.topics, payload.body)
     post.edited_at = datetime.now(timezone.utc)
@@ -2818,38 +2931,6 @@ def _audience_clause(audience: Audience):
     return or_(*clauses)
 
 
-def _require_membership(author_id: str, community_id: str) -> None:
-    """A post may only be addressed to a community its author has joined.
-
-    Asked of community-service, which owns membership. Fails closed for the
-    same reason the circle check does: without this, `community_id` was a free
-    text field and anybody could write into any group - including a private one
-    they had been refused, or a secret one whose id they guessed.
-
-    A pending request is not membership. That distinction is the only thing a
-    private community has.
-    """
-    try:
-        response = httpx.get(
-            f"{COMMUNITY_URL}/internal/membership/{community_id}/{author_id}", timeout=4)
-    except Exception as exc:
-        log.warning("membership lookup failed for %s in %s: %s", author_id, community_id, exc)
-        raise HTTPException(
-            status_code=503, detail="Could not check that community right now. Try again.")
-    if response.status_code != 200:
-        raise HTTPException(status_code=404, detail="Community not found")
-    row = response.json()
-    if not row.get("member"):
-        if row.get("status") == "pending":
-            raise HTTPException(
-                status_code=403, detail="Your request to join is still waiting to be answered")
-        if row.get("status") == "banned":
-            raise HTTPException(status_code=403, detail="You cannot post in this community")
-        # Not a member and never asked. Says "join first" rather than "no such
-        # community", because a public community is not a secret.
-        raise HTTPException(status_code=403, detail="Join this community before posting in it")
-
-
 def _community_summary(community_id: str) -> dict:
     try:
         response = httpx.get(f"{COMMUNITY_URL}/internal/communities/{community_id}", timeout=4)
@@ -2916,6 +2997,9 @@ def _readable_post(db: OrmSession, post_id: str, viewer: str | None) -> models.P
     post = db.get(models.Post, post_id)
     if post is None or post.status in ("removed", "draft"):
         raise HTTPException(status_code=404, detail="Post not found")
+    # Waiting for approval or for its time: its author's alone until then.
+    if post.status in ("pending", "scheduled", "withheld") and post.author_id != viewer:
+        raise HTTPException(status_code=404, detail="Post not found")
     if _can_see(post, _viewer_audience(viewer)):
         return post
     if post.visibility == "community" and _publishes_publicly(post.community_id):
@@ -2972,6 +3056,8 @@ def community_feed(
     principal: MaybeUser,
     limit: int = 20,
     offset: int = 0,
+    space: str | None = Query(default=None, pattern="^(announcements|discussions|articles)$"),
+    sort: str = Query(default="latest", pattern="^(latest|top)$"),
     db: OrmSession = Depends(get_db),
 ):
     """What has been posted inside one community.
@@ -3019,12 +3105,22 @@ def community_feed(
         models.Post.visibility == "community",
         models.Post.status == "published",
     )
+    # Posts of a space that is switched off are hidden (kept, not deleted).
+    on = set(community.get("spaces") or ["announcements", "discussions", "articles"])
+    effective = _space_expr()
+    stmt = stmt.where(effective.in_(sorted(on & set(SPACE_LABELS))))
+    if space:
+        stmt = stmt.where(effective == space)
     stmt = agefilter.restrict_query(stmt, age)
 
     total = db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
-    rows = db.scalars(
-        stmt.order_by(models.Post.created_at.desc()).limit(min(limit, 50)).offset(offset)
-    ).all()
+    # Pinned first, then by the chosen order. "top" = reactions + 2 x comments
+    # + reposts, all time; "latest" = newest first.
+    order = [models.Post.pinned_at.is_(None), models.Post.pinned_at.desc()]
+    if sort == "top":
+        order.append((models.Post.likes_count + 2 * models.Post.comments_count + models.Post.reposts_count).desc())
+    order.append(models.Post.created_at.desc())
+    rows = db.scalars(stmt.order_by(*order).limit(min(limit, 50)).offset(offset)).all()
     authors = _resolve_authors(_author_ids(db, list(rows)))
     reposted = _reposted_by(db, viewer, list(rows))
     items = [
@@ -3042,7 +3138,248 @@ def community_feed(
         "can_engage": bool(viewer and community_id in _viewer_communities(viewer)),
         "total": total,
         "items": agefilter.filter_items(db, age, items),
+        # The reader's own posts waiting for approval or for their time.
+        "my_queued": [
+            _post_out(p, db, viewer=viewer)
+            for p in db.scalars(
+                select(models.Post).where(
+                    models.Post.community_id == community_id, models.Post.author_id == viewer,
+                    models.Post.status.in_(("pending", "scheduled")),
+                ).order_by(models.Post.created_at.desc()).limit(20)
+            ).all()
+        ] if viewer and offset == 0 else [],
     }
+
+
+def _space_of(post: models.Post) -> str | None:
+    if post.visibility != "community":
+        return None
+    return post.community_space or ("articles" if post.format == "article" else "discussions")
+
+
+def _space_expr():
+    """The space of a community post in SQL, with the same default as _space_of."""
+    from sqlalchemy import case
+    return func.coalesce(
+        models.Post.community_space,
+        case((models.Post.format == "article", "articles"), else_="discussions"),
+    )
+
+
+def _community_policy(user_id: str, community_id: str) -> dict:
+    """Membership, role and posting rights in one community, from the service
+    that owns them. Fails closed. A pending request is not membership - the
+    one thing a private community has - and is told apart from a refusal."""
+    try:
+        response = httpx.get(f"{COMMUNITY_URL}/internal/communities/{community_id}/post-policy/{user_id}", timeout=4)
+    except Exception as exc:
+        log.warning("post policy lookup failed for %s in %s: %s", user_id, community_id, exc)
+        raise HTTPException(status_code=503, detail="Could not check that community right now. Try again.")
+    if response.status_code != 200 or not response.json().get("exists"):
+        raise HTTPException(status_code=404, detail="Community not found")
+    policy = response.json()
+    if not policy.get("member"):
+        if policy.get("status") == "pending":
+            raise HTTPException(status_code=403, detail="Your request to join is still waiting to be answered")
+        if policy.get("status") == "banned":
+            raise HTTPException(status_code=403, detail="You cannot post in this community")
+        raise HTTPException(status_code=403, detail="Join this community before posting in it")
+    return policy
+
+
+def _community_audit(community_id: str, actor_id: str, action: str, post_id: str, reason: str | None) -> None:
+    try:
+        httpx.post(f"{COMMUNITY_URL}/internal/communities/{community_id}/audit",
+                   json={"actor_id": actor_id, "action": action, "target_kind": "post", "target_id": post_id,
+                         "reason": reason}, timeout=4).raise_for_status()
+    except Exception as exc:
+        log.error("community audit lost (%s %s on %s): %s", action, actor_id, post_id, exc)
+
+
+def _community_post_for_steward(db: OrmSession, post_id: str, viewer: str) -> tuple[models.Post, dict]:
+    """A community post and its community's policy, for one of its stewards. 404 otherwise."""
+    post = db.get(models.Post, post_id)
+    if post is None or post.visibility != "community" or not post.community_id:
+        raise HTTPException(status_code=404, detail="Post not found")
+    try:
+        policy = _community_policy(viewer, post.community_id)
+    except HTTPException:
+        raise HTTPException(status_code=404, detail="Post not found")
+    if not policy.get("steward"):
+        raise HTTPException(status_code=403, detail="Only the people who run this community can do that")
+    return post, policy
+
+
+@app.get("/feed/community/{community_id}/pending", tags=["feed"])
+def community_pending(community_id: str, principal: CurrentUser, db: OrmSession = Depends(get_db)):
+    """Posts waiting for approval in a community. Its stewards only."""
+    policy = _community_policy(principal.user_id, community_id)
+    if not policy.get("steward"):
+        raise HTTPException(status_code=403, detail="Only the people who run this community can see this")
+    rows = db.scalars(
+        select(models.Post).where(models.Post.community_id == community_id, models.Post.status == "pending")
+        .order_by(models.Post.created_at).limit(100)
+    ).all()
+    authors = _resolve_authors({p.author_id for p in rows})
+    return {"items": [_post_out(p, db, viewer=principal.user_id, authors=authors) for p in rows]}
+
+
+class ModerateIn(BaseModel):
+    action: str = Field(pattern="^(approve|reject|remove)$")
+    reason: str | None = Field(default=None, max_length=500)
+
+
+@app.post("/posts/{post_id}/moderate", tags=["posts"])
+async def moderate_community_post(post_id: str, payload: ModerateIn, principal: CurrentUser,
+                                  db: OrmSession = Depends(get_db)):
+    """Approve or reject a waiting post, or remove a published one. Stewards of
+    its community only; every action lands in the community's audit log."""
+    post, policy = _community_post_for_steward(db, post_id, principal.user_id)
+    now = datetime.now(timezone.utc)
+    if payload.action == "approve":
+        later = post.publish_at is not None and _aware(post.publish_at) > now
+        claimed = db.execute(
+            update(models.Post).where(models.Post.id == post.id, models.Post.status == "pending")
+            .values(status="scheduled" if later else "published", created_at=post.created_at if later else now)
+        ).rowcount
+        db.commit()
+        if not claimed:
+            raise HTTPException(status_code=409, detail="This post is not waiting for approval")
+        db.refresh(post)
+        _community_audit(post.community_id, principal.user_id, "post_approve", post.id, payload.reason)
+        notify.notify(post.author_id, kind="community_post_approved",
+                      title=f"Your post in {policy.get('name')} was approved", link=f"/p/{post.id}")
+        if post.status == "published":
+            await _announce(post)
+    else:
+        wanted = "pending" if payload.action == "reject" else "published"
+        claimed = db.execute(
+            update(models.Post).where(models.Post.id == post.id, models.Post.status == wanted)
+            .values(status="removed", pinned_at=None)
+        ).rowcount
+        db.commit()
+        if not claimed:
+            raise HTTPException(status_code=409, detail=f"This post is not {wanted}")
+        _community_audit(post.community_id, principal.user_id, f"post_{payload.action}", post.id, payload.reason)
+        notify.notify(
+            post.author_id, kind="community_post_removed",
+            title=(f"Your post in {policy.get('name')} was not approved" if payload.action == "reject"
+                   else f"Your post in {policy.get('name')} was removed"),
+            body=payload.reason or None,
+        )
+    db.refresh(post)
+    return _post_out(post, db, viewer=principal.user_id)
+
+
+@app.post("/posts/{post_id}/pin", tags=["posts"])
+def pin_post(post_id: str, principal: CurrentUser, db: OrmSession = Depends(get_db)):
+    """Pin a post to the top of its community. Stewards; MAX_PINNED at most."""
+    post, _ = _community_post_for_steward(db, post_id, principal.user_id)
+    if post.status != "published":
+        raise HTTPException(status_code=409, detail="Only a published post can be pinned")
+    if post.pinned_at is None:
+        pinned = db.scalar(select(func.count()).select_from(models.Post).where(
+            models.Post.community_id == post.community_id, models.Post.pinned_at.is_not(None),
+            models.Post.status == "published")) or 0
+        if pinned >= MAX_PINNED:
+            raise HTTPException(status_code=409, detail=f"{MAX_PINNED} posts are pinned already. Unpin one first.")
+        post.pinned_at = datetime.now(timezone.utc)
+        db.commit()
+        _community_audit(post.community_id, principal.user_id, "post_pin", post.id, None)
+    return {"pinned": True}
+
+
+@app.delete("/posts/{post_id}/pin", tags=["posts"])
+def unpin_post(post_id: str, principal: CurrentUser, db: OrmSession = Depends(get_db)):
+    post, _ = _community_post_for_steward(db, post_id, principal.user_id)
+    if post.pinned_at is not None:
+        post.pinned_at = None
+        db.commit()
+        _community_audit(post.community_id, principal.user_id, "post_unpin", post.id, None)
+    return {"pinned": False}
+
+
+class AcceptIn(BaseModel):
+    comment_id: str | None = None
+
+
+@app.post("/posts/{post_id}/accept-answer", tags=["posts"])
+def accept_answer(post_id: str, payload: AcceptIn, principal: CurrentUser, db: OrmSession = Depends(get_db)):
+    """Mark one comment as the answer to a community discussion (or clear it).
+
+    The person who asked, or a steward of the community.
+    """
+    post = _readable_post(db, post_id, principal.user_id)
+    if post.visibility != "community" or not post.community_id:
+        raise HTTPException(status_code=400, detail="Answers are marked on community discussions")
+    if post.author_id != principal.user_id:
+        try:
+            policy = _community_policy(principal.user_id, post.community_id)
+        except HTTPException:
+            policy = {}
+        if not policy.get("steward"):
+            raise HTTPException(status_code=403, detail="Only the person who asked, or a moderator, can mark the answer")
+    if payload.comment_id:
+        comment = db.get(models.Comment, payload.comment_id)
+        if comment is None or comment.post_id != post.id or comment.status != "published":
+            raise HTTPException(status_code=404, detail="Comment not found")
+        post.accepted_comment_id = comment.id
+        db.commit()
+        if comment.author_id != principal.user_id:
+            notify.notify(comment.author_id, kind="answer_accepted", title="Your answer was marked as the answer",
+                          link=f"/p/{post.id}")
+    else:
+        post.accepted_comment_id = None
+        db.commit()
+    return {"accepted_comment_id": post.accepted_comment_id}
+
+
+@app.post("/posts/{post_id}/bookmark", tags=["posts"])
+def bookmark_post(post_id: str, principal: CurrentUser, db: OrmSession = Depends(get_db)):
+    """Save a post to read again. Private: nobody else sees who saved what."""
+    post = _readable_post(db, post_id, principal.user_id)
+    db.execute(
+        pg_insert(models.PostBookmark).values(user_id=principal.user_id, post_id=post.id,
+                                              created_at=datetime.now(timezone.utc)).on_conflict_do_nothing()
+    )
+    db.commit()
+    return {"bookmarked": True}
+
+
+@app.delete("/posts/{post_id}/bookmark", tags=["posts"])
+def unbookmark_post(post_id: str, principal: CurrentUser, db: OrmSession = Depends(get_db)):
+    db.execute(delete(models.PostBookmark).where(
+        models.PostBookmark.user_id == principal.user_id, models.PostBookmark.post_id == post_id))
+    db.commit()
+    return {"bookmarked": False}
+
+
+@app.get("/bookmarks", tags=["posts"])
+def my_bookmarks(principal: CurrentUser, limit: int = 20, offset: int = 0, db: OrmSession = Depends(get_db)):
+    """The member's saved posts, newest saved first - only those they may still read."""
+    marks = db.scalars(
+        select(models.PostBookmark).where(models.PostBookmark.user_id == principal.user_id)
+        .order_by(models.PostBookmark.created_at.desc()).offset(max(0, offset)).limit(max(1, min(limit, 50)))
+    ).all()
+    items = []
+    for mark in marks:
+        try:
+            post = _readable_post(db, mark.post_id, principal.user_id)
+        except HTTPException:
+            continue  # access lost since (left the group, post removed): not shown
+        if post.status != "published":
+            continue
+        items.append(_post_out(post, db, viewer=principal.user_id))
+    return {"items": items}
+
+
+@app.get("/posts/{post_id}/revisions", tags=["posts"])
+def post_revisions(post_id: str, principal: MaybeUser, db: OrmSession = Depends(get_db)):
+    """What an edited post said before, newest edit first. For whoever may read it."""
+    post = _readable_post(db, post_id, principal.user_id if principal else None)
+    rows = db.scalars(select(models.PostRevision).where(models.PostRevision.post_id == post.id)
+                      .order_by(models.PostRevision.id.desc()).limit(50)).all()
+    return {"items": [{"body": r.body, "written_at": r.written_at, "replaced_at": r.created_at} for r in rows]}
 
 
 class ReadableIn(BaseModel):

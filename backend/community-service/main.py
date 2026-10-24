@@ -1,8 +1,11 @@
 """Kinjy · community-service — communities, groups, forums, knowledge base."""
 from __future__ import annotations
 
+import os
 import re
 import secrets
+import threading
+import time
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import Literal
@@ -28,6 +31,7 @@ from common.service import create_app
 
 import agecommunity
 import models
+import spaces as space_rules
 
 log = logging.getLogger("community-service")
 MESSAGING_URL = "http://messaging-service:8000"
@@ -37,6 +41,13 @@ MEDIA_URL = "http://media-service:8000"
 USER_URL = "http://user-service:8000"
 AI_URL = "http://ai-service:8000"
 PAYMENT_URL = "http://payment-service:8000"
+AUTH_URL = "http://auth-service:8000"
+
+# A member joined less than this many days ago is "new" for a community whose
+# posts from new members wait for approval.
+NEW_MEMBER_DAYS = int(os.getenv("COMMUNITY_NEW_MEMBER_DAYS", "7"))
+# Invitations one member may send into communities in an hour.
+INVITES_PER_HOUR = int(os.getenv("COMMUNITY_INVITES_PER_HOUR", "20"))
 
 # Groups any member may pin. Beyond this, the year's verification (KYC) fee
 # has to be paid.
@@ -107,6 +118,17 @@ MIGRATIONS = [
     # Told about new posts in the group: on for everybody already in one.
     f"ALTER TABLE {models.SCHEMA}.memberships "
     "ADD COLUMN IF NOT EXISTS notify_posts BOOLEAN NOT NULL DEFAULT TRUE",
+    # Templates, spaces, approval, welcome and rules (24/10). Every existing
+    # community reads as an interest group with its access untouched.
+    f"ALTER TABLE {models.SCHEMA}.communities ADD COLUMN IF NOT EXISTS template VARCHAR(20) NOT NULL DEFAULT 'interest'",
+    f"ALTER TABLE {models.SCHEMA}.communities ADD COLUMN IF NOT EXISTS post_approval VARCHAR(20) NOT NULL DEFAULT 'none'",
+    f"ALTER TABLE {models.SCHEMA}.communities ADD COLUMN IF NOT EXISTS welcome_message TEXT",
+    f"ALTER TABLE {models.SCHEMA}.communities ADD COLUMN IF NOT EXISTS rules TEXT NOT NULL DEFAULT ''",
+    # Who invited a member into a community: apart from the account sponsor.
+    f"ALTER TABLE {models.SCHEMA}.memberships ADD COLUMN IF NOT EXISTS invited_by VARCHAR(40)",
+    f"ALTER TABLE {models.SCHEMA}.memberships ADD COLUMN IF NOT EXISTS invite_token VARCHAR(16)",
+    f"ALTER TABLE {models.SCHEMA}.memberships ADD COLUMN IF NOT EXISTS welcomed_at TIMESTAMPTZ",
+    f"CREATE INDEX IF NOT EXISTS ix_community_memberships_invited_by ON {models.SCHEMA}.memberships (invited_by)",
 ]
 
 app = create_app(
@@ -148,6 +170,8 @@ class CommunityIn(BaseModel):
     lang: str = "en"
     country: str | None = None
     city: str | None = None
+    # A starting configuration (spaces.py). Optional: without it, an interest group.
+    template: str | None = Field(default=None, pattern="^(" + "|".join(space_rules.TEMPLATE_IDS) + ")$")
 
 
 class ForumIn(BaseModel):
@@ -183,11 +207,21 @@ async def create_community(payload: CommunityIn, principal: CurrentUser, db: Orm
     if db.scalar(select(models.Community).where(models.Community.slug == slug)):
         slug = f"{slug}-{new_id('x')[-4:].lower()}"
 
+    data = payload.model_dump(exclude={"template"})
+    template = space_rules.TEMPLATE_BY_ID[payload.template or space_rules.DEFAULT_TEMPLATE]
+    # A template that starts closed (family, memorial, association...) is not
+    # opened by the form's default: only an explicit stricter choice changes it.
+    strictness = {"public": 0, "private": 1, "secret": 2, "paid": 1}
+    if strictness.get(data["kind"], 0) < strictness.get(template.kind, 0):
+        data["kind"] = template.kind
     community = models.Community(
-        id=new_id("cmy"), slug=slug, owner_id=principal.user_id, members_count=1, **payload.model_dump()
+        id=new_id("cmy"), slug=slug, owner_id=principal.user_id, members_count=1, **data,
+        template=template.id, post_approval=template.post_approval,
+        public_content=template.public_content and data["kind"] == "public",
     )
     db.add(community)
     db.flush()
+    space_rules.materialize(db, community)
     db.add(
         models.Membership(
             community_id=community.id, user_id=principal.user_id, role="owner", status="active"
@@ -298,6 +332,8 @@ def invite_member(
     )
     if inviter is None:
         raise HTTPException(status_code=403, detail="Join the community before inviting others")
+    if not _invite_allowed(principal.user_id):
+        raise HTTPException(status_code=429, detail="You have sent a lot of invitations. Try again later.")
 
     allowed, reason = permissions.check(
         principal.user_id, payload.user_id, "can_add_community", "add this member to a community"
@@ -314,10 +350,67 @@ def invite_member(
     if existing:
         return {"invited": False, "status": existing.status, "already": True}
 
-    db.add(models.Membership(community_id=community_id, user_id=payload.user_id, status="active"))
+    db.add(models.Membership(community_id=community_id, user_id=payload.user_id, status="active",
+                             invited_by=principal.user_id))
     community.members_count += 1
+    _audit(db, community_id, principal.user_id, "invite", "member", payload.user_id)
     db.commit()
+    _welcome(db, community, payload.user_id)
     return {"invited": True, "status": "active"}
+
+
+_invites: dict[str, list[float]] = {}
+_invites_lock = threading.Lock()
+
+
+def _invite_allowed(user_id: str) -> bool:
+    """A member adding people one after another is a member, until it is a script."""
+    now = time.time()
+    with _invites_lock:
+        recent = [t for t in _invites.get(user_id, []) if now - t < 3600]
+        if len(_invites) > 5000:
+            _invites.clear()
+        if len(recent) >= INVITES_PER_HOUR:
+            _invites[user_id] = recent
+            return False
+        recent.append(now)
+        _invites[user_id] = recent
+        return True
+
+
+def _link_inviter(token: str | None, community: models.Community, joiner_id: str, db: OrmSession) -> str | None:
+    """The member whose invitation link brought somebody into this community.
+
+    Only an invitation link (one that carries its maker's invitation), made by
+    an active member of this community for this community's page, and never
+    the joiner's own. Anything else credits nobody, silently: a stale or
+    foreign link must not stop anybody joining.
+    """
+    if not token:
+        return None
+    try:
+        response = httpx.get(f"{AUTH_URL}/internal/share-links/{token}", timeout=4)
+    except httpx.HTTPError:
+        return None
+    if response.status_code != 200:
+        return None
+    link = response.json()
+    maker = link.get("member_id")
+    path = (link.get("destination") or "").split("?", 1)[0].split("#", 1)[0]
+    if not link.get("with_invitation") or not link.get("active") or not maker or maker == joiner_id:
+        return None
+    if path != f"/communities/{community.slug}":
+        return None
+    inviter = _membership(db, community.id, maker)
+    return maker if inviter is not None and inviter.status == "active" else None
+
+
+def _record_link_conversion(token: str, kind: str, subject_id: str) -> None:
+    try:
+        httpx.post(f"{AUTH_URL}/internal/share-links/{token}/conversions",
+                   json={"kind": kind, "subject_id": subject_id}, timeout=4)
+    except httpx.HTTPError as exc:
+        log.warning("could not record a %s for link %s: %s", kind, token, exc)
 
 
 @app.post("/communities/{community_id}/join", tags=["communities"])
@@ -325,6 +418,9 @@ def join(
     community_id: str,
     principal: CurrentUser,
     invite: str | None = None,
+    # The short link the member arrived on (?via=), if any: who invited them
+    # into this community. Never changes the account's sponsor.
+    via: str | None = None,
     db: OrmSession = Depends(get_db),
 ):
     community = db.get(models.Community, community_id)
@@ -355,10 +451,16 @@ def join(
     # A shared invite to a secret community knocks; it does not open the
     # door. Links get forwarded, and the members decide who comes in.
     status = "pending" if community.kind in ("private", "secret") else "active"
-    db.add(models.Membership(community_id=community_id, user_id=principal.user_id, status=status))
+    inviter = _link_inviter(via, community, principal.user_id, db)
+    db.add(models.Membership(community_id=community_id, user_id=principal.user_id, status=status,
+                             invited_by=inviter, invite_token=via if inviter else None))
     if status == "active":
         community.members_count += 1
     db.commit()
+    if inviter:
+        _record_link_conversion(via, "community_join", principal.user_id)
+    if status == "active":
+        _welcome(db, community, principal.user_id)
 
     # A pending request nobody is told about is a request into a void. The
     # owner and every moderator hear it.
@@ -757,6 +859,22 @@ def get_community(
         "my_status": membership.status if membership else None,
         "my_pinned": bool(membership and membership.status == "active" and membership.pinned_at),
         "my_notify_posts": bool(membership and membership.status == "active" and membership.notify_posts),
+        **_space_view(db, community, membership),
+    }
+
+
+def _space_view(db: OrmSession, community: models.Community, membership: models.Membership | None) -> dict:
+    """Template, spaces and the rules of the house, with what this reader may do."""
+    on = space_rules.enabled_spaces(db, community)
+    role = membership.role if membership and membership.status == "active" else None
+    return {
+        "template": community.template or space_rules.DEFAULT_TEMPLATE,
+        "spaces": space_rules.spaces_out(on),
+        "post_approval": community.post_approval or "none",
+        "welcome_message": community.welcome_message if role in ("owner", "moderator") else None,
+        "rules": community.rules or "",
+        "my_can_post": {s: space_rules.can_post(s, role, on) for s in space_rules.POST_SPACES},
+        "directory_open": "directory" in on or role in ("owner", "moderator"),
     }
 
 
@@ -790,7 +908,9 @@ def list_members(
 
 
 class MemberActionIn(BaseModel):
-    action: str = Field(pattern="^(approve|reject|ban|unban|promote|demote)$")
+    action: str = Field(pattern="^(approve|reject|ban|unban|promote|demote|remove)$")
+    # Kept in the community's audit log; shown to the member for a ban or removal.
+    reason: str | None = Field(default=None, max_length=500)
 
 
 @app.post("/communities/{community_id}/members/{user_id}", tags=["governance"])
@@ -830,7 +950,12 @@ def act_on_member(
         membership.role = "moderator"
     elif action == "demote":
         membership.role = "member"
+    elif action == "remove":
+        if membership.status == "active":
+            community.members_count = max(0, community.members_count - 1)
+        db.delete(membership)
 
+    _audit(db, community.id, principal.user_id, action, "member", user_id, payload.reason)
     db.commit()
 
     if action == "approve":
@@ -840,7 +965,207 @@ def act_on_member(
             title=f"You were admitted to {community.name}",
             link=f"/communities/{community.slug}",
         )
+        _welcome(db, community, user_id)
+    elif action in ("ban", "remove"):
+        notify.notify(
+            user_id,
+            kind="community_removed",
+            title=f"You were {'banned from' if action == 'ban' else 'removed from'} {community.name}",
+            body=payload.reason or None,
+        )
     return {"ok": True, "action": action}
+
+
+def _audit(db: OrmSession, community_id: str, actor_id: str, action: str,
+           target_kind: str | None = None, target_id: str | None = None, reason: str | None = None) -> None:
+    """One line in the community's audit log, in the caller's transaction."""
+    db.add(models.CommunityAudit(
+        community_id=community_id, actor_id=actor_id, action=action[:30], target_kind=target_kind,
+        target_id=target_id, reason=(reason or None) and reason[:500],
+    ))
+
+
+def _welcome(db: OrmSession, community: models.Community, user_id: str) -> None:
+    """The community's welcome message, once per membership.
+
+    The flag is claimed in the database before the notification goes, so a
+    retry, a second worker or an approve-then-unban never sends it twice.
+    """
+    if not (community.welcome_message or "").strip():
+        return
+    claimed = db.execute(
+        update(models.Membership)
+        .where(models.Membership.community_id == community.id, models.Membership.user_id == user_id,
+               models.Membership.status == "active", models.Membership.welcomed_at.is_(None))
+        .values(welcomed_at=datetime.now(timezone.utc))
+    ).rowcount
+    db.commit()
+    if claimed:
+        notify.notify(user_id, kind="community_welcome", title=f"Welcome to {community.name}",
+                      body=community.welcome_message[:1000], link=f"/communities/{community.slug}")
+
+
+# --- templates, spaces, settings, audit -------------------------------------
+
+@app.get("/community-templates", tags=["communities"])
+def community_templates():
+    """The starting configurations, and every space with whether it exists yet."""
+    return {"templates": space_rules.templates_out(), "spaces": space_rules.spaces_out(set())}
+
+
+class SpacesIn(BaseModel):
+    spaces: dict[str, bool]
+
+
+@app.patch("/communities/{community_id}/spaces", tags=["governance"])
+def set_spaces(community_id: str, payload: SpacesIn, principal: CurrentUser, db: OrmSession = Depends(get_db)):
+    """Switch spaces on or off. The owner's. A space not built yet stays off.
+
+    Switching a space off hides its section and stops new posts in it; the
+    posts already there are not deleted, and come back if it is switched on.
+    """
+    community = _require_owner(db, community_id, principal.user_id)
+    unknown = [k for k in payload.spaces if k not in space_rules.BY_ID]
+    if unknown:
+        raise HTTPException(status_code=400, detail=f"Unknown space: {', '.join(unknown)}")
+    blocked = [k for k, on in payload.spaces.items() if on and not space_rules.BY_ID[k].available]
+    if blocked:
+        raise HTTPException(status_code=409, detail=f"Not available yet: {', '.join(blocked)}")
+    space_rules.materialize(db, community)
+    rows = {r.space: r for r in db.scalars(
+        select(models.CommunitySpace).where(models.CommunitySpace.community_id == community.id)).all()}
+    changed = []
+    for key, on in payload.spaces.items():
+        row = rows.get(key)
+        if row is None:
+            row = models.CommunitySpace(community_id=community.id, space=key, enabled=on,
+                                        position=[s.id for s in space_rules.SPACES].index(key))
+            db.add(row)
+        if row.enabled != on:
+            changed.append(f"{key} {'on' if on else 'off'}")
+        row.enabled = on
+    if changed:
+        _audit(db, community.id, principal.user_id, "spaces", "community", community.id, ", ".join(changed))
+    db.commit()
+    membership = _membership(db, community.id, principal.user_id)
+    return _space_view(db, community, membership)
+
+
+class SettingsIn(BaseModel):
+    template: str | None = Field(default=None, pattern="^(" + "|".join(space_rules.TEMPLATE_IDS) + ")$")
+    post_approval: str | None = Field(default=None, pattern="^(none|new_members|all)$")
+    welcome_message: str | None = Field(default=None, max_length=2000)
+    rules: str | None = Field(default=None, max_length=8000)
+
+    model_config = {"extra": "forbid"}
+
+
+@app.patch("/communities/{community_id}/settings", tags=["governance"])
+def set_settings(community_id: str, payload: SettingsIn, principal: CurrentUser, db: OrmSession = Depends(get_db)):
+    """Template label, post approval, welcome message and rules. The owner's.
+
+    Changing the template changes nothing about access or spaces: the current
+    spaces are written down first, so they stay exactly as they are.
+    """
+    community = _require_owner(db, community_id, principal.user_id)
+    sent = payload.model_dump(exclude_unset=True)
+    if "template" in sent and sent["template"] and sent["template"] != community.template:
+        space_rules.materialize(db, community)
+        community.template = sent["template"]
+    if sent.get("post_approval"):
+        community.post_approval = sent["post_approval"]
+    if "welcome_message" in sent:
+        community.welcome_message = (sent["welcome_message"] or "").strip() or None
+    if "rules" in sent:
+        community.rules = (sent["rules"] or "").strip()
+    _audit(db, community.id, principal.user_id, "settings", "community", community.id,
+           ", ".join(sorted(sent)) or None)
+    db.commit()
+    membership = _membership(db, community.id, principal.user_id)
+    return _space_view(db, community, membership)
+
+
+@app.get("/communities/{community_id}/audit", tags=["governance"])
+def community_audit(community_id: str, principal: CurrentUser, limit: int = 50, offset: int = 0,
+                    db: OrmSession = Depends(get_db)):
+    """What the owner and moderators did here, newest first. For them only."""
+    community = _require_steward(db, community_id, principal.user_id)
+    q = select(models.CommunityAudit).where(models.CommunityAudit.community_id == community.id)
+    total = db.scalar(select(func.count()).select_from(q.subquery())) or 0
+    rows = db.scalars(q.order_by(models.CommunityAudit.id.desc()).offset(max(0, offset))
+                      .limit(max(1, min(limit, 100)))).all()
+    people = _profiles({r.actor_id for r in rows} | {r.target_id for r in rows if r.target_kind == "member" and r.target_id})
+    return {
+        "total": total,
+        "items": [
+            {"id": r.id, "action": r.action, "actor": people.get(r.actor_id) or {"id": r.actor_id},
+             "target_kind": r.target_kind, "target_id": r.target_id,
+             "target": people.get(r.target_id) if r.target_kind == "member" else None,
+             "reason": r.reason, "created_at": r.created_at}
+            for r in rows
+        ],
+    }
+
+
+@app.get("/internal/communities/{community_id}/post-policy/{user_id}", tags=["internal"])
+def post_policy(community_id: str, user_id: str, db: OrmSession = Depends(get_db)):
+    """What social-service needs before accepting or moderating a community post.
+
+    Membership, role, the spaces this person may post in, and whether their
+    posts wait for approval. Answers for a community that does not exist too
+    (``exists: False``) so callers fail closed.
+    """
+    community = db.get(models.Community, community_id)
+    if community is None:
+        return {"exists": False, "member": False, "role": None, "status": None, "can_post": {},
+                "requires_approval": False, "steward": False}
+    membership = _membership(db, community_id, user_id)
+    active = bool(membership and membership.status == "active")
+    role = membership.role if active else None
+    on = space_rules.enabled_spaces(db, community)
+    steward = role in ("owner", "moderator")
+    approval = community.post_approval or "none"
+    new_member = bool(
+        membership and membership.joined_at
+        and membership.joined_at > datetime.now(timezone.utc) - timedelta(days=NEW_MEMBER_DAYS)
+    )
+    return {
+        "exists": True,
+        "member": active,
+        "role": role,
+        "status": membership.status if membership else None,
+        "steward": steward,
+        "spaces": sorted(on),
+        "can_post": {s: space_rules.can_post(s, role, on) for s in space_rules.POST_SPACES},
+        "requires_approval": (not steward) and (approval == "all" or (approval == "new_members" and new_member)),
+        "slug": community.slug,
+        "name": community.name,
+        # Who to tell when a post waits for approval.
+        "stewards": list(db.scalars(
+            select(models.Membership.user_id).where(
+                models.Membership.community_id == community.id, models.Membership.status == "active",
+                models.Membership.role.in_(("owner", "moderator")),
+            ).limit(50)
+        ).all()),
+    }
+
+
+class AuditIn(BaseModel):
+    actor_id: str
+    action: str = Field(max_length=30)
+    target_kind: str | None = None
+    target_id: str | None = None
+    reason: str | None = Field(default=None, max_length=500)
+
+
+@app.post("/internal/communities/{community_id}/audit", tags=["internal"])
+def internal_audit(community_id: str, payload: AuditIn, db: OrmSession = Depends(get_db)):
+    """A moderation action on a post, recorded by social-service."""
+    if db.get(models.Community, community_id) is None:
+        raise HTTPException(status_code=404, detail="Community not found")
+    _audit(db, community_id, payload.actor_id, payload.action, payload.target_kind, payload.target_id, payload.reason)
+    db.commit()
+    return {"ok": True}
 
 
 # --- privacy and sharing ----------------------------------------------------
@@ -944,6 +1269,9 @@ def roster(community_id: str, principal: MaybeUser, limit: int = 200, offset: in
     mine = _membership(db, community_id, principal.user_id) if principal else None
     if community.kind != "public" and not (mine and mine.status == "active"):
         raise HTTPException(status_code=404, detail="Community not found")
+    steward = bool(mine and mine.status == "active" and mine.role in ("owner", "moderator"))
+    if "directory" not in space_rules.enabled_spaces(db, community) and not steward:
+        raise HTTPException(status_code=403, detail="This community does not show its member list")
     rows = db.scalars(
         select(models.Membership)
         .where(models.Membership.community_id == community_id, models.Membership.status == "active")
@@ -995,6 +1323,7 @@ def set_privacy(
         community.members_count += len(admitted)
 
     community.kind = payload.kind
+    _audit(db, community.id, principal.user_id, "privacy", "community", community.id, f"{before} -> {payload.kind}")
     db.commit()
 
     if admitted:
@@ -1994,6 +2323,8 @@ def community_summary(community_id: str, db: OrmSession = Depends(get_db)):
         "public_content": bool(community.public_content) and community.kind == "public",
         "owner_id": community.owner_id,
         "members_count": community.members_count,
+        # Spaces switched on: posts of a space that is off are not shown.
+        "spaces": sorted(space_rules.enabled_spaces(db, community)),
     }
 
 

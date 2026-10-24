@@ -2,10 +2,11 @@ import { useEffect, useState, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import { Check, Globe, Lock, X } from 'lucide-react'
 import MemberQueue from '@/components/community/MemberQueue'
+import CommunitySpacesSettings from '@/components/community/CommunitySpacesSettings'
 import ProfileImagePicker from '@/components/dashboard/ProfileImagePicker'
 import MemberAvatar from '@/components/social/MemberAvatar'
 import { useAppTheme } from '@/components/appdemo/theme'
-import { ApiError, kaluta } from '@/lib/api'
+import { ApiError, kaluta, type CommunitySpace } from '@/lib/api'
 import { cn } from '@/lib/utils'
 
 /** A sheet from the bottom on a phone, a centred window from sm up. Closes on Escape and outside. */
@@ -68,6 +69,11 @@ export interface CommunityForSettings {
   public_content?: boolean
   avatar_url?: string | null
   cover_url?: string | null
+  template?: string
+  spaces?: CommunitySpace[]
+  post_approval?: 'none' | 'new_members' | 'all'
+  welcome_message?: string | null
+  rules?: string
 }
 
 /**
@@ -267,6 +273,10 @@ export function CommunitySettingsDialog({
             {note.text}
           </p>
         )}
+
+        <section className="border-t border-[var(--cloud-border)] pt-5">
+          <CommunitySpacesSettings community={community} onChanged={onChanged} />
+        </section>
       </div>
     </Sheet>
   )

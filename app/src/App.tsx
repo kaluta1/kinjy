@@ -21,6 +21,7 @@ const Pricing = lazy(() => import('./pages/Pricing'))
 const Payments = lazy(() => import('./pages/Payments'))
 const Assistant = lazy(() => import('./pages/Assistant'))
 const AdminDashboard = lazy(() => import('./pages/AdminDashboard'))
+const Saved = lazy(() => import('./pages/app/Saved'))
 const Safety = lazy(() => import('./pages/Safety'))
 const Developers = lazy(() => import('./pages/Developers'))
 const AppDemo = lazy(() => import('./pages/AppDemo'))
@@ -189,6 +190,7 @@ export default function App() {
           <Route path="/market/seller" element={gated('marketplace', <MarketSeller />, '/hub')} />
           <Route path="/market/vendors/:vendorId" element={gated('marketplace', <MarketVendor />, '/hub')} />
           <Route path="/explore" element={<Explore />} />
+          <Route path="/saved" element={<Saved />} />
           <Route path="/live" element={gated('live', <Live />, '/hub')} />
           <Route path="/shorts" element={<Shorts />} />
           <Route path="/earn" element={<Earn />} />

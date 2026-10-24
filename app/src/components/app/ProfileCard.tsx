@@ -1,6 +1,6 @@
 import { useEffect } from 'react'
 import { Link } from 'react-router'
-import { Award, Code2, Crown, Dices, LayoutGrid, LifeBuoy, MapPin, Medal, Pin, ShieldCheck, Tag, Users, Wallet } from 'lucide-react'
+import { Award, Bookmark, Code2, Crown, Dices, LayoutGrid, LifeBuoy, MapPin, Medal, Pin, ShieldCheck, Tag, Users, Wallet } from 'lucide-react'
 import { VerifiedBadge } from '@/components/ui-kit'
 import { MODULE_ICONS } from '@/components/appdemo/Chrome'
 import { ROUTE_FOR } from './navigation'
@@ -199,6 +199,17 @@ export default function ProfileCard() {
               >
                 <ShieldCheck size={12} className="text-gold" aria-hidden="true" />
                 Review console
+              </Link>
+            </li>
+          )}
+          {user && (
+            <li>
+              <Link
+                to="/saved"
+                className={cn('flex w-full items-center gap-2 rounded-full px-3 py-1.5 text-xs font-semibold', tok.mid, tok.hoverBg)}
+              >
+                <Bookmark size={12} className="text-gold" aria-hidden="true" />
+                Saved
               </Link>
             </li>
           )}

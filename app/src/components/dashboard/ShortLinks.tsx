@@ -206,6 +206,10 @@ function LinkRow({ link, onChanged }: { link: ShareLinkOut; onChanged: () => voi
           </p>
         </div>
         <div className="flex shrink-0 flex-wrap items-center gap-1.5">
+          <span className="caption" title="Opened by people (link previews not counted) · accounts created · communities joined">
+            {link.opens ?? 0} open{(link.opens ?? 0) === 1 ? '' : 's'} · {link.registrations ?? 0} sign-up
+            {(link.registrations ?? 0) === 1 ? '' : 's'} · {link.community_joins ?? 0} join{(link.community_joins ?? 0) === 1 ? '' : 's'}
+          </span>
           <Badge tone={link.active ? 'good' : 'neutral'}>{link.active ? 'Active' : 'Disabled'}</Badge>
           <Badge tone={link.include_invitation ? 'warn' : 'neutral'}>
             {link.include_invitation ? 'With invitation' : 'Neutral'}

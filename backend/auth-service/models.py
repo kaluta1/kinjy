@@ -591,3 +591,28 @@ class ShareLink(Base):
     with_invitation: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
     disabled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # How many times it was opened by a person (crawlers excluded). A counter
+    # only: nothing about who opened it is kept.
+    opens: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+
+
+class ShareLinkConversion(Base):
+    """Something a link led to: a registration, a community join (later: a purchase).
+
+    One row per link, kind and subject, so the same sign-up or join counted
+    twice by a retry stays one. Analytics only - attribution itself lives
+    where it always did (users.invited_by, memberships.invited_by).
+    """
+
+    __tablename__ = "share_link_conversions"
+    __table_args__ = (
+        UniqueConstraint("token", "kind", "subject_id", name="uq_share_link_conversion"),
+        Index("ix_share_link_conversion_token", "token", "kind"),
+        {"schema": SCHEMA},
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    token: Mapped[str] = mapped_column(String(16))
+    kind: Mapped[str] = mapped_column(String(20))  # registration|community_join
+    subject_id: Mapped[str] = mapped_column(String(40))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)

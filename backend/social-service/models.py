@@ -74,7 +74,17 @@ class Post(Base):
     reposts_count: Mapped[int] = mapped_column(Integer, default=0)
     views_count: Mapped[int] = mapped_column(Integer, default=0)
 
-    status: Mapped[str] = mapped_column(String(20), default="published")  # draft|published|hidden|removed
+    status: Mapped[str] = mapped_column(String(20), default="published")  # draft|published|hidden|removed|pending|scheduled
+    # Community posts: the space it was posted in (announcements|discussions|
+    # articles). Null on posts from before spaces: read as discussions, or
+    # articles for an article.
+    community_space: Mapped[str | None] = mapped_column(String(20))
+    # Pinned to the top of its community by a steward.
+    pinned_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # When a scheduled post goes out (status "scheduled" until then).
+    publish_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # The comment the asker (or a steward) marked as the answer.
+    accepted_comment_id: Mapped[str | None] = mapped_column(String(40))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, index=True)
     edited_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
@@ -416,3 +426,33 @@ class LinkPreview(Base):
     site_name: Mapped[str] = mapped_column(String(120), default="")
     failed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
+class PostRevision(Base):
+    """What a post said before an edit. Written on every edit, never changed."""
+
+    __tablename__ = "post_revisions"
+    __table_args__ = (Index("ix_post_revisions_post", "post_id", "created_at"), {"schema": SCHEMA})
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    post_id: Mapped[str] = mapped_column(String(40))
+    body: Mapped[str] = mapped_column(Text, default="")
+    # When that text was current from (the post's creation or previous edit).
+    written_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
+class PostBookmark(Base):
+    """A post a member saved to read again. Private to them."""
+
+    __tablename__ = "post_bookmarks"
+    __table_args__ = (
+        UniqueConstraint("user_id", "post_id", name="uq_post_bookmark"),
+        Index("ix_post_bookmarks_user", "user_id", "created_at"),
+        {"schema": SCHEMA},
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[str] = mapped_column(String(40))
+    post_id: Mapped[str] = mapped_column(String(40), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)

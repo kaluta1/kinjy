@@ -271,6 +271,11 @@ function NewCommunity({ onClose, onCreated }: { onClose: () => void; onCreated: 
   const [name, setName] = useState('')
   const [description, setDescription] = useState('')
   const [kind, setKind] = useState<'public' | 'private'>('public')
+  // A starting configuration: its spaces and how private it starts. A family
+  // or memorial community starts closed whatever the switch below says.
+  const templates = useApi(() => kaluta.communities.templates(), [])
+  const [template, setTemplate] = useState('interest')
+  const chosen = templates.data?.templates.find((t) => t.id === template)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   return (
@@ -282,7 +287,7 @@ function NewCommunity({ onClose, onCreated }: { onClose: () => void; onCreated: 
           setBusy(true)
           setError(null)
           try {
-            const created = await kaluta.communities.create({ name: name.trim(), kind, description: description.trim() })
+            const created = await kaluta.communities.create({ name: name.trim(), kind, description: description.trim(), template })
             onCreated(created)
           } catch (err) {
             setError(err instanceof ApiError ? err.message : 'Could not create the community')
@@ -312,6 +317,30 @@ function NewCommunity({ onClose, onCreated }: { onClose: () => void; onCreated: 
             maxLength={4000}
             className="w-full resize-y rounded-[14px] border border-[var(--cloud-border)] bg-text-hi/[0.05] px-4 py-2.5 text-[0.95rem] text-text-hi focus:border-gold/60 focus:outline-none"
           />
+        </label>
+        <label className="block">
+          <span className="mb-1 block text-sm font-semibold text-text-mid">Kind of community</span>
+          <select
+            value={template}
+            onChange={(e) => {
+              setTemplate(e.target.value)
+              const next = templates.data?.templates.find((t) => t.id === e.target.value)
+              if (next) setKind(next.kind === 'public' ? 'public' : 'private')
+            }}
+            className="w-full rounded-[14px] border border-[var(--cloud-border)] bg-text-hi/[0.05] px-4 py-2.5 text-[0.95rem] text-text-hi focus:border-gold/60 focus:outline-none"
+          >
+            {(templates.data?.templates ?? [{ id: 'interest', label: 'Interest group', description: '' }]).map((t) => (
+              <option key={t.id} value={t.id}>
+                {t.label}
+              </option>
+            ))}
+          </select>
+          {chosen && (
+            <span className="mt-1 block text-xs text-text-low">
+              {chosen.description}
+              {chosen.kind === 'secret' ? ' It starts secret: hidden, and joining needs your approval.' : ''}
+            </span>
+          )}
         </label>
         <div role="radiogroup" aria-label="Who can join" className="grid gap-2 sm:grid-cols-2">
           {([

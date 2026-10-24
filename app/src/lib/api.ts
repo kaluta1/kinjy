@@ -612,6 +612,18 @@ export interface Post {
   reposted_by_me?: boolean
   created_at: string
   edited_at: string | null
+  /** published, or for its author: pending (waiting for approval) / scheduled. */
+  status?: string
+  /** For a community post: the space it is in. */
+  community_space?: CommunityPostSpace | null
+  /** Pinned to the top of its community. */
+  pinned?: boolean
+  /** When a scheduled post goes out. */
+  publish_at?: string | null
+  /** The comment marked as the answer to a community discussion. */
+  accepted_comment_id?: string | null
+  /** Saved by the reader. */
+  bookmarked?: boolean
   media: PostMedia[]
   reactions: ReactionSummary
   /** Author's own declaration; a minor's feed never carries these. */
@@ -713,6 +725,10 @@ export interface NewPost {
   provenance?: string
   /** The author declaring adult content, so minors' feeds can exclude it. */
   mature?: boolean
+  /** A community post's space (announcements are for stewards). */
+  space?: CommunityPostSpace
+  /** Publish later (ISO time, at least a minute ahead). */
+  publish_at?: string
   media?: Array<{
     media_id: string
     url: string
@@ -905,6 +921,41 @@ export interface CircleMember {
 
 export interface CircleDetail extends Circle {
   members: CircleMember[]
+}
+
+export type CommunityPostSpace = 'announcements' | 'discussions' | 'articles'
+
+export interface CommunitySpace {
+  id: string
+  label: string
+  description: string
+  enabled: boolean
+  /** False while the feature behind the space is not built: it cannot be switched on. */
+  available: boolean
+  /** Who may post in it: members, stewards, or null for a space that is not a stream of posts. */
+  posters: 'members' | 'stewards' | null
+}
+
+export interface CommunityTemplate {
+  id: string
+  label: string
+  description: string
+  kind: string
+  public_content: boolean
+  spaces: string[]
+  post_approval: 'none' | 'new_members' | 'all'
+}
+
+/** Template, spaces and the rules of the house, with what the reader may do. */
+export interface CommunitySpaceView {
+  template: string
+  spaces: CommunitySpace[]
+  post_approval: 'none' | 'new_members' | 'all'
+  /** For the owner and moderators only (null for everybody else). */
+  welcome_message: string | null
+  rules: string
+  my_can_post: Record<CommunityPostSpace, boolean>
+  directory_open: boolean
 }
 
 export interface Community {
@@ -1940,6 +1991,11 @@ export interface ShareLinkOut {
   active: boolean
   created_at: string | null
   disabled_at: string | null
+  /** Opened by a person (crawlers excluded). A count; nothing about who. */
+  opens?: number
+  /** What it led to, counted apart. Only in the list of your links. */
+  registrations?: number
+  community_joins?: number
   /** Only on creation: false when an existing link was returned. */
   created?: boolean
 }
@@ -2099,6 +2155,22 @@ export const kaluta = {
   posts: {
     create: (post: NewPost) => api.post<Post>('/posts', post),
     get: (id: string) => api.get<Post>(`/posts/${id}`),
+    /** Save a post to read again (private to you), or take it off. */
+    bookmark: (id: string) => api.post<{ bookmarked: boolean }>(`/posts/${id}/bookmark`),
+    unbookmark: (id: string) => api.delete<{ bookmarked: boolean }>(`/posts/${id}/bookmark`),
+    bookmarks: (offset = 0) => api.get<{ items: Post[] }>(`/bookmarks?offset=${offset}`),
+    /** What an edited post said before, newest edit first. */
+    revisions: (id: string) =>
+      api.get<{ items: Array<{ body: string; written_at: string | null; replaced_at: string }> }>(`/posts/${id}/revisions`),
+    /** Community stewards: pin to the top of the community, or unpin. */
+    pin: (id: string) => api.post<{ pinned: boolean }>(`/posts/${id}/pin`),
+    unpin: (id: string) => api.delete<{ pinned: boolean }>(`/posts/${id}/pin`),
+    /** Community stewards: approve or reject a waiting post, or remove a published one. */
+    moderate: (id: string, action: 'approve' | 'reject' | 'remove', reason?: string) =>
+      api.post<Post>(`/posts/${id}/moderate`, { action, reason }),
+    /** The asker or a steward marks a comment as the answer (null clears it). */
+    acceptAnswer: (id: string, commentId: string | null) =>
+      api.post<{ accepted_comment_id: string | null }>(`/posts/${id}/accept-answer`, { comment_id: commentId }),
     /**
      * The card for a link in a post. Read by the server, not the browser: a
      * page may be unreachable from the member's network, and having every
@@ -2373,7 +2445,36 @@ export const kaluta = {
         my_pinned?: boolean
         /** Whether you are told about each new post here. */
         my_notify_posts?: boolean
-      }>(`/communities/${id}${invite ? `?invite=${encodeURIComponent(invite)}` : ''}`),
+      } & CommunitySpaceView>(`/communities/${id}${invite ? `?invite=${encodeURIComponent(invite)}` : ''}`),
+
+    /** The starting configurations, and every space with whether it exists yet. */
+    templates: () =>
+      api.get<{ templates: CommunityTemplate[]; spaces: CommunitySpace[] }>('/community-templates', { auth: false }),
+    /** Switch spaces on or off. The owner's; a space not built yet answers 409. */
+    setSpaces: (id: string, spaces: Record<string, boolean>) =>
+      api.patch<CommunitySpaceView>(`/communities/${id}/spaces`, { spaces }),
+    /** Template, post approval, welcome message and rules. The owner's. */
+    settings: (
+      id: string,
+      patch: { template?: string; post_approval?: 'none' | 'new_members' | 'all'; welcome_message?: string; rules?: string },
+    ) => api.patch<CommunitySpaceView>(`/communities/${id}/settings`, patch),
+    /** What the owner and moderators did, newest first. For them only. */
+    audit: (id: string, offset = 0) =>
+      api.get<{
+        total: number
+        items: Array<{
+          id: number
+          action: string
+          actor: { handle?: string; display_name?: string; id?: string }
+          target_kind: string | null
+          target_id: string | null
+          target: { handle: string; display_name: string } | null
+          reason: string | null
+          created_at: string
+        }>
+      }>(`/communities/${id}/audit?offset=${offset}`),
+    /** Posts waiting for approval. Stewards only (served by social-service). */
+    pendingPosts: (id: string) => api.get<{ items: Post[] }>(`/feed/community/${id}/pending`),
 
     /** The owner renames it, or changes its description, photo (asset id) or cover. */
     edit: (
@@ -2420,8 +2521,12 @@ export const kaluta = {
         }>
       }>(`/communities/${id}/members${status ? `?status=${status}` : ''}`),
 
-    act: (id: string, userId: string, action: 'approve' | 'reject' | 'ban' | 'unban' | 'promote' | 'demote') =>
-      api.post<{ ok: boolean; action: string }>(`/communities/${id}/members/${userId}`, { action }),
+    act: (
+      id: string,
+      userId: string,
+      action: 'approve' | 'reject' | 'ban' | 'unban' | 'promote' | 'demote' | 'remove',
+      reason?: string,
+    ) => api.post<{ ok: boolean; action: string }>(`/communities/${id}/members/${userId}`, { action, reason }),
 
     list: (params: { q?: string; country?: string; limit?: number; mine?: boolean } = {}) => {
       const query = new URLSearchParams()
@@ -2432,12 +2537,19 @@ export const kaluta = {
       // Signed in when there is a session, so each card can say Joined / Request sent.
       return api.get<{ total: number; items: Community[] }>(`/communities?${query}`)
     },
-    create: (input: { name: string; description?: string; kind?: string; price_usd?: number; country?: string }) =>
+    create: (input: { name: string; description?: string; kind?: string; price_usd?: number; country?: string; template?: string }) =>
       api.post<{ id: string; slug: string; kind: string }>('/communities', { kind: 'public', ...input }),
-    join: (id: string, invite?: string | null) =>
-      api.post<{ joined: boolean; status: string }>(
-        `/communities/${id}/join${invite ? `?invite=${encodeURIComponent(invite)}` : ''}`,
-      ),
+    /**
+     * Join. `via` is the short link the member arrived on: it records who
+     * invited them into this community, never their account's sponsor.
+     */
+    join: (id: string, invite?: string | null, via?: string | null) => {
+      const query = new URLSearchParams()
+      if (invite) query.set('invite', invite)
+      if (via) query.set('via', via)
+      const qs = query.toString()
+      return api.post<{ joined: boolean; status: string }>(`/communities/${id}/join${qs ? `?${qs}` : ''}`)
+    },
     /** Public, private or secret. Owner and moderators; a paid community stays paid. */
     setPrivacy: (id: string, kind: 'public' | 'private' | 'secret') =>
       api.patch<{ kind: string; changed: boolean; admitted: number }>(`/communities/${id}/privacy`, { kind }),
@@ -2467,7 +2579,7 @@ export const kaluta = {
      * community-service, and membership and posts are owned by different
      * services on purpose.
      */
-    feed: (id: string, limit = 20, offset = 0) =>
+    feed: (id: string, limit = 20, offset = 0, space?: CommunityPostSpace, sort: 'latest' | 'top' = 'latest') =>
       api.get<{
         community: {
           id: string
@@ -2485,7 +2597,14 @@ export const kaluta = {
         can_engage?: boolean
         total: number
         items: Post[]
-      }>(`/feed/community/${id}?limit=${limit}&offset=${offset}`, { auth: false }),
+        /** The reader's own posts waiting for approval or for their time. */
+        my_queued?: Post[]
+      }>(
+        // Signed in when there is a session (no token is sent otherwise): the
+        // server answers membership-dependent things - whether the reader may
+        // take part, their own queued posts, what they saved - for the reader.
+        `/feed/community/${id}?limit=${limit}&offset=${offset}${space ? `&space=${space}` : ''}${sort !== 'latest' ? `&sort=${sort}` : ''}`,
+      ),
   },
 
   forums: {

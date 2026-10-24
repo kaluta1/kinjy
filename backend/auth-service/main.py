@@ -19,7 +19,7 @@ from datetime import datetime, timedelta, timezone
 from fastapi import Depends, HTTPException, Request, status
 from fastapi.responses import HTMLResponse, RedirectResponse
 from pydantic import BaseModel, Field
-from sqlalchemy import func, or_, select, text
+from sqlalchemy import func, or_, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session as OrmSession
 
@@ -53,6 +53,7 @@ MIGRATIONS = [
     f"CREATE UNIQUE INDEX IF NOT EXISTS uq_share_link_active ON {models.SCHEMA}.share_links "
     "(member_id, destination, with_invitation) WHERE disabled_at IS NULL",
     f"CREATE INDEX IF NOT EXISTS ix_share_links_member_created ON {models.SCHEMA}.share_links (member_id, created_at)",
+    f"ALTER TABLE {models.SCHEMA}.share_links ADD COLUMN IF NOT EXISTS opens INTEGER NOT NULL DEFAULT 0",
     # Referral pool units and rounds. The new tables come from create_all; the
     # assignment audit gains its round columns (null on older rows, which are
     # kept as they were).
@@ -216,6 +217,7 @@ async def register(payload: schemas.RegisterIn, request: Request, db: OrmSession
         )
 
     inviter_id: str | None = None
+    credited_link: str | None = None
     if payload.referral_code:
         inviter = db.scalar(
             select(models.User).where(models.User.referral_code == payload.referral_code.strip().upper())
@@ -233,6 +235,7 @@ async def register(payload: schemas.RegisterIn, request: Request, db: OrmSession
         sharer = _link_sharer(db, found[0]) if found else None
         if sharer is not None:
             inviter_id = sharer.id
+            credited_link = found[0].token
     # No personal invitation link: the referral pool draws a sponsor for them.
     # Resolved below, once the account has an id to record the assignment under.
 
@@ -280,6 +283,8 @@ async def register(payload: schemas.RegisterIn, request: Request, db: OrmSession
     # Left None so the client derives it from the user agent.
     tokens = _issue(db, user, request, None)
     _log_event(db, user.id, "password", request)
+    if credited_link:
+        _record_conversion(db, credited_link, "registration", user.id)
     db.commit()
     db.refresh(user)
 
@@ -538,6 +543,7 @@ def _link_out(link: models.ShareLink, created: bool | None = None) -> dict:
         "active": link.disabled_at is None,
         "created_at": link.created_at.isoformat() if link.created_at else None,
         "disabled_at": link.disabled_at.isoformat() if link.disabled_at else None,
+        "opens": link.opens or 0,
     }
     if created is not None:
         out["created"] = created
@@ -648,7 +654,56 @@ def my_share_links(
     rows = db.scalars(
         base.order_by(models.ShareLink.created_at.desc(), models.ShareLink.token).offset(offset).limit(limit)
     ).all()
-    return {"items": [_link_out(r) for r in rows], "total": total}
+    counts: dict[tuple[str, str], int] = {}
+    if rows:
+        for token, kind, n in db.execute(
+            select(models.ShareLinkConversion.token, models.ShareLinkConversion.kind, func.count())
+            .where(models.ShareLinkConversion.token.in_([r.token for r in rows]))
+            .group_by(models.ShareLinkConversion.token, models.ShareLinkConversion.kind)
+        ).all():
+            counts[(token, kind)] = n
+    items = []
+    for r in rows:
+        out = _link_out(r)
+        # Kept apart on purpose: an open is not a sign-up, and a sign-up is
+        # not a join. Purchases and commissions come with paid features.
+        out["registrations"] = counts.get((r.token, "registration"), 0)
+        out["community_joins"] = counts.get((r.token, "community_join"), 0)
+        items.append(out)
+    return {"items": items, "total": total}
+
+
+@app.get("/internal/share-links/{token}", tags=["internal"])
+def internal_share_link(token: str, db: OrmSession = Depends(get_db)):
+    """A link's maker and what it carries, for other services (community joins)."""
+    link = db.get(models.ShareLink, token) if sharelinks.TOKEN_RE.match(token or "") else None
+    if link is None:
+        raise HTTPException(status_code=404, detail="No such link")
+    return {"token": link.token, "member_id": link.member_id, "with_invitation": link.with_invitation,
+            "destination": link.destination, "kind": link.kind, "active": link.disabled_at is None}
+
+
+class ConversionIn(BaseModel):
+    kind: str = Field(pattern="^(registration|community_join)$")
+    subject_id: str = Field(min_length=1, max_length=40)
+
+
+@app.post("/internal/share-links/{token}/conversions", tags=["internal"])
+def record_conversion(token: str, payload: ConversionIn, db: OrmSession = Depends(get_db)):
+    """Count what a link led to, once per subject (retries included)."""
+    if not sharelinks.TOKEN_RE.match(token or "") or db.get(models.ShareLink, token) is None:
+        raise HTTPException(status_code=404, detail="No such link")
+    _record_conversion(db, token, payload.kind, payload.subject_id)
+    db.commit()
+    return {"ok": True}
+
+
+def _record_conversion(db: OrmSession, token: str, kind: str, subject_id: str) -> None:
+    db.execute(
+        pg_insert(models.ShareLinkConversion)
+        .values(token=token, kind=kind, subject_id=subject_id, created_at=_now())
+        .on_conflict_do_nothing()
+    )
 
 
 @app.post("/auth/share-links/{token}/disable", tags=["share-links"])
@@ -796,6 +851,10 @@ def open_share_link(token: str, request: Request, db: OrmSession = Depends(get_d
             _preview_html(title, description, image, sharelinks.short_url(link.token), destination),
             headers=_NO_STORE,
         )
+    # Counted, not recorded: the number goes up, nothing about the visitor is kept.
+    db.execute(update(models.ShareLink).where(models.ShareLink.token == link.token)
+               .values(opens=models.ShareLink.opens + 1))
+    db.commit()
     # A neutral link adds nothing, so whatever invitation the visitor already
     # holds is left exactly as it was. An invitation link whose sharer has
     # left still opens; it just credits nobody.

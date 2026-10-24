@@ -65,6 +65,53 @@ class Community(Base):
     # communities never need one, their plain address already opens.
     invite_code: Mapped[str | None] = mapped_column(String(32), index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    # The template it started from (spaces.py). Defaults only: changing it
+    # later changes no one's access.
+    template: Mapped[str] = mapped_column(String(20), default="interest", server_default="interest")
+    # Whether posts wait for a steward before they appear: none, new_members
+    # (joined less than COMMUNITY_NEW_MEMBER_DAYS ago) or all.
+    post_approval: Mapped[str] = mapped_column(String(20), default="none", server_default="none")
+    # Sent once to each new member when they are let in.
+    welcome_message: Mapped[str | None] = mapped_column(Text)
+    rules: Mapped[str] = mapped_column(Text, default="", server_default="")
+
+
+class CommunitySpace(Base):
+    """One space of one community, switched on or off by its owner (spaces.py)."""
+
+    __tablename__ = "community_spaces"
+    __table_args__ = {"schema": SCHEMA}
+
+    community_id: Mapped[str] = mapped_column(String(40), primary_key=True)
+    space: Mapped[str] = mapped_column(String(20), primary_key=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    position: Mapped[int] = mapped_column(Integer, default=0)
+
+
+class CommunityAudit(Base):
+    """What the people who run a community did in it, and why. Never edited.
+
+    Kept per community so an owner can answer "who removed this, and why"
+    without asking Kinjy, and so a moderator's actions are visible to the
+    owner who gave them the role.
+    """
+
+    __tablename__ = "community_audit"
+    __table_args__ = (
+        Index("ix_community_audit_time", "community_id", "created_at"),
+        {"schema": SCHEMA},
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    community_id: Mapped[str] = mapped_column(String(40))
+    actor_id: Mapped[str] = mapped_column(String(40))
+    # approve|reject|ban|unban|promote|demote|remove_member|settings|spaces|
+    # privacy|post_approve|post_reject|post_remove|post_pin|post_unpin|invite
+    action: Mapped[str] = mapped_column(String(30))
+    target_kind: Mapped[str | None] = mapped_column(String(20))  # member|post|community
+    target_id: Mapped[str | None] = mapped_column(String(40))
+    reason: Mapped[str | None] = mapped_column(String(500))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
 
 class Membership(Base):
@@ -88,6 +135,13 @@ class Membership(Base):
     # default - joining a group is asking to hear from it - and theirs to turn
     # off from the group's page.
     notify_posts: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
+    # Who brought them into *this community* - an invitation link of a member.
+    # Separate from the account's sponsor (auth users.invited_by), which a
+    # community invitation never touches.
+    invited_by: Mapped[str | None] = mapped_column(String(40), index=True)
+    invite_token: Mapped[str | None] = mapped_column(String(16))
+    # When the welcome message went out: once per membership, retries included.
+    welcomed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class Forum(Base):

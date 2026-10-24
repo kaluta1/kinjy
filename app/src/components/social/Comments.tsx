@@ -1,6 +1,6 @@
 import MentionLink from './MentionLink'
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { CornerDownRight, Loader2, Send, SmilePlus, ThumbsUp } from 'lucide-react'
+import { Check, CornerDownRight, Loader2, Send, SmilePlus, ThumbsUp } from 'lucide-react'
 import { useAppTheme } from '@/components/appdemo/theme'
 import { MentionList, useMentionSuggest } from './MentionSuggest'
 import { ApiError, kaluta, type CommentNode } from '@/lib/api'
@@ -110,10 +110,18 @@ export default function Comments({
   postId,
   currentUserId,
   onCountChange,
+  acceptedId = null,
+  canAccept = false,
+  onAccept,
 }: {
   postId: string
   currentUserId: string
   onCountChange: (delta: number) => void
+  /** The comment marked as the answer to a community discussion. */
+  acceptedId?: string | null
+  /** Whether this reader (the asker, or a moderator) may mark the answer. */
+  canAccept?: boolean
+  onAccept?: (commentId: string | null) => void
 }) {
   const { tok } = useAppTheme()
   const [items, setItems] = useState<CommentNode[] | null>(null)
@@ -325,6 +333,11 @@ export default function Comments({
               inline-block with a max width, not a full-width card. 18px of
               radius is what gives it its shape; the card radius read as a
               panel. */}
+          {node.id === acceptedId && (
+            <p className="mb-1 inline-flex items-center gap-1 rounded-full bg-emerald-400/15 px-2 py-0.5 text-[0.7rem] font-bold text-emerald-300">
+              <Check size={11} aria-hidden="true" /> Answer
+            </p>
+          )}
           <div
             className={cn(
               'max-w-full rounded-[18px] px-3 py-2',
@@ -332,6 +345,7 @@ export default function Comments({
               // the text being changed has room instead of a narrow column.
               editing?.id === node.id ? 'block w-full' : 'inline-block',
               tok.subtleBg,
+              node.id === acceptedId && 'ring-1 ring-emerald-400/50',
             )}
           >
             <p className="text-[0.8125rem] font-semibold leading-tight">
@@ -444,6 +458,15 @@ export default function Comments({
                 className={cn('text-[0.75rem] font-semibold hover:underline', tok.low)}
               >
                 Edit
+              </button>
+            )}
+            {canAccept && onAccept && (
+              <button
+                type="button"
+                onClick={() => onAccept(node.id === acceptedId ? null : node.id)}
+                className={cn('text-[0.75rem] font-semibold hover:underline', tok.low)}
+              >
+                {node.id === acceptedId ? 'Unmark answer' : 'Mark as answer'}
               </button>
             )}
             {isMine && (
