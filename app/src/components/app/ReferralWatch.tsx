@@ -1,7 +1,7 @@
 import { useEffect } from 'react'
-import { useLocation } from 'react-router'
+import { useLocation, useNavigate } from 'react-router'
 import { ApiError, kaluta } from '@/lib/api'
-import { pendingRef, refFromSearch, rememberInviter, rememberRef } from '@/lib/share'
+import { pendingLink, pendingRef, refFromSearch, rememberInviter, rememberLink, rememberRef } from '@/lib/share'
 
 /**
  * Keeps hold of the invitation, wherever it arrives and however far the
@@ -44,7 +44,47 @@ import { pendingRef, refFromSearch, rememberInviter, rememberRef } from '@/lib/s
  * Renders nothing. Mounted once, inside the router.
  */
 export default function ReferralWatch() {
-  const { search } = useLocation()
+  const { search, pathname, hash } = useLocation()
+  const navigate = useNavigate()
+
+  // A short link (kinjy.com/s/<token>) lands here with ?via=<token>: the
+  // invitation of whoever shared it, held as the token - the server turns it
+  // back into that member at sign-up, so no code ever sits in the address.
+  // Then the token is taken off the address bar: it has done its job, and a
+  // link copied from there should not pass somebody else's invitation on.
+  useEffect(() => {
+    const params = new URLSearchParams(search)
+    const token = params.get('via')
+    if (!token) return
+    params.delete('via')
+    const rest = params.toString()
+    const clean = `${pathname}${rest ? `?${rest}` : ''}${hash}`
+    if (token === pendingLink()) {
+      navigate(clean, { replace: true })
+      return
+    }
+    let cancelled = false
+    kaluta.auth
+      .resolveShareLink(token)
+      .then((link) => {
+        // Only an invitation link is an invitation; a neutral one leaves
+        // whatever is already held exactly as it was.
+        if (!cancelled && link.invitation) rememberLink(link.token, link.destination, link.inviter?.display_name ?? null)
+      })
+      .catch((err: unknown) => {
+        // 404 is an answer: not one of ours. Anything else (offline, a 5xx)
+        // is not, and the token is kept unverified, as a code would be - the
+        // server checks it again at sign-up and drops it if it is not real.
+        if (cancelled || (err instanceof ApiError && err.status === 404)) return
+        if (!pendingRef() && !pendingLink()) rememberLink(token, pathname, null)
+      })
+      .finally(() => {
+        if (!cancelled) navigate(clean, { replace: true })
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [search, pathname, hash, navigate])
 
   useEffect(() => {
     const candidate = refFromSearch(search)

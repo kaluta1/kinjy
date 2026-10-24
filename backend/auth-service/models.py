@@ -13,6 +13,7 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -408,3 +409,38 @@ class PasswordReset(Base):
     @property
     def usable(self) -> bool:
         return self.used_at is None and self.invalidated_at is None and self.expires_at > _now()
+
+
+class ShareLink(Base):
+    """A short link (kinjy.com/s/<token>): where it goes, who made it, and
+    whether it carries their invitation.
+
+    Destination and invitation never change after creation - a different
+    either is a new link. A member asking again for the same page with the
+    same choice gets the same active link back: the partial unique index makes
+    concurrent requests meet on one row. Disabling frees the pair, so a fresh
+    link can be made after one was switched off. The token is the primary key,
+    so it is unique by construction and every lookup is an index hit.
+    """
+
+    __tablename__ = "share_links"
+    __table_args__ = (
+        Index(
+            "uq_share_link_active",
+            "member_id",
+            "destination",
+            "with_invitation",
+            unique=True,
+            postgresql_where=text("disabled_at IS NULL"),
+        ),
+        Index("ix_share_links_member_created", "member_id", "created_at"),
+        {"schema": SCHEMA},
+    )
+
+    token: Mapped[str] = mapped_column(String(16), primary_key=True)
+    member_id: Mapped[str] = mapped_column(String(40), index=True)
+    destination: Mapped[str] = mapped_column(String(1000))
+    kind: Mapped[str] = mapped_column(String(20))  # invite|post|profile|community|chat|page
+    with_invitation: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    disabled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

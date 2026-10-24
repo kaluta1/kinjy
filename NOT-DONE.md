@@ -1416,3 +1416,21 @@ reported links open signed out with their own photo as preview.
   owner/moderators get requests, roles, bans. Request notification opens the queue.
 - Deployed 19/10 09:2x (community, web; backup `pre-community-dialogs-20261019-0920`).
 - **Not tested:** uploading a real cover/photo for a community (same uploader as chat groups).
+
+## Short links (kinjy.com/s/<token>) — 2026-10-24, not deployed yet
+
+Built and verified locally (`backend/tests/e2e_short_links.py`, 101/101, plus the
+Dashboard → Short links tab at 375 px and 1280 px, light and dark). What is *not* covered:
+
+- **A held invitation never expires.** `kinjy.pending_ref_at` / the link token sit
+  in localStorage until sign-up; no rule says "older than N days no longer counts".
+  The short links follow the same (absent) rule. Needs a product decision first.
+- **Self-referral through a second account** is not detected — same as `?ref=CODE`
+  today: a member can sign up a new email through their own link. Only the
+  existing rule applies (an account cannot sign up twice with one email).
+- **Rate limits are per process**, like the referral lookups: with several
+  auth-service replicas each one counts on its own.
+- **Profile, marketplace and memorial previews** are a generic Kinjy card; only
+  posts/articles and communities get their own title, text and picture.
+- The share buttons on posts, communities and group chats keep their own
+  "credit me" box (on by default, as before); only the new tool starts neutral.

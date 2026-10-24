@@ -9,7 +9,14 @@ import { Brand, ThemeToggle } from '@/components/landing/shared'
 import { useLandingTheme } from '@/components/landing/useLandingTheme'
 import { useAuth } from '@/hooks/useAuth'
 import { ApiError } from '@/lib/api'
-import { clearPendingRef, pendingInviter, pendingRef, refFromSearch } from '@/lib/share'
+import {
+  clearPendingRef,
+  pendingInviter,
+  pendingLink,
+  pendingLinkDestination,
+  pendingRef,
+  refFromSearch,
+} from '@/lib/share'
 import { OPEN_MODULES, spelled } from '@/lib/features'
 import { cn } from '@/lib/utils'
 
@@ -105,12 +112,25 @@ export default function SignIn() {
   const referralWasRemembered = !refFromSearch(params.toString()) && Boolean(pendingRef())
   // Who the stored code belongs to, if ReferralWatch managed to ask.
   const inviter = pendingInviter()
+  // A short link's token, held when the invitation came that way. Sent as
+  // the token: the server knows whose it is, the browser never sees a code.
+  const [link] = useState(() => (refFromSearch(params.toString()) ? '' : pendingLink()))
+  // Where that link was taking them. A new member goes there after signing
+  // up - the post or community somebody sent them, not an empty feed.
+  const [linkDestination] = useState(() => pendingLinkDestination())
+  const afterAuth = (chosen: Mode) => {
+    const next = params.get('next')
+    if (next) return safeNext(next)
+    if (chosen === 'signup' && linkDestination) return safeNext(linkDestination)
+    return '/hub'
+  }
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
   // Already signed in? The sign-in page has nothing to offer.
   useEffect(() => {
-    if (user) navigate(safeNext(params.get('next')), { replace: true })
+    if (user) navigate(afterAuth(mode), { replace: true })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [user, navigate])
 
   // Keep the handle in step with the name until the member takes it over.
@@ -154,6 +174,9 @@ export default function SignIn() {
             handle,
             date_of_birth: birthDate,
             referral_code: code,
+            // The short link, only when no code is given: a code typed or
+            // carried on the address is the newer, explicit answer.
+            referral_link: code ? undefined : link || undefined,
           })
         try {
           await register(referral.trim() || undefined)
@@ -173,7 +196,7 @@ export default function SignIn() {
         // that pays.
         clearPendingRef()
       }
-      navigate(safeNext(params.get('next')), { replace: true })
+      navigate(afterAuth(mode), { replace: true })
     } catch (err) {
       setError(
         err instanceof ApiError
@@ -336,7 +359,7 @@ export default function SignIn() {
                     {/* A name, when the invitation came with one: "Invited by
                         Demo" is something a person can check, where a code in
                         a box is something they have to trust. */}
-                    {inviter && referral === pendingRef()
+                    {inviter && (referral === pendingRef() || (link && !referral))
                       ? `Invited by ${inviter}`
                       : t('signin.creditsWhoeverInvitedYou')}
                   </span>

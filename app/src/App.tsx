@@ -25,6 +25,8 @@ const Safety = lazy(() => import('./pages/Safety'))
 const Developers = lazy(() => import('./pages/Developers'))
 const AppDemo = lazy(() => import('./pages/AppDemo'))
 const SignIn = lazy(() => import('./pages/SignIn'))
+const LinkUnavailable = lazy(() => import('./pages/ShortLink'))
+const ShortLinkPage = lazy(() => import('./pages/ShortLink').then((m) => ({ default: m.ShortLinkPage })))
 const ResetPassword = lazy(() => import('./pages/ResetPassword'))
 const PayoutWalletConfirm = lazy(() => import('./pages/PayoutWalletConfirm'))
 const PayoutWallets = lazy(() => import('./pages/app/PayoutWallets'))
@@ -145,6 +147,10 @@ export default function App() {
           <Route path="/app" element={<AppDemo />} />
           {/* /join is the public entry point; ?ref= carries the inviter's code. */}
           <Route path="/join" element={<SignIn />} />
+          {/* Short links: kinjy.com/s/<token>. The edge answers these in
+              production; this is the same answer when the app is asked. */}
+          <Route path="/s/:token" element={<ShortLinkPage />} />
+          <Route path="/link-unavailable" element={<LinkUnavailable />} />
           {/* Both halves of a forgotten password: no token asks for a link,
               ?token= from the mail sets the new password. */}
           <Route path="/reset-password" element={<ResetPassword />} />

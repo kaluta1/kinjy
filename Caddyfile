@@ -36,6 +36,15 @@ kinjy.com {
 		reverse_proxy gateway:8000
 	}
 
+	# Short links: kinjy.com/s/<token>, for everybody. auth-service answers:
+	# a preview page to a link unfurler, a one-hop redirect to everybody else.
+	# The token maps to where the link goes and who shared it; nothing about
+	# the member is in the address.
+	handle_path /s/* {
+		rewrite * /api/auth/s{path}
+		reverse_proxy gateway:8000
+	}
+
 	# The address is the compose service name; Caddy resolves it on the
 	# internal network.
 	reverse_proxy web:80

@@ -12,6 +12,7 @@ import { articleMediaIds, htmlToText, hydrateArticle, looksLikeHtml, readableTex
 import { useAuth } from '@/hooks/useAuth'
 import { isLink, LINK_RE, splitTrailing, TAG_OR_MENTION } from '@/lib/linkify'
 import { copyLink, postUrl, SHARE_TARGETS } from '@/lib/share'
+import { useShortLink } from '@/lib/shortLink'
 import { cn } from '@/lib/utils'
 import Comments from './Comments'
 import LinkQr from '@/components/ui-kit/LinkQr'
@@ -291,7 +292,8 @@ export default function PostCard({
   // is a judgement about the thing you are looking at, and a dialog that
   // covers the post asks you to make it from memory.
   // Sharing outside Kinjy. `withRef` is the member's choice about whether the
-  // link carries their invitation code; it is on by default because the whole
+  // link credits them (a short link, kinjy.com/s/..., whose sharer the server
+  // keeps); it is on by default because the whole
   // point of sharing a post is that somebody might join from it, but it is
   // shown rather than hidden, and it can be turned off - a code is a claim on
   // whoever signs up, and a member is entitled to pass something on without
@@ -397,8 +399,12 @@ export default function PostCard({
   // A group's post can be shared too: its members read it from the link,
   // anybody else is told which community it is in and how to join.
   const shareable = target.visibility === 'public' || target.visibility === 'community'
-  const myRef = withRef ? me?.referral_code ?? null : null
-  const shareUrl = postUrl(target.id, myRef)
+  // One address for everything in the share window: the text shown, Copy,
+  // every network's button and the QR code. Asked for only when the window
+  // is open - a feed of cards does not mint a link per card.
+  const credited = withRef && Boolean(me)
+  const shortLink = useShortLink(shareOpen && shareable && credited ? `/p/${target.id}` : null)
+  const shareUrl: string | null = credited ? shortLink.url : postUrl(target.id, null)
   // What the networks put beside the link. The post's own words where there
   // are any, trimmed to something a tweet or an email subject can hold -
   // otherwise the author's name, which is still better than "Kinjy".
@@ -410,6 +416,7 @@ export default function PostCard({
   })()
 
   const doShare = async () => {
+    if (!shareUrl) return
     const result = await copyLink(shareUrl)
     setShareNote(
       result === 'copied'
@@ -913,7 +920,10 @@ export default function PostCard({
             {SHARE_TARGETS.map((target) => (
               <a
                 key={target.id}
-                href={target.href(shareUrl, shareText)}
+                // No address until the link is ready: a button that sends an
+                // incomplete link is worse than one that waits a moment.
+                href={shareUrl ? target.href(shareUrl, shareText) : undefined}
+                aria-disabled={!shareUrl}
                 target="_blank"
                 rel="noopener noreferrer"
                 onClick={() => setShareNote(`Opening ${target.label}…`)}
@@ -942,16 +952,30 @@ export default function PostCard({
               their name on something in a group chat should be able to read
               what they are about to send, including the code on the end. */}
           <div className="mt-1 flex items-center gap-3">
-            <p className="min-w-0 flex-1 break-all rounded-lg bg-ink-2/50 px-2.5 py-2 text-[0.7rem] text-text-mid">
-              {shareUrl}
+            <p
+              aria-busy={!shareUrl}
+              className="min-w-0 flex-1 break-all rounded-lg bg-ink-2/50 px-2.5 py-2 text-[0.7rem] text-text-mid"
+            >
+              {shareUrl ?? (shortLink.error ? 'The link could not be created.' : 'Creating your link…')}
             </p>
             {/* The same address as a code, built from the exact string above -
-                so with the invitation box ticked, scanning credits the member
-                exactly as the link would. */}
-            <LinkQr url={shareUrl} label="this post" filename="kinjy-post" size={96} />
+                so scanning credits the member exactly as the link would. */}
+            {shareUrl ? (
+              <LinkQr url={shareUrl} label="this post" filename="kinjy-post" size={96} />
+            ) : (
+              <span aria-hidden="true" className="h-24 w-24 shrink-0 animate-pulse rounded-xl bg-white/5" />
+            )}
           </div>
+          {shortLink.error && credited && (
+            <p role="alert" className="text-xs text-red-300">
+              {shortLink.error}{' '}
+              <button type="button" onClick={shortLink.retry} className="underline">
+                Try again
+              </button>
+            </p>
+          )}
 
-          {me?.referral_code && (
+          {me && (
             <label className="flex items-start gap-2 text-xs text-text-mid">
               <input
                 type="checkbox"
@@ -960,10 +984,9 @@ export default function PostCard({
                 className="mt-0.5 accent-gold"
               />
               <span>
-                Include my invitation code
-                <span className="ms-1 font-mono text-text-low">{me.referral_code}</span>
+                Credit me if someone joins from this link
                 <span className="mt-0.5 block text-text-low">
-                  Anyone who joins from this link is credited to you.
+                  A short link that is yours. Your code is not in it.
                 </span>
               </span>
             </label>
@@ -973,7 +996,8 @@ export default function PostCard({
             <button
               type="button"
               onClick={doShare}
-              className="inline-flex items-center gap-1.5 rounded-full bg-gradient-to-br from-gold-soft to-gold px-3.5 py-1.5 text-xs font-bold text-ink"
+              disabled={!shareUrl}
+              className="inline-flex items-center gap-1.5 rounded-full bg-gradient-to-br from-gold-soft to-gold px-3.5 py-1.5 text-xs font-bold text-ink disabled:opacity-40"
             >
               <Link2 size={12} aria-hidden="true" />
               Copy link

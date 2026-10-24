@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { Navigate, Link, useSearchParams } from 'react-router'
-import { Check, Copy, Gift, KeyRound, Lock, LogOut, Settings, ShieldCheck, SlidersHorizontal, UserRound, Wallet, type LucideIcon } from 'lucide-react'
+import { Check, Copy, Gift, KeyRound, Link2, Lock, LogOut, Settings, ShieldCheck, SlidersHorizontal, UserRound, Wallet, type LucideIcon } from 'lucide-react'
 import { useAuth } from '@/hooks/useAuth'
 import Earnings from '@/components/dashboard/Earnings'
 import Security from '@/components/dashboard/Security'
@@ -9,8 +9,11 @@ import CloseAccount from '@/components/dashboard/CloseAccount'
 import Experience from '@/components/dashboard/Experience'
 import Privacy from '@/components/dashboard/Privacy'
 import ProfileEditor from '@/components/dashboard/ProfileEditor'
+import ShortLinks from '@/components/dashboard/ShortLinks'
 import { Badge, Panel } from '@/components/dashboard/primitives'
 import LinkQr from '@/components/ui-kit/LinkQr'
+import { useShortLink } from '@/lib/shortLink'
+import { copyLink } from '@/lib/share'
 import AppShell from '@/components/app/AppShell'
 import MemberAvatar from '@/components/social/MemberAvatar'
 import { useMyProfile } from '@/hooks/useMyProfile'
@@ -18,6 +21,7 @@ import { cn } from '@/lib/utils'
 
 const TABS: ReadonlyArray<{ id: string; label: string; icon: LucideIcon }> = [
   { id: 'earnings', label: 'Earnings', icon: Wallet },
+  { id: 'links', label: 'Short links', icon: Link2 },
   { id: 'profile', label: 'Profile', icon: UserRound },
   { id: 'verification', label: 'Verification', icon: ShieldCheck },
   { id: 'privacy', label: 'Privacy', icon: Lock },
@@ -26,49 +30,32 @@ const TABS: ReadonlyArray<{ id: string; label: string; icon: LucideIcon }> = [
   { id: 'account', label: 'Account', icon: Settings },
 ]
 
-type TabId = 'earnings' | 'profile' | 'verification' | 'privacy' | 'experience' | 'security' | 'account'
+type TabId = 'earnings' | 'links' | 'profile' | 'verification' | 'privacy' | 'experience' | 'security' | 'account'
 
 /**
- * The two addresses an invitation can carry.
+ * The two pages an invitation can open, as short links (kinjy.com/s/<token>).
  *
- * The sign-up link opens the form in sign-up mode. It used to be `/join?ref=`
- * alone, and `/join` opens on *sign in* unless told otherwise - so the person
- * being invited, who by definition has no account, landed on "Welcome back"
- * and a password field. The home-page link is for an invitation that should
- * show what Kinjy is before asking anything; the code rides along on both, and
- * ReferralWatch keeps hold of it from whichever page it arrives on.
+ * The sign-up link opens the form in sign-up mode; the home-page link shows
+ * what Kinjy is before asking anything. Both credit the member: the server
+ * keeps whose link it is, so the address carries no code. Links already sent
+ * the old way (/join?ref=CODE, /?ref=CODE) keep working.
  */
-function inviteLinks(code: string) {
-  const origin = window.location.origin
-  const ref = encodeURIComponent(code)
-  return [
-    {
-      id: 'signup',
-      label: 'Sign-up link',
-      hint: 'Opens straight on the sign-up form.',
-      url: `${origin}/join?mode=signup&ref=${ref}`,
-    },
-    {
-      id: 'home',
-      label: 'Home page link',
-      hint: 'Shows what Kinjy is first. Still credited to you.',
-      url: `${origin}/?ref=${ref}`,
-    },
-  ] as const
-}
+const INVITE_LINKS = [
+  { id: 'signup', label: 'Sign-up link', hint: 'Opens straight on the sign-up form.', destination: '/join?mode=signup' },
+  { id: 'home', label: 'Home page link', hint: 'Shows what Kinjy is first. Still credited to you.', destination: '/' },
+] as const
 
-function InviteLinkRow({ label, hint, url }: { label: string; hint: string; url: string }) {
-  const [copied, setCopied] = useState(false)
+function InviteLinkRow({ label, hint, destination }: { label: string; hint: string; destination: string }) {
+  const link = useShortLink(destination)
+  const [copied, setCopied] = useState<'yes' | 'failed' | null>(null)
 
   const copy = async () => {
-    try {
-      await navigator.clipboard.writeText(url)
-      setCopied(true)
-      setTimeout(() => setCopied(false), 2000)
-    } catch {
-      // Clipboard is blocked in some contexts; the link stays selectable below.
-      setCopied(false)
-    }
+    if (!link.url) return
+    // "Copied" only once the clipboard has it; otherwise the link stays
+    // selectable in the box for a manual copy.
+    const result = await copyLink(link.url)
+    setCopied(result === 'copied' ? 'yes' : 'failed')
+    if (result === 'copied') setTimeout(() => setCopied(null), 2000)
   }
 
   return (
@@ -79,24 +66,43 @@ function InviteLinkRow({ label, hint, url }: { label: string; hint: string; url:
         <div className="mt-3 flex gap-2">
           <input
             readOnly
-            value={url}
+            value={link.url ?? (link.error ? '' : 'Creating your link…')}
             onFocus={(e) => e.currentTarget.select()}
+            aria-busy={link.loading}
             className="w-full min-w-0 rounded-full border border-transparent bg-text-hi/[0.07] px-4 py-2.5 text-sm text-text-mid focus:border-gold/50 focus:outline-none"
             aria-label={label}
           />
           <button
             type="button"
             onClick={copy}
-            className="inline-flex shrink-0 items-center gap-1.5 rounded-full bg-gradient-to-br from-gold-soft to-gold px-5 py-2.5 text-sm font-bold text-ink"
+            disabled={!link.url}
+            className="inline-flex shrink-0 items-center gap-1.5 rounded-full bg-gradient-to-br from-gold-soft to-gold px-5 py-2.5 text-sm font-bold text-ink disabled:opacity-40"
           >
-            {copied ? <Check size={14} aria-hidden="true" /> : <Copy size={14} aria-hidden="true" />}
-            {copied ? 'Copied' : 'Copy'}
+            {copied === 'yes' ? <Check size={14} aria-hidden="true" /> : <Copy size={14} aria-hidden="true" />}
+            {copied === 'yes' ? 'Copied' : 'Copy'}
           </button>
         </div>
+        {link.error && (
+          <p role="alert" className="mt-2 text-xs text-red-200">
+            {link.error}{' '}
+            <button type="button" onClick={link.retry} className="underline">
+              Try again
+            </button>
+          </p>
+        )}
+        {copied === 'failed' && (
+          <p role="alert" className="mt-2 text-xs text-text-low">
+            The browser did not allow copying. Select the link above and copy it.
+          </p>
+        )}
       </div>
       {/* For the person standing next to you, a poster or a slide - places
-          where nobody is going to type an address. */}
-      <LinkQr url={url} label={label.toLowerCase()} filename={`kinjy-invite-${label.split(' ')[0].toLowerCase()}`} size={112} />
+          where nobody is going to type an address. The same short link. */}
+      {link.url ? (
+        <LinkQr url={link.url} label={label.toLowerCase()} filename={`kinjy-invite-${label.split(' ')[0].toLowerCase()}`} size={112} />
+      ) : (
+        <span aria-hidden="true" className="h-[112px] w-[112px] shrink-0 animate-pulse rounded-xl bg-text-hi/[0.06]" />
+      )}
     </div>
   )
 }
@@ -122,8 +128,8 @@ function InviteCard({ code }: { code: string }) {
       </div>
 
       <div className="relative mt-6 space-y-3">
-        {inviteLinks(code).map((link) => (
-          <InviteLinkRow key={link.id} label={link.label} hint={link.hint} url={link.url} />
+        {INVITE_LINKS.map((link) => (
+          <InviteLinkRow key={link.id} label={link.label} hint={link.hint} destination={link.destination} />
         ))}
       </div>
 
@@ -243,6 +249,7 @@ export default function Dashboard() {
             <InviteCard code={user.referral_code} />
           </div>
         )}
+        {tab === 'links' && <ShortLinks />}
         {tab === 'profile' && <ProfileEditor />}
         {tab === 'verification' && <Verification />}
         {tab === 'privacy' && <Privacy />}

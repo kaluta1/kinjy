@@ -17,6 +17,15 @@ const REF_KEY = 'kinjy.pending_ref'
 const REF_AT_KEY = 'kinjy.pending_ref_at'
 /** Who it belongs to, so the sign-up page can name them. */
 const REF_WHO_KEY = 'kinjy.pending_ref_name'
+/**
+ * A short link's token, held instead of a code: the invitation of whoever
+ * shared it, which the server looks up at sign-up. One or the other is held,
+ * never both - the newest invitation wins, as it always has.
+ */
+const LINK_KEY = 'kinjy.pending_link'
+/** Where that link was taking them, so sign-up can bring them back there. */
+const LINK_DEST_KEY = 'kinjy.pending_link_dest'
+const LINK_TOKEN_RE = /^[0-9A-Za-z]{9}$/
 
 /**
  * The shape a code can have: six to eight of A-Z0-9.
@@ -80,6 +89,8 @@ export function rememberRef(ref: string | null | undefined): void {
     if (localStorage.getItem(REF_KEY) === code) return
     localStorage.setItem(REF_KEY, code)
     localStorage.setItem(REF_AT_KEY, new Date().toISOString())
+    localStorage.removeItem(LINK_KEY)
+    localStorage.removeItem(LINK_DEST_KEY)
     // A new code is a new inviter. Leaving the old name behind would have the
     // sign-up page welcome somebody on behalf of the wrong person.
     localStorage.removeItem(REF_WHO_KEY)
@@ -97,9 +108,48 @@ export function pendingRef(): string {
   }
 }
 
+/**
+ * Remember the short link somebody arrived on: its token and where it went.
+ * The newest invitation wins, so it replaces a code held from an older link.
+ */
+export function rememberLink(token: string, destination: string, inviter: string | null): void {
+  if (!LINK_TOKEN_RE.test(token)) return
+  try {
+    localStorage.setItem(LINK_KEY, token)
+    localStorage.setItem(LINK_DEST_KEY, destination)
+    localStorage.setItem(REF_AT_KEY, new Date().toISOString())
+    localStorage.removeItem(REF_KEY)
+    if (inviter) localStorage.setItem(REF_WHO_KEY, inviter)
+    else localStorage.removeItem(REF_WHO_KEY)
+  } catch {
+    /* blocked storage: the sign-up still works, uncredited */
+  }
+}
+
+/** The short link's token held for sign-up, if one is. */
+export function pendingLink(): string {
+  try {
+    return localStorage.getItem(LINK_KEY) ?? ''
+  } catch {
+    return ''
+  }
+}
+
+/** Where the held short link was going - only a path of our own. */
+export function pendingLinkDestination(): string | null {
+  try {
+    const value = localStorage.getItem(LINK_DEST_KEY)
+    return value && value.startsWith('/') && !value.startsWith('//') ? value : null
+  } catch {
+    return null
+  }
+}
+
 /** Once it has been used, it should not follow them into a second account. */
 export function clearPendingRef(): void {
   try {
+    localStorage.removeItem(LINK_KEY)
+    localStorage.removeItem(LINK_DEST_KEY)
     localStorage.removeItem(REF_KEY)
     localStorage.removeItem(REF_AT_KEY)
     localStorage.removeItem(REF_WHO_KEY)

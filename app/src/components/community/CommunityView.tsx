@@ -9,6 +9,7 @@ import { useApi } from '@/hooks/useApi'
 import { useAuth } from '@/hooks/useAuth'
 import { ApiError, kaluta, type Post } from '@/lib/api'
 import { copyLink, siteOrigin } from '@/lib/share'
+import { shortLinkFor } from '@/lib/shortLink'
 import { announce } from '@/lib/live'
 import { cn } from '@/lib/utils'
 
@@ -142,23 +143,24 @@ export default function CommunityView({
    * Copy the group's address, whatever its privacy. A public or private group
    * opens from its plain address; a secret one needs the access code, which
    * the server hands to members only. Somebody who arrived on a shared secret
-   * link passes on the same link. A signed-in member's referral code rides
-   * along, as it does on a shared post.
+   * link passes on the same link. A signed-in member gets their own short link
+   * (kinjy.com/s/...), which credits them the way a shared post does - and the
+   * QR code below is drawn from that same address.
    */
   const share = async () => {
     if (!community) return
-    setShareNote(null)
+    setShareNote('Creating your link…')
+    setSharedUrl(null)
     try {
       let path = `/communities/${community.slug}`
       if (community.kind === 'secret') {
         if (isMember) path = (await kaluta.communities.shareLink(community.id)).path
         else if (access) path = `${path}?access=${encodeURIComponent(access)}`
       }
-      const url = new URL(path, siteOrigin())
-      if (user?.referral_code) url.searchParams.set('ref', user.referral_code)
-      const result = await copyLink(url.toString())
-      setSharedUrl(url.toString())
-      setShareNote(result === 'copied' ? 'Link copied.' : `Copy this link: ${url.toString()}`)
+      const url = user ? await shortLinkFor(user.id, path) : new URL(path, siteOrigin()).toString()
+      const result = await copyLink(url)
+      setSharedUrl(url)
+      setShareNote(result === 'copied' ? 'Link copied.' : `Copy this link: ${url}`)
     } catch (err) {
       setShareNote(err instanceof ApiError ? err.message : 'Could not get the link')
     }

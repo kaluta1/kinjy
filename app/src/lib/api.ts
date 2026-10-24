@@ -1827,6 +1827,22 @@ export interface MyDecision {
   } | null
 }
 
+/** A member's short link, as auth-service returns it. */
+export interface ShareLinkOut {
+  token: string
+  url: string
+  /** The page it opens, as a path on this site. */
+  destination: string
+  destination_url: string
+  kind: string
+  include_invitation: boolean
+  active: boolean
+  created_at: string | null
+  disabled_at: string | null
+  /** Only on creation: false when an existing link was returned. */
+  created?: boolean
+}
+
 export const kaluta = {
   status: () => api.get<StackStatus>('/status', { auth: false }),
 
@@ -2958,6 +2974,8 @@ export const kaluta = {
       country?: string
       lang?: string
       referral_code?: string
+      /** The token of a short link the visitor arrived on. */
+      referral_link?: string
     }) {
       const result = await api.post<AuthResult>('/auth/register', input, { auth: false })
       tokens.set(result.tokens)
@@ -3006,6 +3024,33 @@ export const kaluta = {
         `/auth/referral/${encodeURIComponent(code)}`,
         { auth: false },
       ),
+
+    /**
+     * Shorten a Kinjy page (kinjy.com/s/<token>). With `includeInvitation`
+     * the link carries the signed-in member's invitation - the server decides
+     * whose, never the browser. The same page with the same choice returns
+     * the same active link (`created: false`).
+     */
+    shareLink: (destination: string, includeInvitation = false) =>
+      api.post<ShareLinkOut>('/auth/share-links', { destination, include_invitation: includeInvitation }),
+
+    /** The signed-in member's own short links, newest first. */
+    myShareLinks: (offset = 0, limit = 50) =>
+      api.get<{ items: ShareLinkOut[]; total: number }>(`/auth/share-links?offset=${offset}&limit=${limit}`),
+
+    /** Switch one of the member's links off. It stops opening, for good. */
+    disableShareLink: (token: string) =>
+      api.post<ShareLinkOut>(`/auth/share-links/${encodeURIComponent(token)}/disable`, {}),
+
+    /** Where a short link goes, and - for an invitation link - the sharer's name. Never their code. */
+    resolveShareLink: (token: string) =>
+      api.get<{
+        token: string
+        destination: string
+        kind: string
+        invitation: boolean
+        inviter: { display_name: string } | null
+      }>(`/auth/share-links/${encodeURIComponent(token)}`, { auth: false }),
 
     /**
      * Whether a reset link can actually be delivered.

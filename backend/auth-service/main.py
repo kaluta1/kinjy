@@ -6,7 +6,9 @@ resolver every money service depends on.
 from __future__ import annotations
 
 import hashlib
+import html as html_lib
 import logging
+import re
 
 import httpx
 import secrets
@@ -15,11 +17,13 @@ import time
 from datetime import datetime, timedelta, timezone
 
 from fastapi import Depends, HTTPException, Request, status
+from fastapi.responses import HTMLResponse, RedirectResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import func, or_, select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session as OrmSession
 
-from common import events, mailer, security, settings
+from common import events, mailer, security, settings, sharelinks
 from common.auth import AdminUser, ModeratorUser, CurrentUser, MaybeUser, SuperAdminUser
 from common.database import get_db
 from common.ids import new_id
@@ -37,6 +41,18 @@ log = logging.getLogger("auth-service")
 # first deploy has to be stated here or it exists in the model and nowhere else.
 MIGRATIONS = [
     f"ALTER TABLE {models.SCHEMA}.users ADD COLUMN IF NOT EXISTS password_changed_at TIMESTAMPTZ",
+    # Short links: the invitation became an option (links made before it all
+    # carried one, hence the backfill default), links can be disabled, and
+    # destinations keep their parameters. The old one-per-page constraint
+    # gives way to one *active* link per page and choice.
+    f"ALTER TABLE {models.SCHEMA}.share_links ADD COLUMN IF NOT EXISTS with_invitation BOOLEAN NOT NULL DEFAULT TRUE",
+    f"ALTER TABLE {models.SCHEMA}.share_links ALTER COLUMN with_invitation SET DEFAULT FALSE",
+    f"ALTER TABLE {models.SCHEMA}.share_links ADD COLUMN IF NOT EXISTS disabled_at TIMESTAMPTZ",
+    f"ALTER TABLE {models.SCHEMA}.share_links ALTER COLUMN destination TYPE VARCHAR(1000)",
+    f"ALTER TABLE {models.SCHEMA}.share_links DROP CONSTRAINT IF EXISTS uq_share_link_member_destination",
+    f"CREATE UNIQUE INDEX IF NOT EXISTS uq_share_link_active ON {models.SCHEMA}.share_links "
+    "(member_id, destination, with_invitation) WHERE disabled_at IS NULL",
+    f"CREATE INDEX IF NOT EXISTS ix_share_links_member_created ON {models.SCHEMA}.share_links (member_id, created_at)",
 ]
 
 app = create_app(
@@ -159,6 +175,16 @@ async def register(payload: schemas.RegisterIn, request: Request, db: OrmSession
         if inviter is None:
             raise HTTPException(status_code=400, detail="Unknown referral code")
         inviter_id = inviter.id
+    elif payload.referral_link:
+        # An invitation short link stands for the invitation of the member who
+        # made it, exactly as their code would - same rules from here on. A
+        # neutral link, a disabled one, or one whose sharer has left credits
+        # nobody rather than refusing the account: the pool draws a sponsor
+        # below, as for anybody who arrived without an invitation.
+        found = _live_link(db, payload.referral_link.strip())
+        sharer = _link_sharer(db, found[0]) if found else None
+        if sharer is not None:
+            inviter_id = sharer.id
     # No personal invitation link: the referral pool draws a sponsor for them.
     # Resolved below, once the account has an id to record the assignment under.
 
@@ -410,6 +436,322 @@ def referral_lookup(code: str, request: Request, db: OrmSession = Depends(get_db
     if user is None or user.status == "deleted":
         raise HTTPException(status_code=404, detail="Unknown referral code")
     return {"code": user.referral_code, "display_name": user.display_name, "handle": user.handle}
+
+
+# ---------------------------------------------------------------------------
+# Short links: kinjy.com/s/<token>
+# ---------------------------------------------------------------------------
+
+# A member makes links by hand now, so the limits are per member and generous
+# for a person, tight for a script. Opening is per address, and only there to
+# stop somebody walking the token space.
+LINKS_PER_MINUTE = 20
+LINKS_PER_DAY = 300
+LINK_OPENS_PER_MINUTE = 120
+_link_windows: dict[str, dict[str, list[float]]] = {"minute": {}, "day": {}, "open": {}}
+_link_lock = threading.Lock()
+
+
+def _within(bucket: str, key: str | None, limit: int, seconds: int) -> bool:
+    """The same in-process sliding window as the referral lookups."""
+    if not key:
+        return True
+    now = time.time()
+    with _link_lock:
+        window = _link_windows[bucket]
+        recent = [t for t in window.get(key, []) if now - t < seconds]
+        if len(window) > 5000:
+            window.clear()
+        if len(recent) >= limit:
+            window[key] = recent
+            return False
+        recent.append(now)
+        window[key] = recent
+        return True
+
+
+class ShareLinkIn(BaseModel):
+    destination: str = Field(min_length=1, max_length=sharelinks.MAX_DESTINATION)
+    # Off unless the member turns it on: a link is neutral by default.
+    include_invitation: bool = False
+
+
+def _link_out(link: models.ShareLink, created: bool | None = None) -> dict:
+    out = {
+        "token": link.token,
+        "url": sharelinks.short_url(link.token),
+        "destination": link.destination,
+        "destination_url": f"{sharelinks.site_url()}{link.destination}",
+        "kind": link.kind,
+        "include_invitation": link.with_invitation,
+        "active": link.disabled_at is None,
+        "created_at": link.created_at.isoformat() if link.created_at else None,
+        "disabled_at": link.disabled_at.isoformat() if link.disabled_at else None,
+    }
+    if created is not None:
+        out["created"] = created
+    return out
+
+
+def _active_link_for(db: OrmSession, member_id: str, destination: str, with_invitation: bool) -> models.ShareLink | None:
+    return db.scalar(
+        select(models.ShareLink).where(
+            models.ShareLink.member_id == member_id,
+            models.ShareLink.destination == destination,
+            models.ShareLink.with_invitation.is_(with_invitation),
+            models.ShareLink.disabled_at.is_(None),
+        )
+    )
+
+
+def _live_link(db: OrmSession, token: str) -> tuple[models.ShareLink, str] | None:
+    """An active stored link whose destination still passes the rules, and that destination."""
+    if not sharelinks.TOKEN_RE.match(token or ""):
+        return None
+    link = db.get(models.ShareLink, token)
+    if link is None or link.disabled_at is not None:
+        return None
+    try:
+        destination, _ = sharelinks.normalize(link.destination)
+    except sharelinks.BadDestination:
+        return None
+    return link, destination
+
+
+def _link_sharer(db: OrmSession, link: models.ShareLink) -> models.User | None:
+    """Whose invitation a link carries: nobody for a neutral one, or once they have left."""
+    if not link.with_invitation:
+        return None
+    sharer = db.get(models.User, link.member_id)
+    return sharer if sharer is not None and sharer.status == "active" else None
+
+
+@app.post("/auth/share-links", tags=["share-links"])
+def create_share_link(payload: ShareLinkIn, principal: CurrentUser, db: OrmSession = Depends(get_db)):
+    """Shorten a Kinjy page, with or without the member's invitation.
+
+    The invitation is whoever is signed in - never a code or an id from the
+    request, and never one found on the pasted address (those are stripped).
+    Asking again for the same page with the same choice returns the same
+    active link; concurrent requests meet on the partial unique index.
+    """
+    user = _active_user(db, principal.user_id)
+    if user.status != "active":
+        raise HTTPException(status_code=403, detail="Your account cannot create links right now")
+
+    raw = payload.destination
+    nested = sharelinks.short_token_in(raw)
+    if nested is not None:
+        # A short link to a short link is one hop too many: shorten what it
+        # points to instead, without the invitation it may have carried.
+        found = _live_link(db, nested)
+        if found is None:
+            raise HTTPException(status_code=400, detail="That short link does not work")
+        raw = found[1]
+    try:
+        destination, kind = sharelinks.normalize(raw)
+    except sharelinks.BadDestination as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    with_invitation = payload.include_invitation
+    if with_invitation and not user.referral_code:
+        raise HTTPException(status_code=400, detail="Your account has no invitation to attach")
+
+    existing = _active_link_for(db, user.id, destination, with_invitation)
+    if existing is not None:
+        return _link_out(existing, created=False)
+    if not _within("minute", user.id, LINKS_PER_MINUTE, 60) or not _within("day", user.id, LINKS_PER_DAY, 86400):
+        raise HTTPException(status_code=429, detail="You have created a lot of links. Wait a moment and try again.")
+
+    for _ in range(6):
+        token = sharelinks.new_token()
+        result = db.execute(
+            pg_insert(models.ShareLink)
+            .values(token=token, member_id=user.id, destination=destination, kind=kind,
+                    with_invitation=with_invitation, created_at=_now())
+            .on_conflict_do_nothing()
+        )
+        db.commit()
+        if result.rowcount:
+            return _link_out(db.get(models.ShareLink, token), created=True)
+        # Either a concurrent request wrote the same link first, or the token
+        # collided with somebody else's: take theirs, or draw again.
+        row = _active_link_for(db, user.id, destination, with_invitation)
+        if row is not None:
+            return _link_out(row, created=False)
+    log.error("short link: six token collisions in a row for %s", user.id)
+    raise HTTPException(status_code=503, detail="Could not create the link, try again")
+
+
+@app.get("/auth/share-links", tags=["share-links"])
+def my_share_links(
+    principal: CurrentUser,
+    db: OrmSession = Depends(get_db),
+    limit: int = 50,
+    offset: int = 0,
+):
+    """The member's own links, newest first. Nobody else's, whoever asks."""
+    limit = max(1, min(limit, 100))
+    offset = max(0, offset)
+    base = select(models.ShareLink).where(models.ShareLink.member_id == principal.user_id)
+    total = db.scalar(select(func.count()).select_from(base.subquery())) or 0
+    rows = db.scalars(
+        base.order_by(models.ShareLink.created_at.desc(), models.ShareLink.token).offset(offset).limit(limit)
+    ).all()
+    return {"items": [_link_out(r) for r in rows], "total": total}
+
+
+@app.post("/auth/share-links/{token}/disable", tags=["share-links"])
+def disable_share_link(token: str, principal: CurrentUser, db: OrmSession = Depends(get_db)):
+    """Switch a link off for good. Somebody else's link is a 404, not a 403:
+    whether a token exists is not something a stranger gets to learn."""
+    link = db.get(models.ShareLink, token) if sharelinks.TOKEN_RE.match(token or "") else None
+    if link is None or link.member_id != principal.user_id:
+        raise HTTPException(status_code=404, detail="This link does not exist")
+    if link.disabled_at is None:
+        link.disabled_at = _now()
+        db.commit()
+    return _link_out(link)
+
+
+@app.get("/auth/share-links/{token}", tags=["share-links"])
+def resolve_share_link(token: str, request: Request, db: OrmSession = Depends(get_db)):
+    """Where a short link goes, and - for an invitation link - who shared it.
+
+    Asked by the browser that followed it, so the sign-up page can say who
+    invited them. Never the sharer's code, id or address: the token is what
+    the browser keeps, and the server turns it back into a member at sign-up.
+    """
+    ip, _ = _client(request)
+    if not _ref_lookup_allowed(ip):
+        raise HTTPException(status_code=429, detail="Too many lookups. Wait a moment.")
+    found = _live_link(db, token)
+    if found is None:
+        raise HTTPException(status_code=404, detail="This link does not exist")
+    link, destination = found
+    sharer = _link_sharer(db, link)
+    return {
+        "token": link.token,
+        "destination": destination,
+        "kind": link.kind,
+        "invitation": sharer is not None,
+        "inviter": {"display_name": sharer.display_name} if sharer else None,
+    }
+
+
+def _preview_html(title: str, description: str, image: str, url: str, go_to: str) -> str:
+    esc = html_lib.escape
+    return f"""<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>{esc(title)}</title>
+<meta name="description" content="{esc(description)}">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="Kinjy">
+<meta property="og:title" content="{esc(title)}">
+<meta property="og:description" content="{esc(description)}">
+<meta property="og:url" content="{esc(url)}">
+<meta property="og:image" content="{esc(image)}">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="{esc(title)}">
+<meta name="twitter:description" content="{esc(description)}">
+<meta name="twitter:image" content="{esc(image)}">
+<meta name="robots" content="noindex">
+<meta http-equiv="refresh" content="0; url={esc(go_to)}">
+</head>
+<body><p><a href="{esc(go_to)}">{esc(title)}</a></p></body>
+</html>"""
+
+
+_META_RE = re.compile(r'<meta\s+(?:property|name)="(og:title|og:description|og:image)"\s+content="([^"]*)"', re.I)
+
+
+def _preview_for(link: models.ShareLink, destination: str) -> tuple[str, str, str]:
+    """(title, description, image) a crawler should see. Public information only."""
+    site = sharelinks.site_url()
+    title = "Kinjy"
+    description = "Social, forums, family trees, memorials, commerce and AI agents - in one elegant ecosystem."
+    image = f"{site}/og-image.png"
+    path = destination.split("#", 1)[0].split("?", 1)[0]
+    try:
+        if link.kind == "post":
+            # The post's own preview, drawn by social-service with its rules
+            # (as an anonymous viewer, picture by the article's own rule): a
+            # post that is not public gets the generic card there too.
+            post_id = path.split("/p/", 1)[1]
+            page = httpx.get(f"http://social-service:8000/og/p/{post_id}", timeout=6).text
+            found = {k.lower(): html_lib.unescape(v) for k, v in _META_RE.findall(page)}
+            title = found.get("og:title") or "A post on Kinjy"
+            description = found.get("og:description") or description
+            image = found.get("og:image") or image
+        elif link.kind == "community" and path != "/communities":
+            slug = path.split("/communities/", 1)[1]
+            info = httpx.get(f"http://community-service:8000/internal/communities/{slug}", timeout=6)
+            community = info.json() if info.status_code == 200 else {}
+            # A secret community's name is what it keeps from strangers.
+            if community and community.get("kind") != "secret":
+                title = f"{community.get('name')} on Kinjy"
+                description = (community.get("description") or "A community on Kinjy.")[:200]
+                picture = community.get("cover_url") or community.get("avatar_url")
+                if picture and picture.startswith("/"):
+                    picture = f"{site}{picture}"
+                if picture and picture.startswith("http"):
+                    image = picture
+            else:
+                title, description = "A community on Kinjy", "You have been invited to a community on Kinjy."
+        elif link.kind == "chat":
+            title = "Join a conversation on Kinjy"
+            description = "You have been invited to a group conversation on Kinjy."
+        elif link.kind == "profile":
+            title = "A member on Kinjy"
+        elif path == "/join":
+            title = "Join Kinjy"
+        elif link.kind == "invite":
+            title = "You are invited to Kinjy" if link.with_invitation else "Kinjy"
+    except Exception as exc:  # a preview is best effort; the link still works
+        log.warning("short link preview for %s failed: %s", link.token, exc)
+    return title, description, image
+
+
+# Never stored by a shared cache: the answer depends on the user agent (a
+# preview or a redirect) and is checked against the link on every open.
+_NO_STORE = {"Cache-Control": "private, no-store, max-age=0", "Vary": "User-Agent"}
+
+
+@app.api_route("/auth/s/{token}", methods=["GET", "HEAD"], tags=["share-links"], include_in_schema=False)
+def open_share_link(token: str, request: Request, db: OrmSession = Depends(get_db)):
+    """What kinjy.com/s/<token> answers (the edge sends /s/* here).
+
+    A link unfurler gets a small page with the destination's public preview -
+    no sign-in, no JavaScript, no invitation in it. Everybody else gets a 302
+    to the destination; an invitation link adds its token, which the browser
+    holds until sign-up. The destination page applies its own rules as it
+    always does: a short link opens nothing its address would not.
+
+    Read-only either way: opening a link, by a crawler or a person, creates no
+    registration, commission or reward, and records nothing about the visitor.
+    """
+    ip, agent = _client(request)
+    if not _within("open", ip, LINK_OPENS_PER_MINUTE, 60):
+        return HTMLResponse("Too many requests. Wait a moment.", status_code=429, headers=_NO_STORE)
+    found = _live_link(db, token)
+    if found is None:
+        # Said plainly, on a page of its own - never a quiet redirect home.
+        return RedirectResponse("/link-unavailable", status_code=302, headers=_NO_STORE)
+    link, destination = found
+    if sharelinks.CRAWLER_RE.search(agent or ""):
+        title, description, image = _preview_for(link, destination)
+        return HTMLResponse(
+            _preview_html(title, description, image, sharelinks.short_url(link.token), destination),
+            headers=_NO_STORE,
+        )
+    # A neutral link adds nothing, so whatever invitation the visitor already
+    # holds is left exactly as it was. An invitation link whose sharer has
+    # left still opens; it just credits nobody.
+    go_to = sharelinks.with_via(destination, link.token) if _link_sharer(db, link) else destination
+    # 302, not 301: a permanent redirect is cached by the browser, and the
+    # link's state (and the sharer's account) is checked on each open.
+    return RedirectResponse(go_to, status_code=302, headers=_NO_STORE)
 
 
 # ---------------------------------------------------------------------------

@@ -3,6 +3,8 @@ import { createPortal } from 'react-dom'
 import { Link } from 'react-router'
 import { Check, Globe, UsersRound, Link2, Lock, LogOut, Pencil, Pin, PinOff, Search, ShieldCheck, UserPlus, X } from 'lucide-react'
 import { copyLink, siteOrigin } from '@/lib/share'
+import { shortLinkFor } from '@/lib/shortLink'
+import { useAuth } from '@/hooks/useAuth'
 import LinkQr from '@/components/ui-kit/LinkQr'
 import MemberAvatar from '@/components/social/MemberAvatar'
 import { useAppTheme } from '@/components/appdemo/theme'
@@ -36,6 +38,7 @@ function GroupAccess({
   onChanged: () => void
 }) {
   const { tok } = useAppTheme()
+  const { user: me } = useAuth()
   const privacy = conversation.privacy ?? 'private'
   const [note, setNote] = useState<string | null>(null)
   const [needsKyc, setNeedsKyc] = useState(false)
@@ -73,7 +76,9 @@ function GroupAccess({
   const share = () =>
     act(async () => {
       const { path } = await kaluta.messages.shareLink(conversation.id)
-      const url = new URL(path, siteOrigin()).toString()
+      // The member's own short link to the invitation: shorter to send, and
+      // it credits them if somebody joins Kinjy through it.
+      const url = me ? await shortLinkFor(me.id, path) : new URL(path, siteOrigin()).toString()
       setSharedUrl(url)
       return (await copyLink(url)) === 'copied' ? 'Link copied.' : `Copy this link: ${url}`
     }, 'Could not get the link')

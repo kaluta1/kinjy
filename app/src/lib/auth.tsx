@@ -16,6 +16,7 @@ export interface AuthState {
     country?: string
     lang?: string
     referral_code?: string
+    referral_link?: string
   }) => Promise<AuthUser>
   signOut: () => Promise<void>
   refresh: () => Promise<void>

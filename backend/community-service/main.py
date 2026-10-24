@@ -1975,7 +1975,8 @@ def community_summary(community_id: str, db: OrmSession = Depends(get_db)):
     No member list: a caller that wants to know whether one person is in one
     community should ask that, not receive everybody's name to search through.
     """
-    community = db.get(models.Community, community_id)
+    # By id, or by slug (a short link's preview names the community by slug).
+    community = _resolve(db, community_id)
     if community is None:
         raise HTTPException(status_code=404, detail="Community not found")
     return {
@@ -1983,6 +1984,10 @@ def community_summary(community_id: str, db: OrmSession = Depends(get_db)):
         "slug": community.slug,
         "name": community.name,
         "kind": community.kind,
+        # For a link preview; the caller decides whether a secret one shows them.
+        "description": community.description,
+        "avatar_url": community.avatar_url,
+        "cover_url": community.cover_url,
         # Whether somebody who has not joined may read what is posted here.
         # Only ever true for an open community: closing a community has to
         # close its content with it, or "private" would mean nothing.

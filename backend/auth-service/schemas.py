@@ -34,6 +34,8 @@ class RegisterIn(BaseModel):
     lang: str = "en"
     country: str | None = Field(default=None, max_length=2)
     referral_code: str | None = None
+    # The token of a short link (kinjy.com/s/<token>) the visitor arrived on.
+    referral_link: str | None = Field(default=None, max_length=16)
 
     @field_validator("handle")
     @classmethod
