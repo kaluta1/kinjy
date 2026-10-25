@@ -2544,6 +2544,7 @@ def ebook_terms():
         "categories": list(EBOOK_CATEGORIES),
         "licenses": list(EBOOK_LICENSES),
         "link_minutes": settings.EBOOK_LINK_TTL_S // 60,
+        "link_days": round(settings.EBOOK_LINK_TTL_S / 86400, 1),
         "scanned_for_malware": False,
         "access": (
             "Your ebook is in your library as soon as the payment is confirmed. It stays available "

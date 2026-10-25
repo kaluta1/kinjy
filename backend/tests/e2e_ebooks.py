@@ -177,7 +177,7 @@ link = r.json()
 url = link["url"] if link["url"].startswith("http") else "http://localhost:8200" + link["url"]
 got = httpx.get(url)
 check("it is the book, byte for byte", got.status_code == 200 and got.content == pdf_bytes("full book v1"), got.status_code)
-check("it expires in minutes", 0 < link["expires_in"] <= 3600, link)
+check("it works for 7 days", link["expires_in"] == 7 * 24 * 3600, link)
 bare = url.split("?")[0]
 check("the file without a signature: nothing", httpx.get(bare).status_code == 404)
 import re as _re

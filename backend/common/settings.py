@@ -141,9 +141,10 @@ ESCROW_AUTO_RELEASE_DAYS = _int("ESCROW_AUTO_RELEASE_DAYS", 7)
 EBOOK_MAX_MB = _int("EBOOK_MAX_MB", 100)
 # A sample (a free excerpt) is public, so it is kept small.
 EBOOK_SAMPLE_MAX_MB = _int("EBOOK_SAMPLE_MAX_MB", 20)
-# How long a download link works. Long enough to start a download on a slow
-# connection; a buyer can always ask for a fresh one from their library.
-EBOOK_LINK_TTL_S = _int("EBOOK_LINK_TTL_S", 15 * 60)
+# How long a download link works: 7 days, so a link saved or opened on another
+# device still works for a week. Access is checked when the link is made, and a
+# buyer can always get a fresh one from their library.
+EBOOK_LINK_TTL_S = _int("EBOOK_LINK_TTL_S", 7 * 24 * 3600)
 # Asking again for the same book within this window is a retry (an
 # interrupted download), not another download: it is not counted.
 EBOOK_RETRY_GRACE_S = _int("EBOOK_RETRY_GRACE_S", 30 * 60)
