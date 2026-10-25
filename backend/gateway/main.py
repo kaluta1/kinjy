@@ -101,6 +101,8 @@ ADMIN_ROUTES: dict[str, str] = {
     "/api/admin/classification": "http://social-service:8000",
     "/api/admin/classification-queue": "http://social-service:8000",
     "/api/admin/disputes": "http://commerce-service:8000",
+    # Listing suspension and ebook access support (25/10).
+    "/api/admin/commerce": "http://commerce-service:8000",
     "/api/admin/contact-risk": "http://messaging-service:8000",
     "/api/admin/age": "http://auth-service:8000",
     "/api/admin/refunds": "http://payment-service:8000",

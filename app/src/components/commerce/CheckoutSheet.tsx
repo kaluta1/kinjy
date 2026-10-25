@@ -15,6 +15,8 @@ export interface CheckoutProduct {
   customer_price: string
   /** Null or undefined means unlimited (or unknown on a list card: the server enforces it). */
   stock?: number | null
+  /** Present on an ebook: one copy, delivered to the library, no address. */
+  ebook?: unknown
 }
 
 const field =
@@ -54,7 +56,8 @@ export default function CheckoutSheet({
   const { lang } = useAppTheme()
   const countries = useMemo(() => countryOptions(lang), [lang])
   const physical = product.kind === 'product'
-  const max = Math.max(1, Math.min(product.stock ?? MAX_QTY, MAX_QTY))
+  const isEbook = Boolean(product.ebook)
+  const max = isEbook ? 1 : Math.max(1, Math.min(product.stock ?? MAX_QTY, MAX_QTY))
 
   const [quantity, setQuantity] = useState(1)
   const [address, setAddress] = useState<OrderShipping>(EMPTY)
@@ -176,6 +179,15 @@ export default function CheckoutSheet({
             <p className="mono-data mb-4 mt-1 text-center text-xs text-text-mid">Order {orderId.slice(0, 12)}</p>
             {/* An order is only a request until it is paid: pay now, or later from the orders list. */}
             <PaymentPanel orderId={orderId} amount={orderPrice || money(total).slice(1)} onPaid={() => onOrdered?.()} />
+            {isEbook && (
+              <p className="mt-4 text-center text-sm text-text-mid">
+                Once the payment is confirmed, the ebook is in{' '}
+                <Link to="/market/library" onClick={onClose} className="font-semibold text-gold-soft underline">
+                  your library
+                </Link>
+                , ready to download.
+              </p>
+            )}
             <div className="mt-5 flex flex-col gap-2 sm:flex-row sm:justify-center">
               <Link
                 to="/market#orders"

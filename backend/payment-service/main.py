@@ -156,6 +156,18 @@ def available_rails():
     }
 
 
+def order_quote(order_id: str | None) -> dict | None:
+    """The order as commerce-service has it: buyer, total, status. None if unknown."""
+    if not order_id:
+        return None
+    try:
+        response = httpx.get(f"{COMMERCE_URL}/internal/orders/{order_id}/quote", timeout=6)
+    except httpx.HTTPError as exc:
+        log.error("commerce unreachable for order %s: %s", order_id, exc)
+        raise HTTPException(status_code=503, detail="The marketplace did not answer. Try again.")
+    return response.json() if response.status_code == 200 else None
+
+
 @app.post("/payments/checkout", status_code=201, tags=["payments"])
 def checkout(payload: CheckoutIn, principal: CurrentUser, db: OrmSession = Depends(get_db)):
     # The single door every payment goes through, which is why the gate sits
@@ -189,6 +201,16 @@ def checkout(payload: CheckoutIn, principal: CurrentUser, db: OrmSession = Depen
         if (quote is None or quote["user_id"] != principal.user_id or quote["used"] or quote["expired"]
                 or economy.money(payload.amount) != economy.money(quote["total"])):
             raise HTTPException(status_code=400, detail="Start community payments from the community page")
+
+    if payload.purpose == "order":
+        # A marketplace order is paid at the price the server set when it was
+        # placed, by the buyer who placed it, once. Before this, any amount
+        # with an order's id as reference opened its escrow - and for an
+        # ebook, delivered the file.
+        quote = order_quote(payload.reference)
+        if (quote is None or quote["buyer_id"] != principal.user_id or quote["status"] != "pending"
+                or economy.money(payload.amount) != economy.money(quote["customer_price"])):
+            raise HTTPException(status_code=400, detail="Pay a marketplace order from its checkout page")
 
     if payload.purpose == "referral_pool":
         # The quantity is in the reference, the price is the server's: a
@@ -755,7 +777,9 @@ async def _on_settled(intent: models.PaymentIntent, db: OrmSession) -> None:
         try:
             httpx.post(
                 f"{COMMERCE_URL}/internal/orders/{intent.reference}/funded",
-                params={"custody_ref": intent.id},
+                # The amount actually paid: commerce opens the escrow only if
+                # it is the order's total.
+                params={"custody_ref": intent.id, "amount": str(intent.amount)},
                 timeout=8,
             ).raise_for_status()
         except Exception as exc:

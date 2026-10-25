@@ -1470,6 +1470,105 @@ export interface Product {
   vendor?: VendorBrief
   rating_average?: number | null
   rating_count?: number
+  /** Set on ebook listings. */
+  ebook?: boolean
+  subtitle?: string | null
+  author?: string | null
+  category?: string | null
+  language?: string | null
+}
+
+/** What an ebook listing says about the book. Never the file's address. */
+export interface EbookDetail {
+  subtitle: string | null
+  author: string | null
+  summary: string | null
+  category: string | null
+  language: string | null
+  published_on: string | null
+  edition: string | null
+  page_count: number | null
+  isbn: string | null
+  license: 'personal' | 'commercial'
+  format: 'pdf' | 'epub' | null
+  size_bytes: number | null
+  version: number | null
+  updated_at: string | null
+  sample: { url: string; format: string } | null
+  download_limit: number | null
+  access_days: number | null
+  delivery: string
+  description_format: 'html'
+  /** For a signed-in buyer who already owns it. */
+  purchased_order_id?: string | null
+  /** Owner only. */
+  file?: { filename: string; version: number; size_bytes: number } | null
+  suspended_reason?: string | null
+  sample_asset_id?: string | null
+}
+
+export interface EbookInput {
+  file_asset_id?: string | null
+  sample_asset_id?: string | null
+  subtitle?: string | null
+  author?: string | null
+  summary?: string | null
+  category?: string | null
+  language?: string | null
+  published_on?: string | null
+  edition?: string | null
+  page_count?: number | null
+  isbn?: string | null
+  license?: 'personal' | 'commercial'
+  download_limit?: number | null
+  access_days?: number | null
+}
+
+export interface EbookTerms {
+  formats: string[]
+  max_file_mb: number
+  max_sample_mb: number
+  categories: string[]
+  licenses: string[]
+  link_minutes: number
+  scanned_for_malware: boolean
+  access: string
+}
+
+export interface LibraryItem {
+  order_id: string
+  status: string
+  purchased_at: string
+  product: { id: string; title: string; subtitle: string | null; author: string | null; images: string[]; available: boolean }
+  seller: VendorBrief
+  file: { format: string; size_bytes: number; version: number; updated_at: string } | null
+  update_available: boolean
+  state: 'active' | 'expired' | 'refunded' | 'revoked' | 'limit_reached' | 'unavailable' | 'unpaid'
+  access_until: string | null
+  downloads_used: number
+  download_limit: number | null
+}
+
+export interface EbookDownloadLink {
+  url: string
+  expires_in: number
+  filename: string
+  format: string
+  size_bytes: number
+  version: number
+  counted: boolean
+  downloads_used: number
+  download_limit: number | null
+}
+
+export interface ProductSales {
+  orders_paid: number
+  units_sold: number
+  awaiting_release: number
+  gross: string
+  refunds: string
+  net_released: string
+  currency: string
 }
 
 export interface VendorBrief {
@@ -1514,6 +1613,7 @@ export interface ProductDetail {
   vendor_price?: string
   margin?: string
   markup_pct?: string
+  ebook?: EbookDetail
 }
 
 export interface MyProduct extends ProductPricing {
@@ -1528,6 +1628,10 @@ export interface MyProduct extends ProductPricing {
   city: string | null
   images: string[]
   created_at: string
+  ebook?: boolean
+  author?: string | null
+  has_file?: boolean
+  suspended_reason?: string | null
 }
 
 export interface ProductPatch {
@@ -1538,7 +1642,8 @@ export interface ProductPatch {
   country?: string | null
   city?: string | null
   images?: string[]
-  status?: 'active' | 'paused'
+  status?: 'active' | 'paused' | 'draft'
+  ebook?: EbookInput
 }
 
 export interface Sale extends Order {
@@ -1574,6 +1679,8 @@ export interface OrderProduct {
   city: string | null
   /** False when the seller removed or paused the listing; the buyer still sees what they bought. */
   available: boolean
+  ebook?: boolean
+  author?: string | null
 }
 
 export interface OrderCounterpart {
@@ -2390,7 +2497,7 @@ export const kaluta = {
          * 'memorial' is a gallery photo or video: JPEG/PNG/WebP up to 25 MB, MP4/WebM up
          * to 50 MB, and the bytes must be what the type says.
          */
-        purpose?: 'post' | 'chat' | 'memorial'
+        purpose?: 'post' | 'chat' | 'memorial' | 'ebook' | 'ebook_sample'
       } = {},
     ): Promise<UploadedMedia> {
       const form = new FormData()
@@ -3230,9 +3337,15 @@ export const kaluta = {
         offset?: number
         /** Only the signed-in member's own active listings. Needs the token, unlike the public list. */
         mine?: boolean
+        category?: string
+        language?: string
+        ebook?: boolean
       } = {},
     ) => {
       const query = new URLSearchParams()
+      if (params.category) query.set('category', params.category)
+      if (params.language) query.set('language', params.language)
+      if (params.ebook !== undefined) query.set('ebook', String(params.ebook))
       if (params.q) query.set('q', params.q)
       if (params.mine) query.set('mine', 'true')
       if (params.offset) query.set('offset', String(params.offset))
@@ -3256,8 +3369,28 @@ export const kaluta = {
       country?: string
       city?: string
       images?: string[]
+      status?: 'active' | 'draft'
+      ebook?: EbookInput
     }) =>
-      api.post<{ id: string; pricing: Record<string, string> }>('/commerce/products', input),
+      api.post<{ id: string; status: string; pricing: Record<string, string> }>('/commerce/products', input),
+
+    /** Formats, size limits and categories for an ebook. Public. */
+    ebookTerms: () => api.get<EbookTerms>('/commerce/ebooks/terms', { auth: false }),
+    /** The buyer's ebooks. */
+    library: () => api.get<{ items: LibraryItem[] }>('/commerce/library'),
+    /** A short-lived link to an owned ebook. Checked by the server every time. */
+    downloadEbook: (orderId: string) => api.post<EbookDownloadLink>(`/commerce/library/${orderId}/download`),
+    /** A new version of the book's file; buyers get it from their library. */
+    replaceEbookFile: (productId: string, assetId: string, note?: string) =>
+      api.post<{ version: number; unchanged?: boolean }>(`/commerce/products/${productId}/ebook/file`, {
+        asset_id: assetId,
+        note: note || undefined,
+      }),
+    ebookVersions: (productId: string) =>
+      api.get<{
+        items: Array<{ version: number; filename: string; format: string; size_bytes: number; note: string | null; created_at: string; current: boolean }>
+      }>(`/commerce/products/${productId}/ebook/files`),
+    productSales: (productId: string) => api.get<ProductSales>(`/commerce/products/${productId}/sales`),
     order: (productId: string, quantity = 1, shipping?: OrderShipping) =>
       api.post<{ id: string; status: string; customer_price: string }>('/commerce/orders', {
         product_id: productId,

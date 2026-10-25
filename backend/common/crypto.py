@@ -300,13 +300,17 @@ def _media_signature(asset_id: str, expires: int) -> str:
     return base64.urlsafe_b64encode(mac).decode().rstrip("=")
 
 
-def sign_media_url(url: str, asset_id: str) -> str:
+def sign_media_url(url: str, asset_id: str, ttl_s: int | None = None) -> str:
     """``url`` with a signature valid for about MEDIA_LINK_TTL_S.
 
     The expiry is rounded up to the hour, so the same attachment gets the same
-    link for an hour at a time and the browser can cache it.
+    link for an hour at a time and the browser can cache it. With ``ttl_s``
+    (a paid ebook's download link) the link lives that long, to the minute.
     """
-    expires = -(-(int(time.time()) + MEDIA_LINK_TTL_S) // 3600) * 3600
+    if ttl_s is not None:
+        expires = -(-(int(time.time()) + max(60, ttl_s)) // 60) * 60
+    else:
+        expires = -(-(int(time.time()) + MEDIA_LINK_TTL_S) // 3600) * 3600
     separator = "&" if "?" in url else "?"
     return f"{url}{separator}exp={expires}&sig={_media_signature(asset_id, expires)}"
 

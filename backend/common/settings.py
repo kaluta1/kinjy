@@ -134,6 +134,21 @@ CUSTODIAN_PROVIDER = _str("CUSTODIAN_PROVIDER", "mangopay")
 CUSTODIAN_NAME = _str("CUSTODIAN_NAME", "Mangopay S.A.")
 CUSTODIAN_LICENCE = _str("CUSTODIAN_LICENCE", "Electronic Money Institution (Luxembourg, CSSF)")
 ESCROW_AUTO_RELEASE_DAYS = _int("ESCROW_AUTO_RELEASE_DAYS", 7)
+
+# Ebooks sold on the marketplace (PDF and EPUB). The complete file is stored
+# privately and handed out only as a short-lived signed link, after the
+# buyer's order has been confirmed paid by the server.
+EBOOK_MAX_MB = _int("EBOOK_MAX_MB", 100)
+# A sample (a free excerpt) is public, so it is kept small.
+EBOOK_SAMPLE_MAX_MB = _int("EBOOK_SAMPLE_MAX_MB", 20)
+# How long a download link works. Long enough to start a download on a slow
+# connection; a buyer can always ask for a fresh one from their library.
+EBOOK_LINK_TTL_S = _int("EBOOK_LINK_TTL_S", 15 * 60)
+# Asking again for the same book within this window is a retry (an
+# interrupted download), not another download: it is not counted.
+EBOOK_RETRY_GRACE_S = _int("EBOOK_RETRY_GRACE_S", 30 * 60)
+# Link requests per buyer per minute, against scripted abuse only.
+EBOOK_LINKS_PER_MINUTE = _int("EBOOK_LINKS_PER_MINUTE", 20)
 # Once a dispute is open the seller has this long to answer before the case is
 # escalated to Kinjy arbitration on the buyer's side of the record.
 DISPUTE_RESPONSE_DAYS = _int("DISPUTE_RESPONSE_DAYS", 3)

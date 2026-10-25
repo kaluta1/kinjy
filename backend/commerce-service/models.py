@@ -36,6 +36,87 @@ class Product(Base):
     city: Mapped[str | None] = mapped_column(String(120))
     images: Mapped[str | None] = mapped_column(Text)  # csv of urls
     status: Mapped[str] = mapped_column(String(20), default="active")
+    # active|paused|draft|suspended|removed
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+    # --- an ebook (a digital listing delivered as a file) -------------------
+    # Set on digital listings made with an ebook file; older digital listings
+    # leave them empty and keep the seller-delivers flow they always had.
+    ebook: Mapped[bool] = mapped_column(Boolean, default=False)
+    subtitle: Mapped[str | None] = mapped_column(String(200))
+    author: Mapped[str | None] = mapped_column(String(200))
+    summary: Mapped[str | None] = mapped_column(String(500))
+    category: Mapped[str | None] = mapped_column(String(40), index=True)
+    language: Mapped[str | None] = mapped_column(String(10), index=True)
+    published_on: Mapped[date | None] = mapped_column(Date)
+    edition: Mapped[str | None] = mapped_column(String(60))
+    page_count: Mapped[int | None] = mapped_column(Integer)
+    isbn: Mapped[str | None] = mapped_column(String(17))
+    license: Mapped[str | None] = mapped_column(String(20))  # personal|commercial
+    # The current file (see EbookFile for every version) and the free sample.
+    ebook_file_id: Mapped[int | None] = mapped_column(Integer)
+    sample_asset_id: Mapped[str | None] = mapped_column(String(40))
+    sample_url: Mapped[str | None] = mapped_column(String(500))
+    sample_format: Mapped[str | None] = mapped_column(String(10))
+    # Null means no limit: nothing restrictive is assumed for the seller.
+    download_limit: Mapped[int | None] = mapped_column(Integer)
+    access_days: Mapped[int | None] = mapped_column(Integer)
+    suspended_reason: Mapped[str | None] = mapped_column(String(300))
+
+
+class EbookFile(Base):
+    """One version of an ebook's complete file. Never deleted or overwritten.
+
+    Replacing the file adds a version and moves the listing to it. Policy:
+    every buyer of the ebook downloads the current version - a corrected
+    edition reaches the people who already paid for the book - and the order
+    history keeps which version existed when.
+    """
+
+    __tablename__ = "ebook_files"
+    __table_args__ = {"schema": SCHEMA}
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    product_id: Mapped[str] = mapped_column(String(40), index=True)
+    version: Mapped[int] = mapped_column(Integer)
+    asset_id: Mapped[str] = mapped_column(String(40))
+    # The private media address; signed per download, never published.
+    url: Mapped[str] = mapped_column(String(500))
+    file_format: Mapped[str] = mapped_column(String(10))  # pdf|epub
+    filename: Mapped[str] = mapped_column(String(255))
+    size_bytes: Mapped[int] = mapped_column(Integer)
+    note: Mapped[str | None] = mapped_column(String(300))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
+class EbookDownload(Base):
+    """One download link handed to a buyer. Counted, not the bytes."""
+
+    __tablename__ = "ebook_downloads"
+    __table_args__ = {"schema": SCHEMA}
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    order_id: Mapped[str] = mapped_column(String(40), index=True)
+    buyer_id: Mapped[str] = mapped_column(String(40), index=True)
+    file_id: Mapped[int] = mapped_column(Integer)
+    # False for a retry within the grace window: an interrupted download
+    # asked for again does not use up an allowance.
+    counted: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, index=True)
+
+
+class CommerceAudit(Base):
+    """Sensitive administrative actions on listings and ebook access."""
+
+    __tablename__ = "commerce_audit"
+    __table_args__ = {"schema": SCHEMA}
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    actor_id: Mapped[str] = mapped_column(String(40), index=True)
+    action: Mapped[str] = mapped_column(String(40))
+    target_type: Mapped[str] = mapped_column(String(20))  # product|order
+    target_id: Mapped[str] = mapped_column(String(40), index=True)
+    reason: Mapped[str | None] = mapped_column(String(500))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
 
@@ -75,6 +156,11 @@ class Order(Base):
     shipping_address: Mapped[str | None] = mapped_column(Text)
     refunded_amount: Mapped[Decimal] = mapped_column(AMOUNT, default=Decimal("0"))
     ledger_journal_id: Mapped[str | None] = mapped_column(String(40))
+    # An ebook order: downloads before this time are not counted against the
+    # limit (an admin resetting a buyer's allowance), and access revoked by
+    # an admin for a justified reason.
+    downloads_reset_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    access_revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
 

@@ -13,7 +13,9 @@ from __future__ import annotations
 import json
 import logging
 import re
-from datetime import datetime, timedelta, timezone
+import threading
+import time
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 
 import httpx
@@ -23,7 +25,8 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session as OrmSession
 
-from common import economy, events, settings
+from common import crypto, economy, events, mediasign, settings
+from common.article_html import sanitize_article
 from common import agefeatures
 from common.auth import AdminUser, CurrentUser, MaybeUser
 from common.notify import notify, notify_many
@@ -57,6 +60,26 @@ MIGRATIONS.extend([
     f"ALTER TABLE {models.SCHEMA}.orders ADD COLUMN IF NOT EXISTS tracking_url VARCHAR(500)",
 ])
 
+# Ebooks (25/10): additive columns on listings and orders. The new tables
+# (ebook_files, ebook_downloads, commerce_audit) are created by create_all.
+MIGRATIONS.extend([
+    f"ALTER TABLE {models.SCHEMA}.products ADD COLUMN IF NOT EXISTS ebook BOOLEAN NOT NULL DEFAULT FALSE",
+    *[
+        f"ALTER TABLE {models.SCHEMA}.products ADD COLUMN IF NOT EXISTS {column}"
+        for column in (
+            "subtitle VARCHAR(200)", "author VARCHAR(200)", "summary VARCHAR(500)", "category VARCHAR(40)",
+            "language VARCHAR(10)", "published_on DATE", "edition VARCHAR(60)", "page_count INTEGER",
+            "isbn VARCHAR(17)", "license VARCHAR(20)", "ebook_file_id INTEGER", "sample_asset_id VARCHAR(40)",
+            "sample_url VARCHAR(500)", "sample_format VARCHAR(10)", "download_limit INTEGER",
+            "access_days INTEGER", "suspended_reason VARCHAR(300)",
+        )
+    ],
+    f"CREATE INDEX IF NOT EXISTS ix_products_category ON {models.SCHEMA}.products (category)",
+    f"CREATE INDEX IF NOT EXISTS ix_products_language ON {models.SCHEMA}.products (language)",
+    f"ALTER TABLE {models.SCHEMA}.orders ADD COLUMN IF NOT EXISTS downloads_reset_at TIMESTAMPTZ",
+    f"ALTER TABLE {models.SCHEMA}.orders ADD COLUMN IF NOT EXISTS access_revoked_at TIMESTAMPTZ",
+])
+
 app = create_app(
     name="commerce-service",
     schema=models.SCHEMA,
@@ -65,10 +88,70 @@ app = create_app(
 )
 
 
+EBOOK_CATEGORIES = (
+    "business", "education", "fiction", "health", "history", "religion", "self_help", "technology",
+    "children", "cooking", "arts", "finance", "languages", "science", "travel", "other",
+)
+EBOOK_LICENSES = ("personal", "commercial")
+
+
+def _isbn_ok(value: str) -> bool:
+    """An ISBN-10 or ISBN-13 whose check digit is right."""
+    digits = value.replace("-", "").replace(" ", "").upper()
+    if len(digits) == 10 and digits[:9].isdigit() and (digits[9].isdigit() or digits[9] == "X"):
+        total = sum((10 - i) * int(d) for i, d in enumerate(digits[:9]))
+        total += 10 if digits[9] == "X" else int(digits[9])
+        return total % 11 == 0
+    if len(digits) == 13 and digits.isdigit():
+        total = sum(int(d) * (1 if i % 2 == 0 else 3) for i, d in enumerate(digits[:12]))
+        return (10 - total % 10) % 10 == int(digits[12])
+    return False
+
+
+class EbookIn(BaseModel):
+    """What makes a digital listing an ebook: its file, and its book details."""
+
+    file_asset_id: str | None = Field(default=None, max_length=40)
+    sample_asset_id: str | None = Field(default=None, max_length=40)
+    subtitle: str | None = Field(default=None, max_length=200)
+    author: str | None = Field(default=None, max_length=200)
+    summary: str | None = Field(default=None, max_length=500)
+    category: str | None = None
+    language: str | None = Field(default=None, pattern="^[a-z]{2,3}$")
+    published_on: date | None = None
+    edition: str | None = Field(default=None, max_length=60)
+    page_count: int | None = Field(default=None, ge=1, le=100000)
+    isbn: str | None = Field(default=None, max_length=17)
+    license: str = Field(default="personal", pattern="^(personal|commercial)$")
+    download_limit: int | None = Field(default=None, ge=1, le=1000)
+    access_days: int | None = Field(default=None, ge=1, le=3650)
+
+    @field_validator("category")
+    @classmethod
+    def _check_category(cls, value: str | None) -> str | None:
+        if value and value not in EBOOK_CATEGORIES:
+            raise ValueError(f"category must be one of: {', '.join(EBOOK_CATEGORIES)}")
+        return value or None
+
+    @field_validator("isbn")
+    @classmethod
+    def _check_isbn(cls, value: str | None) -> str | None:
+        if not value or not value.strip():
+            return None
+        if not _isbn_ok(value):
+            raise ValueError("That ISBN is not valid (check the digits, or leave it empty)")
+        return value.replace(" ", "").upper()
+
+
 class ProductIn(BaseModel):
     title: str = Field(min_length=2, max_length=200)
     description: str = ""
     kind: str = Field(default="product", pattern="^(product|service|digital)$")
+    # "draft" keeps a listing to the seller until it is ready.
+    status: str = Field(default="active", pattern="^(active|draft)$")
+    # A digital listing with an ebook file: delivered automatically, as a
+    # download, once the payment is confirmed.
+    ebook: EbookIn | None = None
     vendor_price: Decimal = Field(gt=0)
     # Services and digital goods have no inventory, so null means unlimited.
     stock: int | None = Field(default=None, ge=0)
@@ -87,8 +170,19 @@ class ProductIn(BaseModel):
         return _clean_country(value)
 
 
+_MEDIA_PATH = re.compile(r"/media/(mda_[0-9A-Za-z]{6,60})$")
+
+
+def _unsigned(url: str) -> str:
+    """A media address without the viewing ticket a page was shown it with.
+    Tickets expire, so only the bare address is ever stored."""
+    base = url.split("?", 1)[0] if isinstance(url, str) else url
+    return base if _MEDIA_PATH.search(base or "") else url
+
+
 def _clean_images(value: list[str]) -> list[str]:
     # Images are stored as a csv, so a comma inside a url would split it in two.
+    value = [_unsigned(url) for url in value]
     for url in value:
         if (
             not isinstance(url, str)
@@ -162,18 +256,121 @@ def create_product(payload: ProductIn, principal: CurrentUser, db: OrmSession = 
     # Selling to strangers is a contract, not a post. The refusal is 403 and
     # says nothing about which age would qualify.
     agefeatures.require(principal.user_id, "marketplace_sell")
+    if payload.ebook is not None and payload.kind != "digital":
+        raise HTTPException(status_code=422, detail="Only a digital listing can be an ebook")
 
-    data = payload.model_dump(exclude={"images"})
+    data = payload.model_dump(exclude={"images", "ebook"})
     product = models.Product(
         id=new_id("prd"),
         vendor_id=principal.user_id,
         images=",".join(payload.images) or None,
         **data,
     )
+    if payload.ebook is not None:
+        # Nothing physical about it: no stock, no pickup city.
+        product.stock = None
+        product.city = None
+        product.ebook = True
+        product.description = sanitize_article(payload.description or "")
+        _apply_ebook(db, product, payload.ebook, principal.user_id)
+        if product.status == "active":
+            _require_publishable(product)
     db.add(product)
     db.commit()
     pricing = economy.marketplace_pricing(product.vendor_price)
-    return {"id": product.id, "pricing": {k: str(v) for k, v in pricing.items()}}
+    return {"id": product.id, "status": product.status, "pricing": {k: str(v) for k, v in pricing.items()}}
+
+
+# --- ebooks: files, details, publication ------------------------------------------
+
+MEDIA_URL = "http://media-service:8000"
+
+
+def _media_asset(asset_id: str) -> dict | None:
+    try:
+        response = httpx.get(f"{MEDIA_URL}/internal/media/{asset_id}", timeout=6)
+    except httpx.HTTPError as exc:
+        log.error("media-service unreachable for %s: %s", asset_id, exc)
+        raise HTTPException(status_code=503, detail="The file service did not answer; try again")
+    return response.json() if response.status_code == 200 else None
+
+
+def _ebook_asset(asset_id: str, owner_id: str, purpose: str) -> dict:
+    """An uploaded file the seller may put on their ebook - their own, stored,
+    and uploaded as exactly this (the full book, or its sample)."""
+    info = _media_asset(asset_id)
+    what = "ebook file" if purpose == "ebook" else "sample"
+    if info is None or info.get("owner_id") != owner_id or info.get("purpose") != purpose:
+        raise HTTPException(status_code=422, detail=f"That {what} was not found among your uploads")
+    if info.get("status") != "ready":
+        raise HTTPException(status_code=422, detail=f"The {what} has not finished uploading")
+    if info.get("content_type") not in ("application/pdf", "application/epub+zip"):
+        raise HTTPException(status_code=422, detail=f"The {what} must be a PDF or an EPUB")
+    if purpose == "ebook" and not info.get("private"):
+        # Defence in depth: a paid file that is not private is never attached.
+        raise HTTPException(status_code=422, detail="The ebook file is not stored privately")
+    return info
+
+
+def _format_of(content_type: str) -> str:
+    return "pdf" if content_type == "application/pdf" else "epub"
+
+
+def _add_ebook_version(db: OrmSession, product: models.Product, info: dict, note: str | None = None) -> models.EbookFile:
+    """A new version of the book's file. The previous ones stay on record."""
+    if product.id is None:
+        product.id = new_id("prd")
+    latest = db.scalar(
+        select(func.max(models.EbookFile.version)).where(models.EbookFile.product_id == product.id)
+    ) or 0
+    version = models.EbookFile(
+        product_id=product.id,
+        version=latest + 1,
+        asset_id=info["id"],
+        url=info["url"],
+        file_format=_format_of(info["content_type"]),
+        filename=(info.get("filename") or f"ebook.{_format_of(info['content_type'])}")[:255],
+        size_bytes=int(info.get("size_bytes") or 0),
+        note=note,
+    )
+    db.add(version)
+    db.flush()
+    product.ebook_file_id = version.id
+    return version
+
+
+def _apply_ebook(db: OrmSession, product: models.Product, ebook: EbookIn, owner_id: str, *, fields: set | None = None) -> None:
+    """Set an ebook's details (all of them, or only ``fields`` on an edit)."""
+    data = ebook.model_dump()
+    wanted = fields if fields is not None else set(data)
+    for key in ("subtitle", "author", "summary", "category", "language", "published_on", "edition",
+                "page_count", "isbn", "license", "download_limit", "access_days"):
+        if key in wanted:
+            value = data[key]
+            setattr(product, key, value.strip() or None if isinstance(value, str) else value)
+    if "sample_asset_id" in wanted:
+        if data["sample_asset_id"]:
+            info = _ebook_asset(data["sample_asset_id"], owner_id, "ebook_sample")
+            product.sample_asset_id = info["id"]
+            product.sample_url = info["url"]
+            product.sample_format = _format_of(info["content_type"])
+        else:
+            product.sample_asset_id = product.sample_url = product.sample_format = None
+    if "file_asset_id" in wanted and data["file_asset_id"]:
+        current = db.get(models.EbookFile, product.ebook_file_id) if product.ebook_file_id else None
+        if current is None or current.asset_id != data["file_asset_id"]:
+            _add_ebook_version(db, product, _ebook_asset(data["file_asset_id"], owner_id, "ebook"))
+
+
+def _require_publishable(product: models.Product) -> None:
+    """What a paid ebook needs before buyers can see it. Said, field by field."""
+    missing = []
+    if not product.ebook_file_id:
+        missing.append("the ebook file (PDF or EPUB)")
+    if not (product.author or "").strip():
+        missing.append("the author or publisher")
+    if missing:
+        raise HTTPException(status_code=422, detail="To publish this ebook, add " + " and ".join(missing))
 
 
 @app.get("/commerce/products", tags=["marketplace"])
@@ -189,6 +386,9 @@ def list_products(
     max_price: Decimal | None = None,
     sort: str = "recent",
     mine: bool = False,
+    category: str | None = None,
+    language: str | None = None,
+    ebook: bool | None = None,
     db: OrmSession = Depends(get_db),
 ):
     if kind and kind not in PRODUCT_KINDS:
@@ -203,7 +403,20 @@ def list_products(
     if mine and principal is not None:
         stmt = stmt.where(models.Product.vendor_id == principal.user_id)
     if q:
-        stmt = stmt.where(func.lower(models.Product.title).like(f"%{q.lower()}%"))
+        # Title, and for an ebook its author, description and category too.
+        needle = f"%{q.lower().strip()}%"
+        stmt = stmt.where(
+            func.lower(models.Product.title).like(needle)
+            | func.lower(func.coalesce(models.Product.author, "")).like(needle)
+            | func.lower(func.coalesce(models.Product.description, "")).like(needle)
+            | func.lower(func.coalesce(models.Product.category, "")).like(needle)
+        )
+    if category:
+        stmt = stmt.where(models.Product.category == category)
+    if language:
+        stmt = stmt.where(models.Product.language == language.lower())
+    if ebook is not None:
+        stmt = stmt.where(models.Product.ebook.is_(ebook))
     if country:
         stmt = stmt.where(models.Product.country == country.upper())
     if city:
@@ -326,7 +539,20 @@ def _sorted(stmt, sort: str):
 
 
 def _images(product: models.Product) -> list[str]:
-    return [i for i in (product.images or "").split(",") if i]
+    """The listing's pictures, each with a viewing ticket.
+
+    Uploaded pictures are stored restricted (with UploadCenter, always): the
+    media origin serves them only against a ticket. A listing is public, so
+    the ticket is an anonymous one - without it, no buyer saw any photo or
+    ebook cover. Addresses that are not Kinjy media pass through unchanged.
+    """
+    out = []
+    for url in (product.images or "").split(","):
+        if not url:
+            continue
+        found = _MEDIA_PATH.search(url)
+        out.append(mediasign.sign_url(url, found.group(1), None) if found else url)
+    return out
 
 
 def _pricing_out(product: models.Product) -> dict:
@@ -353,6 +579,17 @@ def _product_item(product: models.Product, profiles: dict[str, dict]) -> dict:
         "country": product.country,
         "city": product.city,
         "images": _images(product),
+        **(
+            {
+                "ebook": True,
+                "subtitle": product.subtitle,
+                "author": product.author,
+                "category": product.category,
+                "language": product.language,
+            }
+            if product.ebook
+            else {}
+        ),
     }
 
 
@@ -402,6 +639,8 @@ def my_products(principal: CurrentUser, db: OrmSession = Depends(get_db)):
                 "images": _images(r),
                 "created_at": r.created_at,
                 **_pricing_out(r),
+                **({"ebook": True, "author": r.author, "has_file": bool(r.ebook_file_id),
+                    "suspended_reason": r.suspended_reason} if r.ebook else {}),
             }
             for r in rows
         ]
@@ -455,6 +694,46 @@ def get_product(product_id: str, principal: MaybeUser, db: OrmSession = Depends(
         out.update(_pricing_out(product))
     else:
         out["customer_price"] = str(_customer_price(product.vendor_price))
+    if product.ebook:
+        out["ebook"] = _ebook_out(db, product, owner=owner)
+        if principal is not None and not owner:
+            purchase = _owned_order(db, principal.user_id, product.id)
+            out["ebook"]["purchased_order_id"] = purchase.id if purchase else None
+    return out
+
+
+def _ebook_out(db: OrmSession, product: models.Product, *, owner: bool) -> dict:
+    """An ebook's public details. The file is described, never addressed."""
+    current = db.get(models.EbookFile, product.ebook_file_id) if product.ebook_file_id else None
+    out = {
+        "subtitle": product.subtitle,
+        "author": product.author,
+        "summary": product.summary,
+        "category": product.category,
+        "language": product.language,
+        "published_on": product.published_on,
+        "edition": product.edition,
+        "page_count": product.page_count,
+        "isbn": product.isbn,
+        "license": product.license or "personal",
+        "format": current.file_format if current else None,
+        "size_bytes": current.size_bytes if current else None,
+        "version": current.version if current else None,
+        "updated_at": current.created_at if current else None,
+        # The sample is free by design: a public address is fine for it.
+        "sample": {"url": product.sample_url, "format": product.sample_format} if product.sample_url else None,
+        "download_limit": product.download_limit,
+        "access_days": product.access_days,
+        "delivery": "Download from your library as soon as the payment is confirmed",
+        "description_format": "html",
+    }
+    if owner:
+        out["file"] = (
+            {"filename": current.filename, "version": current.version, "size_bytes": current.size_bytes}
+            if current else None
+        )
+        out["suspended_reason"] = product.suspended_reason
+        out["sample_asset_id"] = product.sample_asset_id
     return out
 
 
@@ -470,7 +749,8 @@ class ProductPatch(BaseModel):
     country: str | None = None
     city: str | None = Field(default=None, max_length=120)
     images: list[str] | None = Field(default=None, max_length=5)
-    status: str | None = Field(default=None, pattern="^(active|paused)$")
+    status: str | None = Field(default=None, pattern="^(active|paused|draft)$")
+    ebook: EbookIn | None = None
 
     @field_validator("images")
     @classmethod
@@ -492,6 +772,18 @@ def update_product(
     for required in ("title", "description", "vendor_price", "status", "images"):
         if required in changes and changes[required] is None:
             raise HTTPException(status_code=422, detail=f"{required} cannot be cleared")
+    if product.status == "suspended" and "status" in changes:
+        raise HTTPException(status_code=409, detail="This listing was suspended by Kinjy; contact support")
+    ebook_changes = changes.pop("ebook", None)
+    if ebook_changes is not None:
+        if not product.ebook:
+            raise HTTPException(status_code=422, detail="Only an ebook listing has ebook details")
+        _apply_ebook(db, product, payload.ebook, principal.user_id, fields=set(payload.ebook.model_fields_set))
+    if product.ebook and "description" in changes:
+        changes["description"] = sanitize_article(changes["description"] or "")
+    if product.ebook:
+        changes.pop("stock", None)
+        changes.pop("city", None)
 
     # A price edit only reaches new orders: every order stores the prices it was
     # placed at, so nothing in escrow moves when the listing changes.
@@ -499,6 +791,8 @@ def update_product(
         product.images = ",".join(changes.pop("images")) or None
     for field, value in changes.items():
         setattr(product, field, value)
+    if product.ebook and product.status == "active":
+        _require_publishable(product)
     db.commit()
     return {"id": product.id, "status": product.status, "pricing": _pricing_out(product)}
 
@@ -831,6 +1125,30 @@ async def create_order(payload: OrderIn, principal: CurrentUser, db: OrmSession 
         raise HTTPException(status_code=404, detail="Product not available")
     if product.vendor_id == principal.user_id:
         raise HTTPException(status_code=400, detail="You cannot buy your own listing")
+    if product.ebook:
+        # One copy per buyer, and a second checkout is the first one again.
+        if payload.quantity != 1:
+            raise HTTPException(status_code=422, detail="An ebook is bought one copy at a time")
+        if not product.ebook_file_id:
+            raise HTTPException(status_code=409, detail="This ebook is not available yet")
+        owned = _owned_order(db, principal.user_id, product.id)
+        if owned is not None:
+            raise HTTPException(status_code=409, detail="You already own this ebook. It is in your library.")
+        waiting = db.scalar(
+            select(models.Order).where(
+                models.Order.buyer_id == principal.user_id,
+                models.Order.product_id == product.id,
+                models.Order.status == "pending",
+            ).order_by(models.Order.created_at.desc())
+        )
+        if waiting is not None:
+            return {
+                "id": waiting.id,
+                "status": waiting.status,
+                "customer_price": str(waiting.customer_price),
+                "custodian": settings.CUSTODIAN_NAME,
+                "pay_at": "/api/payments/checkout",
+            }
     if product.stock is not None and product.stock < payload.quantity:
         raise HTTPException(status_code=409, detail="Not enough stock")
     # A parcel needs somewhere to go; a service or a file does not.
@@ -870,14 +1188,35 @@ async def create_order(payload: OrderIn, principal: CurrentUser, db: OrmSession 
     }
 
 
+@app.get("/internal/orders/{order_id}/quote", tags=["internal"])
+def order_quote(order_id: str, db: OrmSession = Depends(get_db)):
+    """What payment-service needs before taking money for an order: whose it
+    is, what it costs, and whether it is still waiting to be paid."""
+    order = db.get(models.Order, order_id)
+    if order is None:
+        raise HTTPException(status_code=404, detail="Order not found")
+    return {"id": order.id, "buyer_id": order.buyer_id, "customer_price": str(order.customer_price),
+            "currency": order.currency, "status": order.status}
+
+
 @app.post("/internal/orders/{order_id}/funded", tags=["internal"])
-def mark_funded(order_id: str, custody_ref: str | None = None, db: OrmSession = Depends(get_db)):
-    """payment-service calls this when the buyer's money reaches the custodian."""
+def mark_funded(
+    order_id: str, custody_ref: str | None = None, amount: Decimal | None = None, db: OrmSession = Depends(get_db)
+):
+    """payment-service calls this when the buyer's money reaches the custodian.
+
+    Idempotent: a second confirmation of the same payment changes nothing, so
+    a retried or duplicated payment event cannot fulfil, deliver or post twice.
+    """
     order = db.get(models.Order, order_id)
     if order is None:
         raise HTTPException(status_code=404, detail="Order not found")
     if order.status != "pending":
         return _order_out(order)
+    if amount is not None and economy.money(amount) != economy.money(order.customer_price):
+        # The payment does not pay this order. Nothing is opened or delivered.
+        log.error("order %s funded with %s, expected %s: refused", order_id, amount, order.customer_price)
+        raise HTTPException(status_code=409, detail="The payment does not match the order total")
 
     try:
         _ledger_escrow(order, "hold", order.customer_price, "buyer funds received by custodian")
@@ -889,7 +1228,33 @@ def mark_funded(order_id: str, custody_ref: str | None = None, db: OrmSession = 
     order.custody_ref = custody_ref
     order.escrow_funded_at = datetime.now(timezone.utc)
     order.dispute_window_ends = _custody_window()
+    product = db.get(models.Product, order.product_id)
+    ebook = product is not None and product.ebook
+    if ebook:
+        # Delivered by being paid: the file is in the buyer's library now. The
+        # escrow and its window are unchanged - the seller is paid exactly as
+        # for any other order, and the buyer can still report a bad file.
+        order.status = "delivered"
+        order.delivered_at = order.escrow_funded_at
+        order.delivery_note = "Delivered as a download in the buyer's library."
     db.commit()
+
+    if ebook:
+        notify(
+            order.buyer_id,
+            "ebook_ready",
+            "Your ebook is ready to download",
+            body=f"{product.title} is in your library.",
+            link="/market/library",
+        )
+        notify(
+            order.vendor_id,
+            "order_funded",
+            "An ebook was sold",
+            body="The buyer has it in their library. The payment is released after the confirmation window.",
+            link="/market/seller",
+        )
+        return _order_out(order)
 
     notify(
         order.vendor_id,
@@ -908,10 +1273,13 @@ def mark_funded(order_id: str, custody_ref: str | None = None, db: OrmSession = 
     return _order_out(order)
 
 
-# Kept for callers written against the old name.
-@app.post("/commerce/orders/{order_id}/paid", tags=["internal"])
+# Kept for callers written against the old name - internal only. It was at
+# /commerce/orders/{id}/paid, a path the gateway serves to anybody, with no
+# authentication: any order could be put in escrow (and an ebook delivered)
+# without paying.
+@app.post("/internal/orders/{order_id}/paid", tags=["internal"])
 def mark_paid(order_id: str, db: OrmSession = Depends(get_db)):
-    return mark_funded(order_id, None, db)
+    return mark_funded(order_id, None, None, db)
 
 
 @app.post("/commerce/orders/{order_id}/delivered", tags=["marketplace"])
@@ -1024,10 +1392,12 @@ def _order_extras(db: OrmSession, orders: list[models.Order], viewer_id: str) ->
                 "title": p.title,
                 "description": p.description,
                 "kind": p.kind,
-                "images": [i for i in (p.images or "").split(",") if i],
+                "images": _images(p),
                 "country": p.country,
                 "city": p.city,
                 "available": p.status == "active",
+                "ebook": bool(p.ebook),
+                "author": p.author,
             },
             "counterpart": None
             if brief is None
@@ -1817,3 +2187,366 @@ def vendor_rating(vendor_id: str, db: OrmSession = Depends(get_db)):
         )
     ).one()
     return {"vendor_id": vendor_id, "average": round(float(avg), 2) if n else 0.0, "count": int(n)}
+
+
+
+# --- ebook library and downloads --------------------------------------------------
+#
+# Policy, in one place:
+# - access starts when the server confirms the payment (the order is funded),
+#   never on a redirect or anything the browser says;
+# - it lasts while the order is held, delivered, settled, partly refunded or
+#   in dispute; a full refund ends it, and so does an admin revocation;
+# - the listing being paused, unpublished or removed does not end it;
+# - every buyer downloads the current version of the file;
+# - limits (a number of downloads, a number of days) are the seller's choice
+#   per ebook, and there are none unless they set them.
+
+ENTITLED_STATUSES = ("in_escrow", "delivered", "settled", "part_refunded", "disputed")
+_download_requests: dict[str, list[float]] = {}
+_download_lock = threading.Lock()
+
+
+def _owned_order(db: OrmSession, buyer_id: str, product_id: str) -> models.Order | None:
+    """The buyer's paid order for this ebook, if they own it."""
+    return db.scalar(
+        select(models.Order).where(
+            models.Order.buyer_id == buyer_id,
+            models.Order.product_id == product_id,
+            models.Order.status.in_(ENTITLED_STATUSES),
+            models.Order.access_revoked_at.is_(None),
+        ).order_by(models.Order.created_at.desc())
+    )
+
+
+def _access(order: models.Order, product: models.Product | None, used: int) -> dict:
+    """Whether this order may download now, and why not if it may not."""
+    until = None
+    if product is not None and product.access_days and order.escrow_funded_at:
+        until = order.escrow_funded_at + timedelta(days=product.access_days)
+    if order.status in ("refunded", "cancelled") or order.status == "pending":
+        state = "refunded" if order.status == "refunded" else "unpaid"
+    elif order.access_revoked_at is not None:
+        state = "revoked"
+    elif until is not None and until < datetime.now(timezone.utc):
+        state = "expired"
+    elif product is not None and product.download_limit and used >= product.download_limit:
+        state = "limit_reached"
+    elif product is None or not product.ebook_file_id:
+        state = "unavailable"
+    else:
+        state = "active"
+    return {"state": state, "access_until": until, "downloads_used": used,
+            "download_limit": product.download_limit if product else None}
+
+
+def _downloads_used(db: OrmSession, order: models.Order) -> int:
+    stmt = select(func.count()).select_from(models.EbookDownload).where(
+        models.EbookDownload.order_id == order.id, models.EbookDownload.counted.is_(True)
+    )
+    if order.downloads_reset_at is not None:
+        stmt = stmt.where(models.EbookDownload.created_at > order.downloads_reset_at)
+    return db.scalar(stmt) or 0
+
+
+@app.get("/commerce/library", tags=["ebooks"])
+def my_library(principal: CurrentUser, db: OrmSession = Depends(get_db)):
+    """The buyer's ebooks: every paid ebook order, with what they can do now."""
+    orders = db.scalars(
+        select(models.Order).where(
+            models.Order.buyer_id == principal.user_id,
+            models.Order.status.notin_(("pending", "cancelled")),
+        ).order_by(models.Order.created_at.desc())
+    ).all()
+    products = {
+        p.id: p for p in db.scalars(
+            select(models.Product).where(models.Product.id.in_({o.product_id for o in orders} or {""}),
+                                         models.Product.ebook.is_(True))
+        ).all()
+    }
+    orders = [o for o in orders if o.product_id in products]
+    files = {
+        f.id: f for f in db.scalars(
+            select(models.EbookFile).where(models.EbookFile.id.in_(
+                {p.ebook_file_id for p in products.values() if p.ebook_file_id} or {0}))
+        ).all()
+    }
+    last_file = dict(db.execute(
+        select(models.EbookDownload.order_id, func.max(models.EbookDownload.file_id))
+        .where(models.EbookDownload.order_id.in_([o.id for o in orders] or [""]))
+        .group_by(models.EbookDownload.order_id)
+    ).all())
+    profiles = _profiles({p.vendor_id for p in products.values()})
+    items = []
+    for o in orders:
+        p = products[o.product_id]
+        current = files.get(p.ebook_file_id)
+        access = _access(o, p, _downloads_used(db, o))
+        items.append({
+            "order_id": o.id,
+            "status": o.status,
+            "purchased_at": o.escrow_funded_at or o.created_at,
+            "product": {
+                "id": p.id, "title": p.title, "subtitle": p.subtitle, "author": p.author,
+                "images": _images(p), "available": p.status == "active",
+            },
+            "seller": _brief(p.vendor_id, profiles),
+            "file": {"format": current.file_format, "size_bytes": current.size_bytes,
+                     "version": current.version, "updated_at": current.created_at} if current else None,
+            # A newer file than the one this buyer last downloaded.
+            "update_available": bool(current and last_file.get(o.id) and last_file[o.id] != current.id),
+            **access,
+        })
+    return {"items": items}
+
+
+def _download_allowed(buyer_id: str) -> bool:
+    now = time.time()
+    with _download_lock:
+        recent = [t for t in _download_requests.get(buyer_id, []) if now - t < 60]
+        if len(_download_requests) > 5000:
+            _download_requests.clear()
+        if len(recent) >= settings.EBOOK_LINKS_PER_MINUTE:
+            _download_requests[buyer_id] = recent
+            return False
+        recent.append(now)
+        _download_requests[buyer_id] = recent
+        return True
+
+
+@app.post("/commerce/library/{order_id}/download", tags=["ebooks"])
+def download_ebook(order_id: str, principal: CurrentUser, db: OrmSession = Depends(get_db)):
+    """A short-lived link to the ebook, for its buyer, checked every time.
+
+    The order must be the caller's, paid as confirmed by the server, not
+    refunded or revoked, within any access period and download limit. The
+    link is signed for this file only and stops working after
+    EBOOK_LINK_TTL_S; asking again gives a fresh one. Asking again within
+    EBOOK_RETRY_GRACE_S of the last link is a retry and is not counted.
+    """
+    order = db.get(models.Order, order_id)
+    # Somebody else's order and no order look the same.
+    if order is None or order.buyer_id != principal.user_id:
+        raise HTTPException(status_code=404, detail="Order not found")
+    product = db.get(models.Product, order.product_id)
+    if product is None or not product.ebook:
+        raise HTTPException(status_code=404, detail="Order not found")
+    if not _download_allowed(principal.user_id):
+        raise HTTPException(status_code=429, detail="Too many download requests. Wait a minute and try again.")
+
+    file = db.get(models.EbookFile, product.ebook_file_id) if product.ebook_file_id else None
+    last = db.scalar(
+        select(models.EbookDownload).where(models.EbookDownload.order_id == order.id)
+        .order_by(models.EbookDownload.created_at.desc()).limit(1)
+    )
+    retry = (
+        last is not None and file is not None and last.file_id == file.id
+        and (datetime.now(timezone.utc) - last.created_at).total_seconds() < settings.EBOOK_RETRY_GRACE_S
+        and (order.downloads_reset_at is None or last.created_at > order.downloads_reset_at)
+    )
+    used = _downloads_used(db, order)
+    access = _access(order, product, used if not retry else 0)
+    messages = {
+        "unpaid": "This order has not been paid yet. The download opens once the payment is confirmed.",
+        "refunded": "This order was refunded, so the ebook is no longer available to download.",
+        "revoked": "Access to this ebook was withdrawn. Contact support if you think this is a mistake.",
+        "expired": "The download period for this ebook has ended.",
+        "limit_reached": "You have used all the downloads this ebook allows. Contact the seller or support.",
+        "unavailable": "The file is not available right now. Try again later or contact the seller.",
+    }
+    if access["state"] != "active":
+        raise HTTPException(status_code=403, detail=messages[access["state"]])
+
+    db.add(models.EbookDownload(order_id=order.id, buyer_id=principal.user_id, file_id=file.id, counted=not retry))
+    db.commit()
+    return {
+        "url": crypto.sign_media_url(file.url, file.asset_id, ttl_s=settings.EBOOK_LINK_TTL_S) + "&dl=1",
+        "expires_in": settings.EBOOK_LINK_TTL_S,
+        "filename": file.filename,
+        "format": file.file_format,
+        "size_bytes": file.size_bytes,
+        "version": file.version,
+        "counted": not retry,
+        "downloads_used": used + (0 if retry else 1),
+        "download_limit": product.download_limit,
+    }
+
+
+# --- seller: file versions and sales ------------------------------------------------
+
+class EbookFileIn(BaseModel):
+    asset_id: str = Field(min_length=1, max_length=40)
+    note: str | None = Field(default=None, max_length=300)
+
+
+@app.post("/commerce/products/{product_id}/ebook/file", tags=["ebooks"])
+def replace_ebook_file(
+    product_id: str, payload: EbookFileIn, principal: CurrentUser, db: OrmSession = Depends(get_db)
+):
+    """A new version of the book's file. Earlier versions stay on record, and
+    every buyer downloads the new one from their library."""
+    product = _own_product(db, product_id, principal.user_id)
+    if not product.ebook:
+        raise HTTPException(status_code=422, detail="Only an ebook listing has a file")
+    info = _ebook_asset(payload.asset_id, principal.user_id, "ebook")
+    current = db.get(models.EbookFile, product.ebook_file_id) if product.ebook_file_id else None
+    if current is not None and current.asset_id == info["id"]:
+        return {"version": current.version, "unchanged": True}
+    version = _add_ebook_version(db, product, info, (payload.note or "").strip() or None)
+    db.commit()
+    return {"version": version.version, "format": version.file_format, "size_bytes": version.size_bytes}
+
+
+@app.get("/commerce/products/{product_id}/ebook/files", tags=["ebooks"])
+def ebook_versions(product_id: str, principal: CurrentUser, db: OrmSession = Depends(get_db)):
+    product = _own_product(db, product_id, principal.user_id)
+    rows = db.scalars(
+        select(models.EbookFile).where(models.EbookFile.product_id == product.id)
+        .order_by(models.EbookFile.version.desc())
+    ).all()
+    return {"items": [
+        {"version": f.version, "filename": f.filename, "format": f.file_format, "size_bytes": f.size_bytes,
+         "note": f.note, "created_at": f.created_at, "current": f.id == product.ebook_file_id}
+        for f in rows
+    ]}
+
+
+@app.get("/commerce/products/{product_id}/sales", tags=["ebooks"])
+def product_sales(product_id: str, principal: CurrentUser, db: OrmSession = Depends(get_db)):
+    """One listing's orders, in the seller's own numbers (what they asked,
+    not what the buyer paid): paid orders, settled, refunded, net proceeds."""
+    product = _own_product(db, product_id, principal.user_id)
+    rows = db.scalars(select(models.Order).where(models.Order.product_id == product.id)).all()
+    paid = [o for o in rows if o.escrow_funded_at is not None]
+    settled = [o for o in paid if o.status in SETTLED_STATUSES]
+    refunded = [o for o in paid if o.status in ("refunded", "part_refunded")]
+    held = [o for o in paid if o.status in OPEN_ORDER_STATUSES]
+    # Refunds come out of what the buyer paid; the seller's share of it is in
+    # the same proportion as their price to the buyer's total.
+    def seller_share(o: models.Order, amount: Decimal) -> Decimal:
+        return (amount * o.vendor_price / o.customer_price).quantize(CENT) if o.customer_price else Decimal("0")
+    gross = sum((o.vendor_price for o in paid), Decimal("0"))
+    refunds = sum((seller_share(o, Decimal(o.refunded_amount or 0)) for o in refunded), Decimal("0"))
+    net_released = sum((o.vendor_price - seller_share(o, Decimal(o.refunded_amount or 0)) for o in settled), Decimal("0"))
+    return {
+        "orders_paid": len(paid),
+        "units_sold": sum(o.quantity for o in paid),
+        "awaiting_release": len(held),
+        "gross": str(gross),
+        "refunds": str(refunds),
+        "net_released": str(net_released),
+        "currency": product.currency,
+    }
+
+
+# --- administration -------------------------------------------------------------------
+
+class AdminReasonIn(BaseModel):
+    reason: str = Field(min_length=3, max_length=500)
+
+
+def _audit(db: OrmSession, actor_id: str, action: str, target_type: str, target_id: str, reason: str | None) -> None:
+    db.add(models.CommerceAudit(actor_id=actor_id, action=action, target_type=target_type,
+                                target_id=target_id, reason=reason))
+
+
+@app.post("/admin/commerce/products/{product_id}/suspend", tags=["admin"])
+def admin_suspend_product(product_id: str, payload: AdminReasonIn, admin: AdminUser, db: OrmSession = Depends(get_db)):
+    """Take a listing down (a copyright complaint, an unsafe file). New
+    purchases stop; buyers keep what they bought unless their access is
+    revoked separately."""
+    product = db.get(models.Product, product_id)
+    if product is None or product.status == "removed":
+        raise HTTPException(status_code=404, detail="Product not found")
+    product.status = "suspended"
+    product.suspended_reason = payload.reason
+    _audit(db, admin.user_id, "suspend_listing", "product", product.id, payload.reason)
+    db.commit()
+    notify(product.vendor_id, "listing_suspended", "One of your listings was suspended",
+           body=payload.reason, link="/market/seller")
+    return {"id": product.id, "status": product.status}
+
+
+@app.post("/admin/commerce/products/{product_id}/reinstate", tags=["admin"])
+def admin_reinstate_product(product_id: str, payload: AdminReasonIn, admin: AdminUser, db: OrmSession = Depends(get_db)):
+    product = db.get(models.Product, product_id)
+    if product is None or product.status != "suspended":
+        raise HTTPException(status_code=404, detail="No suspended listing with this id")
+    product.status = "paused"
+    product.suspended_reason = None
+    _audit(db, admin.user_id, "reinstate_listing", "product", product.id, payload.reason)
+    db.commit()
+    return {"id": product.id, "status": product.status}
+
+
+@app.get("/admin/commerce/orders/{order_id}/access", tags=["admin"])
+def admin_order_access(order_id: str, _: AdminUser, db: OrmSession = Depends(get_db)):
+    order = db.get(models.Order, order_id)
+    if order is None:
+        raise HTTPException(status_code=404, detail="Order not found")
+    product = db.get(models.Product, order.product_id)
+    downloads = db.scalars(
+        select(models.EbookDownload).where(models.EbookDownload.order_id == order.id)
+        .order_by(models.EbookDownload.created_at.desc()).limit(100)
+    ).all()
+    audit = db.scalars(
+        select(models.CommerceAudit).where(models.CommerceAudit.target_id == order.id)
+        .order_by(models.CommerceAudit.created_at.desc())
+    ).all()
+    return {
+        "order": _order_out(order, admin=True),
+        **_access(order, product, _downloads_used(db, order)),
+        "downloads": [{"at": d.created_at, "file_id": d.file_id, "counted": d.counted} for d in downloads],
+        "audit": [{"at": a.created_at, "action": a.action, "actor_id": a.actor_id, "reason": a.reason} for a in audit],
+    }
+
+
+@app.post("/admin/commerce/orders/{order_id}/reset-downloads", tags=["admin"])
+def admin_reset_downloads(order_id: str, payload: AdminReasonIn, admin: AdminUser, db: OrmSession = Depends(get_db)):
+    order = db.get(models.Order, order_id)
+    if order is None:
+        raise HTTPException(status_code=404, detail="Order not found")
+    order.downloads_reset_at = datetime.now(timezone.utc)
+    _audit(db, admin.user_id, "reset_downloads", "order", order.id, payload.reason)
+    db.commit()
+    return {"id": order.id, "downloads_reset_at": order.downloads_reset_at}
+
+
+@app.post("/admin/commerce/orders/{order_id}/revoke-access", tags=["admin"])
+def admin_revoke_access(order_id: str, payload: AdminReasonIn, admin: AdminUser, db: OrmSession = Depends(get_db)):
+    order = db.get(models.Order, order_id)
+    if order is None:
+        raise HTTPException(status_code=404, detail="Order not found")
+    order.access_revoked_at = datetime.now(timezone.utc)
+    _audit(db, admin.user_id, "revoke_access", "order", order.id, payload.reason)
+    db.commit()
+    return {"id": order.id, "access_revoked_at": order.access_revoked_at}
+
+
+@app.post("/admin/commerce/orders/{order_id}/restore-access", tags=["admin"])
+def admin_restore_access(order_id: str, payload: AdminReasonIn, admin: AdminUser, db: OrmSession = Depends(get_db)):
+    order = db.get(models.Order, order_id)
+    if order is None:
+        raise HTTPException(status_code=404, detail="Order not found")
+    order.access_revoked_at = None
+    _audit(db, admin.user_id, "restore_access", "order", order.id, payload.reason)
+    db.commit()
+    return {"id": order.id, "access_revoked_at": None}
+
+
+@app.get("/commerce/ebooks/terms", tags=["ebooks"])
+def ebook_terms():
+    """What a seller needs to know before uploading, and a buyer before paying."""
+    return {
+        "formats": ["pdf", "epub"],
+        "max_file_mb": settings.EBOOK_MAX_MB,
+        "max_sample_mb": settings.EBOOK_SAMPLE_MAX_MB,
+        "categories": list(EBOOK_CATEGORIES),
+        "licenses": list(EBOOK_LICENSES),
+        "link_minutes": settings.EBOOK_LINK_TTL_S // 60,
+        "scanned_for_malware": False,
+        "access": (
+            "Your ebook is in your library as soon as the payment is confirmed. It stays available "
+            "if the listing is later unpublished. A full refund ends access."
+        ),
+    }

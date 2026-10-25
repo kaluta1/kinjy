@@ -58,7 +58,11 @@ CHAT_PLAYABLE = {
     "audio/webm": "audio", "audio/mp4": "audio", "audio/aac": "audio", "audio/x-m4a": "audio",
     "audio/wave": "audio", "audio/x-wav": "audio", "audio/flac": "audio",
 }
-PURPOSES = ("post", "chat", "memorial")
+PURPOSES = ("post", "chat", "memorial", "ebook", "ebook_sample")
+# A paid ebook (private, sealed, only ever served through a link the
+# marketplace signs for a buyer) and its free sample (public). PDF or EPUB,
+# recognised by their bytes: what the browser says the file is does not count.
+EBOOK_PURPOSES = ("ebook", "ebook_sample")
 
 # A memorial's gallery (blueprint §8: "photos/videos/voice"). Narrower than a post
 # on purpose: it is a public page that families fill from their phones, so it
@@ -148,6 +152,9 @@ async def upload(
             raise HTTPException(status_code=415, detail=f"Unsupported content type: {file.content_type}. {MEMORIAL_FORMATS_HINT}")
     elif purpose == "chat":
         kind = CHAT_PLAYABLE.get(content_type, "file")
+    elif purpose in EBOOK_PURPOSES:
+        # Settled from the first bytes below; nothing is trusted before them.
+        kind = "document"
     else:
         kind = ALLOWED.get(content_type)
         if kind is None:
@@ -174,7 +181,7 @@ async def upload(
     folder.mkdir(parents=True, exist_ok=True)
     # A chat attachment is private, and sealed on disk whenever a key is set.
     # Posts stay as they are: they are public by nature.
-    private = purpose == "chat"
+    private = purpose in ("chat", "ebook")
     seal = private and crypto.enabled()
 
     # A sealed file keeps no extension on disk: ".pdf" beside a random id
@@ -184,7 +191,12 @@ async def upload(
 
     digest = hashlib.sha256()
     written = 0
-    limit = MEMORIAL_MAX_BYTES[kind] if purpose == "memorial" else MAX_BYTES
+    limit = (
+        MEMORIAL_MAX_BYTES[kind] if purpose == "memorial"
+        else settings.EBOOK_MAX_MB * 1024 * 1024 if purpose == "ebook"
+        else settings.EBOOK_SAMPLE_MAX_MB * 1024 * 1024 if purpose == "ebook_sample"
+        else MAX_BYTES
+    )
     # The start of the file, kept to read the picture's shape from. Taken from
     # the first chunk, which is a megabyte - far more than imagesize needs - so
     # this costs a slice and no extra read.
@@ -194,6 +206,21 @@ async def upload(
         while chunk := await file.read(1024 * 1024):
             if written == 0:
                 head = chunk[: imagesize.HEAD_BYTES]
+            if written == 0 and purpose in EBOOK_PURPOSES:
+                # A PDF or an EPUB, proven by its bytes. An executable renamed
+                # .pdf, a zip that is not an EPUB, a page of HTML: refused here,
+                # before anything is kept.
+                sniffed = signatures.ebook_type(chunk[: signatures.HEAD_BYTES])
+                if sniffed is None:
+                    out.close()
+                    destination.unlink(missing_ok=True)
+                    raise HTTPException(
+                        status_code=415,
+                        detail="This is not a PDF or EPUB file. Upload the ebook as .pdf or .epub.",
+                    )
+                content_type = sniffed
+                # A PDF can be shown in the browser; an EPUB is a download.
+                kind = "document" if sniffed == "application/pdf" else "file"
             if written == 0 and purpose != "chat" and not signatures.matches(content_type, chunk[: signatures.HEAD_BYTES]):
                 # Refused on the first chunk, before the rest is stored.
                 out.close()
@@ -225,9 +252,9 @@ async def upload(
             models.Asset.sha256 == sha,
             models.Asset.owner_id == principal.user_id,
             models.Asset.private.is_(private),
-            models.Asset.purpose == "memorial"
-            if purpose == "memorial"
-            else or_(models.Asset.purpose.is_(None), models.Asset.purpose != "memorial"),
+            models.Asset.purpose == purpose
+            if purpose in ("memorial", *EBOOK_PURPOSES)
+            else or_(models.Asset.purpose.is_(None), models.Asset.purpose.notin_(("memorial", *EBOOK_PURPOSES))),
         )
     )
     if existing is not None:
@@ -241,7 +268,7 @@ async def upload(
     preview_bytes: int | None = None
     preview_type: str | None = None
     goes_remote = _stores_remotely(purpose)
-    if not seal and not private and preview.wanted(content_type, written, remote=goes_remote):
+    if not seal and not private and purpose not in EBOOK_PURPOSES and preview.wanted(content_type, written, remote=goes_remote):
         previews = ROOT / "previews" / principal.user_id[:12]
         previews.mkdir(parents=True, exist_ok=True)
         made = await run_in_threadpool(preview.localise, destination, previews / asset_id, content_type)
@@ -314,7 +341,7 @@ async def upload(
         **({"provider": "uploadcenter", "external_id": remote_id, "access": "restricted"} if remote_id else {}),
         # Only a memorial's files carry a purpose here; it is what lets the
         # discard route below delete them, and nothing else.
-        purpose="memorial" if purpose == "memorial" else None,
+        purpose=purpose if purpose in ("memorial", *EBOOK_PURPOSES) else None,
     )
     db.add(asset)
     try:
@@ -628,6 +655,7 @@ def serve(
     sig: str | None = None,
     p: str | None = None,
     poster: str | None = None,
+    dl: str | None = None,
     db: OrmSession = Depends(get_db),
 ):
     """Serve the bytes.
@@ -681,7 +709,10 @@ def serve(
     # Only what a browser can show safely is served inline; anything else
     # (HTML, SVG, archives...) is a download, so an upload can never run as a
     # page on this origin.
-    inline = asset.kind in INLINE_KINDS and not asset.content_type.startswith("image/svg")
+    # ``dl`` asks for a download rather than a view (a bought ebook: the
+    # buyer wants the file, not a tab showing it). It only ever turns
+    # inline off; it cannot make anything display that would not.
+    inline = asset.kind in INLINE_KINDS and not asset.content_type.startswith("image/svg") and not dl
     media_type = asset.content_type if inline else "application/octet-stream"
     headers = _serve_headers(asset.content_type if inline else None)
     if asset.access == "restricted":
@@ -1595,6 +1626,7 @@ def internal_asset(asset_id: str, db: OrmSession = Depends(get_db)):
         "purpose": asset.purpose,
         "status": asset.status,
         "access": asset.access,
+        "filename": _filename(asset),
         "url": asset.url or None,
         "storage": asset.provider,
         "kind": asset.kind,

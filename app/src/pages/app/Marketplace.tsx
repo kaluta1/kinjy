@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
-import { Link } from 'react-router'
-import { ClipboardList, PackageSearch, Plus, Search, SlidersHorizontal, Store } from 'lucide-react'
+import { Link, useSearchParams } from 'react-router'
+import { BookOpen, ClipboardList, PackageSearch, Plus, Search, SlidersHorizontal, Store } from 'lucide-react'
 import AppShell from '@/components/app/AppShell'
 import { useApi } from '@/hooks/useApi'
 import { useAuth } from '@/hooks/useAuth'
@@ -10,13 +10,14 @@ import FilterSheet, { NO_FILTERS, countFilters, type MarketFilters } from '@/com
 import ProductCard, { ProductCardSkeleton } from '@/components/commerce/ProductCard'
 import KinjyServiceCard, { poolServiceMatches } from '@/components/commerce/KinjyServiceCard'
 import { kaluta, type Product } from '@/lib/api'
+import { EBOOK_CATEGORY_LABELS, EBOOK_LANGUAGES } from '@/lib/ebooks'
 import { cn } from '@/lib/utils'
 
 const TABS = [
   { id: '', label: 'All' },
   { id: 'product', label: 'Products' },
   { id: 'service', label: 'Services' },
-  { id: 'digital', label: 'Digital' },
+  { id: 'digital', label: 'Ebooks & digital' },
 ] as const
 
 const SORTS = [
@@ -33,7 +34,15 @@ export default function Marketplace() {
   const pool = useApi(() => kaluta.referralPool.state(), [])
   const [query, setQuery] = useState('')
   const [search, setSearch] = useState('')
-  const [kind, setKind] = useState<string>('')
+  // ?kind=digital opens on the ebooks (the library's empty state links here).
+  const [params] = useSearchParams()
+  const [kind, setKind] = useState<string>(() => {
+    const asked = params.get('kind') ?? ''
+    return ['product', 'service', 'digital'].includes(asked) ? asked : ''
+  })
+  // Ebook filters, offered once the digital tab is chosen.
+  const [category, setCategory] = useState('')
+  const [language, setLanguage] = useState('')
   const [sort, setSort] = useState<(typeof SORTS)[number]['id']>('recent')
   const [filters, setFilters] = useState<MarketFilters>(NO_FILTERS)
   const [filtersOpen, setFiltersOpen] = useState(false)
@@ -57,10 +66,12 @@ export default function Marketplace() {
         min_price: filters.min_price || undefined,
         max_price: filters.max_price || undefined,
         mine: mine || undefined,
+        category: kind === 'digital' ? category || undefined : undefined,
+        language: kind === 'digital' ? language || undefined : undefined,
         limit: PAGE,
         offset,
       }),
-    [search, kind, sort, filters, mine, offset],
+    [search, kind, sort, filters, mine, offset, category, language],
   )
 
   useEffect(() => {
@@ -106,6 +117,12 @@ export default function Marketplace() {
             <ClipboardList size={14} aria-hidden="true" />
             My orders
           </Link>
+          {user && (
+            <Link to="/market/library" className="inline-flex min-h-[44px] items-center gap-1.5 rounded-full border border-[var(--cloud-border)] px-5 text-sm font-semibold text-text-mid transition-colors hover:border-gold/50 hover:bg-gold/10 hover:text-text-hi">
+              <BookOpen size={14} aria-hidden="true" />
+              My ebooks
+            </Link>
+          )}
           <Link to="/market/seller" className="inline-flex min-h-[44px] items-center gap-1.5 rounded-full border border-[var(--cloud-border)] px-5 text-sm font-semibold text-text-mid transition-colors hover:border-gold/50 hover:bg-gold/10 hover:text-text-hi">
             My shop
           </Link>
@@ -182,6 +199,43 @@ export default function Marketplace() {
           </button>
         )}
       </div>
+
+      {kind === 'digital' && (
+        <div className="mt-3 flex flex-wrap gap-2">
+          <label>
+            <span className="sr-only">Ebook category</span>
+            <select
+              value={category}
+              onChange={(e) => {
+                setCategory(e.target.value)
+                setOffset(0)
+              }}
+              className="min-h-[44px] rounded-full border border-white/12 bg-ink-2/60 px-4 text-base text-text-hi focus:border-gold/40 focus:outline-none sm:text-sm"
+            >
+              <option value="">All categories</option>
+              {Object.entries(EBOOK_CATEGORY_LABELS).map(([id, label]) => (
+                <option key={id} value={id}>{label}</option>
+              ))}
+            </select>
+          </label>
+          <label>
+            <span className="sr-only">Ebook language</span>
+            <select
+              value={language}
+              onChange={(e) => {
+                setLanguage(e.target.value)
+                setOffset(0)
+              }}
+              className="min-h-[44px] rounded-full border border-white/12 bg-ink-2/60 px-4 text-base text-text-hi focus:border-gold/40 focus:outline-none sm:text-sm"
+            >
+              <option value="">All languages</option>
+              {EBOOK_LANGUAGES.map(([code, name]) => (
+                <option key={code} value={code}>{name}</option>
+              ))}
+            </select>
+          </label>
+        </div>
+      )}
 
       <div className="mt-3 flex items-center gap-2">
         <button

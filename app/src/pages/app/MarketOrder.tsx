@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { Link, useParams } from 'react-router'
-import { ArrowLeft, Check, Copy, ExternalLink, MapPin, ShieldCheck, Truck } from 'lucide-react'
+import { ArrowLeft, BookOpen, Check, Copy, ExternalLink, MapPin, ShieldCheck, Truck } from 'lucide-react'
 import AppShell from '@/components/app/AppShell'
 import OrderActions from '@/components/commerce/OrderActions'
 import OrderStatusChip from '@/components/commerce/OrderStatusChip'
@@ -11,6 +11,7 @@ import { addressLines } from '@/components/commerce/shippingText'
 import { useApi } from '@/hooks/useApi'
 import { kaluta, type Order, type OrderCounterpart } from '@/lib/api'
 import { countryName } from '@/lib/profileOptions'
+import { htmlToText } from '@/lib/richtext'
 import { cn } from '@/lib/utils'
 
 function SellerAvatar({ who }: { who: OrderCounterpart }) {
@@ -190,6 +191,27 @@ export default function MarketOrder() {
           </div>
         </section>
 
+        {product?.ebook && item.role === 'buyer' && (
+          <section className="cloud-card flex flex-wrap items-center gap-3 p-4">
+            <BookOpen size={20} className="text-gold-soft" aria-hidden="true" />
+            <p className="min-w-0 flex-1 text-sm text-text-mid">
+              {['pending', 'cancelled'].includes(item.status)
+                ? 'The ebook is delivered to your library once the payment is confirmed.'
+                : item.status === 'refunded'
+                  ? 'This order was refunded, so the ebook is no longer available.'
+                  : 'Your ebook is in your library, ready to download.'}
+            </p>
+            {!['pending', 'cancelled', 'refunded'].includes(item.status) && (
+              <Link
+                to="/market/library"
+                className="inline-flex min-h-[44px] items-center rounded-full bg-gradient-to-br from-gold-soft to-gold px-5 text-sm font-bold text-ink"
+              >
+                Open my library
+              </Link>
+            )}
+          </section>
+        )}
+
         <Section title="Progress">
           <Timeline order={item} />
         </Section>
@@ -205,7 +227,9 @@ export default function MarketOrder() {
                 {place && <span className="caption">{place}</span>}
               </div>
               {product.description && (
-                <p className="mt-3 whitespace-pre-line break-words text-sm text-text-mid">{product.description}</p>
+                <p className="mt-3 whitespace-pre-line break-words text-sm text-text-mid">
+                  {product.ebook ? htmlToText(product.description) : product.description}
+                </p>
               )}
               {product.available ? (
                 <Link

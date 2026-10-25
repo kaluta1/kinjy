@@ -2,14 +2,15 @@ import { Link } from 'react-router'
 import { MapPin, ShoppingBag, Star, Store } from 'lucide-react'
 import { ProductImage } from '@/components/commerce/ProductGallery'
 import type { Product } from '@/lib/api'
+import { htmlToText } from '@/lib/richtext'
 import { cn } from '@/lib/utils'
 
 const KIND_LABEL: Record<string, string> = { product: 'Product', service: 'Service', digital: 'Digital' }
 
-export function KindBadge({ kind }: { kind: string }) {
+export function KindBadge({ kind, ebook = false }: { kind: string; ebook?: boolean }) {
   return (
     <span className="inline-flex shrink-0 items-center rounded-full bg-indigo/25 px-2.5 py-1 text-[11px] font-semibold text-sky">
-      {KIND_LABEL[kind] ?? kind}
+      {ebook ? 'Ebook' : KIND_LABEL[kind] ?? kind}
     </span>
   )
 }
@@ -44,11 +45,22 @@ export default function ProductCard({
   return (
     <article className={cn('cloud-card flex flex-col overflow-hidden', mine && 'ring-1 ring-gold/50')}>
       <Link to={`/market/products/${product.id}`} className="relative block flex-1">
-        <ProductImage
-          src={product.images[0]}
-          alt={product.title}
-          className="aspect-[4/3] w-full"
-        />
+        {product.ebook ? (
+          // A cover is a design: shown whole, never cropped to the card.
+          <div className="flex aspect-[4/3] w-full items-center justify-center bg-black/25">
+            {product.images[0] ? (
+              <img src={product.images[0]} alt={`Cover of ${product.title}`} loading="lazy" className="h-full w-auto object-contain" />
+            ) : (
+              <span className="text-xs text-text-low">No cover</span>
+            )}
+          </div>
+        ) : (
+          <ProductImage
+            src={product.images[0]}
+            alt={product.title}
+            className="aspect-[4/3] w-full"
+          />
+        )}
         {mine && (
           <span className="absolute start-2 top-2 inline-flex items-center gap-1 rounded-full bg-gold px-2.5 py-1 text-[11px] font-bold text-ink shadow">
             <Store size={11} aria-hidden="true" />
@@ -58,11 +70,12 @@ export default function ProductCard({
         <div className="p-4 pb-2">
           <div className="flex items-start justify-between gap-2">
             <h2 className="line-clamp-2 text-sm font-semibold text-text-hi">{product.title}</h2>
-            <KindBadge kind={product.kind} />
+            <KindBadge kind={product.kind} ebook={product.ebook} />
           </div>
+          {product.ebook && product.author && <p className="mt-0.5 text-xs text-text-mid">by {product.author}</p>}
           {product.description && (
             <p className="mt-1.5 line-clamp-2 whitespace-pre-line text-xs leading-relaxed text-text-mid">
-              {product.description}
+              {product.ebook ? htmlToText(product.description) : product.description}
             </p>
           )}
           <div className="mt-2 flex items-center justify-between gap-2">

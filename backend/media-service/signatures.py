@@ -39,7 +39,19 @@ _CHECKS = {
     "audio/wav": lambda h: _riff(h, b"WAVE"),
     # The PDF header may be preceded by a little junk; the spec allows 1024 bytes.
     "application/pdf": lambda h: b"%PDF-" in h[:1024],
+    # An EPUB is a zip whose first entry is "mimetype", stored, holding
+    # exactly this string - which is what makes it an EPUB and not any zip.
+    "application/epub+zip": lambda h: h[:4] == b"PK\x03\x04" and b"application/epub+zip" in h[:1024],
 }
+
+
+def ebook_type(head: bytes) -> str | None:
+    """The ebook format the first bytes prove, whatever the browser declared."""
+    if _CHECKS["application/pdf"](head):
+        return "application/pdf"
+    if _CHECKS["application/epub+zip"](head):
+        return "application/epub+zip"
+    return None
 
 
 def checkable(content_type: str) -> bool:

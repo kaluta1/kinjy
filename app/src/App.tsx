@@ -49,6 +49,7 @@ const MarketOrders = lazy(() => import('./pages/app/MarketOrders'))
 const MarketOrder = lazy(() => import('./pages/app/MarketOrder'))
 const MarketDispute = lazy(() => import('./pages/app/MarketDispute'))
 const MarketSell = lazy(() => import('./pages/app/MarketSell'))
+const MarketLibrary = lazy(() => import('./pages/app/MarketLibrary'))
 const MarketSeller = lazy(() => import('./pages/app/MarketSeller'))
 const MarketVendor = lazy(() => import('./pages/app/MarketVendor'))
 const MarketProduct = lazy(() => import('./pages/app/MarketProduct'))
@@ -187,6 +188,7 @@ export default function App() {
           <Route path="/market/services/referral-pool" element={gated('marketplace', <MarketPoolService />, '/hub')} />
           <Route path="/market/products/:id" element={gated('marketplace', <MarketProduct />, '/hub')} />
           <Route path="/market/sell" element={gated('marketplace', <MarketSell />, '/hub')} />
+          <Route path="/market/library" element={gated('marketplace', <MarketLibrary />, '/hub')} />
           <Route path="/market/seller" element={gated('marketplace', <MarketSeller />, '/hub')} />
           <Route path="/market/vendors/:vendorId" element={gated('marketplace', <MarketVendor />, '/hub')} />
           <Route path="/explore" element={<Explore />} />

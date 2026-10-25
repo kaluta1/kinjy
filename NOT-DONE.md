@@ -276,6 +276,26 @@ Checked on production 2026-08-20, promise by promise.
     not notify the group;
   - Messages group chats are separate and unchanged.
 
+- **Ebooks on the marketplace (25/10)**: upload (PDF/EPUB checked by their
+  bytes), drafts, publication checks, private files, signed 15-minute download
+  links, library, versions, limits, admin suspend/reset/revoke with audit.
+  Not done, deliberately:
+  - discount codes, bundles and a wishlist (they touch pricing and commissions:
+    need a business decision first);
+  - views, checkout starts and conversion per ebook (no product view tracking
+    exists); the seller sees orders, copies sold, refunds and net released;
+  - gift purchases, PDF watermarking, an in-browser reader, abandoned-checkout
+    reminders;
+  - an automatic preview cut from the PDF (the seller uploads a sample);
+  - malware scanning: none exists, and the terms say `scanned_for_malware: false`;
+  - buyers are not notified when a new version is uploaded (the library shows
+    "A new version is available");
+  - link previews for /market/products/* are client-side (title + JSON-LD); a
+    crawler without JavaScript sees the generic Kinjy card. Sharing the listing
+    through a short link (/s/) is not wired for products yet;
+  - refunds go through the existing dispute flow; a full refund ends access,
+    a partial one keeps it.
+
 ## 6. Unverified in this environment
 
 The browser pane does not composite frames here, so these were built but never
