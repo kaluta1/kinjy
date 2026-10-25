@@ -98,7 +98,11 @@ class TokenOut(BaseModel):
 
 class UserOut(BaseModel):
     id: str
-    email: EmailStr
+    # Shown, not checked: an output repeats what the account holds. The 25
+    # members imported with a placeholder address (@migration.local, a
+    # reserved name) made every response carrying them a 500 - the admin
+    # member list, and their own sign-in and /auth/me.
+    email: str
     handle: str
     display_name: str
     role: str

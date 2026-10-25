@@ -88,7 +88,9 @@ _LEXICON: dict[str, tuple[int, tuple[str, ...]]] = {
 # problem, and treating them as a severity rating on the same scale is how they
 # end up waiting behind a backlog of disputed nudity calls.
 _EXPLOITATION_PATTERNS = (
-    r"\bchild p", r"\bcp\b.{0,12}\btrade\b", r"\bunderage\b.{0,20}\b(nude|sex|pics?)\b",
+    # "child p" as the shorthand it is used as, or spelled out - not any word
+    # that starts "child p": "2,000 yuan per child per month" blocked an article.
+    r"\bchild\s*porn", r"\bchild\s+p\b(?![-'’]|\.\w)", r"\bcp\b.{0,12}\btrade\b", r"\bunderage\b.{0,20}\b(nude|sex|pics?)\b",
     r"\b(send|post) (me )?(your )?nudes\b.{0,30}\b1[0-7]\b",
     r"\bteen\b.{0,10}\b(nude|naked|sex)\b",
     r"\btraffick", r"\bsextortion\b",
