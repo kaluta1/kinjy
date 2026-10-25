@@ -542,6 +542,21 @@ export default function PostCard({
     }
   }
   const inCommunity = target.visibility === 'community'
+  // A Kinjy admin's pin above everything in the feed. Kept here so the card
+  // answers at once wherever it is shown, feed or profile.
+  const [featured, setFeatured] = useState(Boolean(target.featured))
+  const toggleFeatured = async () => {
+    setNote(null)
+    try {
+      if (featured) await kaluta.posts.unfeature(target.id)
+      else await kaluta.posts.feature(target.id)
+      setNote(featured ? 'Unpinned. It returns to its normal place.' : "Pinned above everything in everyone's feed.")
+      setFeatured(!featured)
+    } catch (err) {
+      setNote(err instanceof ApiError ? err.message : 'Could not change the pin')
+    }
+  }
+
   const stewardAct = async (fn: () => Promise<unknown>, failed: string) => {
     try {
       await fn()
@@ -618,7 +633,12 @@ export default function PostCard({
 
   return (
     <article className="cloud-card p-5" data-post-id={post.id}>
-      {target.pinned && inCommunity && (
+      {featured && (
+        <p className="caption mb-2 flex items-center gap-1.5 text-gold-soft">
+          <Pin size={12} aria-hidden="true" /> Pinned by Kinjy
+        </p>
+      )}
+      {target.pinned && inCommunity && !featured && (
         <p className="caption mb-2 flex items-center gap-1.5 text-gold-soft">
           <Pin size={12} aria-hidden="true" /> Pinned
         </p>
@@ -964,6 +984,19 @@ export default function PostCard({
           >
             <Pencil size={13} aria-hidden="true" />
             Edit
+          </button>
+        )}
+
+        {(me?.role === 'admin' || me?.role === 'superadmin') && (target.visibility === 'public' || featured) && (
+          <button
+            type="button"
+            onClick={() => void toggleFeatured()}
+            aria-pressed={featured}
+            title={featured ? "Remove from the top of everyone's feed" : "Show above everything in everyone's feed"}
+            className="inline-flex items-center gap-1.5 rounded-full px-3 py-1.5 text-xs font-semibold text-text-low hover:text-text-hi"
+          >
+            {featured ? <PinOff size={13} aria-hidden="true" /> : <Pin size={13} aria-hidden="true" />}
+            {featured ? 'Unpin for everyone' : 'Pin for everyone'}
           </button>
         )}
 

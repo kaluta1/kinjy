@@ -618,6 +618,8 @@ export interface Post {
   community_space?: CommunityPostSpace | null
   /** Pinned to the top of its community. */
   pinned?: boolean
+  /** Pinned by a Kinjy admin above everything in the feed. */
+  featured?: boolean
   /** When a scheduled post goes out. */
   publish_at?: string | null
   /** The comment marked as the answer to a community discussion. */
@@ -2361,6 +2363,9 @@ export const kaluta = {
     /** Community stewards: pin to the top of the community, or unpin. */
     pin: (id: string) => api.post<{ pinned: boolean }>(`/posts/${id}/pin`),
     unpin: (id: string) => api.delete<{ pinned: boolean }>(`/posts/${id}/pin`),
+    /** Kinjy admins: pin a public post above everything in everybody's feed. */
+    feature: (id: string) => api.post<{ featured: boolean }>(`/posts/${id}/feature`),
+    unfeature: (id: string) => api.delete<{ featured: boolean }>(`/posts/${id}/feature`),
     /** Community stewards: approve or reject a waiting post, or remove a published one. */
     moderate: (id: string, action: 'approve' | 'reject' | 'remove', reason?: string) =>
       api.post<Post>(`/posts/${id}/moderate`, { action, reason }),

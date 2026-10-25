@@ -102,6 +102,10 @@ MIGRATIONS: list[str] = [
     # Community spaces, pins, scheduled posts and accepted answers (24/10).
     f"ALTER TABLE {models.SCHEMA}.posts ADD COLUMN IF NOT EXISTS community_space VARCHAR(20)",
     f"ALTER TABLE {models.SCHEMA}.posts ADD COLUMN IF NOT EXISTS pinned_at TIMESTAMPTZ",
+    # Posts a Kinjy admin pins above everything in the feed (25/10).
+    f"ALTER TABLE {models.SCHEMA}.posts ADD COLUMN IF NOT EXISTS featured_at TIMESTAMPTZ",
+    f"ALTER TABLE {models.SCHEMA}.posts ADD COLUMN IF NOT EXISTS featured_by VARCHAR(40)",
+    f"CREATE INDEX IF NOT EXISTS ix_posts_featured_at ON {models.SCHEMA}.posts (featured_at)",
     f"ALTER TABLE {models.SCHEMA}.posts ADD COLUMN IF NOT EXISTS publish_at TIMESTAMPTZ",
     f"ALTER TABLE {models.SCHEMA}.posts ADD COLUMN IF NOT EXISTS accepted_comment_id VARCHAR(40)",
     f"CREATE INDEX IF NOT EXISTS ix_posts_scheduled ON {models.SCHEMA}.posts (publish_at) WHERE status = 'scheduled'",
@@ -155,6 +159,8 @@ class PostIn(BaseModel):
 SCHEDULE_MAX_DAYS = 90
 # Pinned posts per community: the top of a group is not a second feed.
 MAX_PINNED = int(os.getenv("COMMUNITY_MAX_PINNED", "5"))
+# Posts a Kinjy admin can pin above everything in the feed at the same time.
+MAX_FEATURED = int(os.getenv("FEED_MAX_FEATURED", "3"))
 SPACE_LABELS = {"announcements": "Announcements", "discussions": "Discussions", "articles": "Articles",
                 "opportunities": "Opportunities"}
 
@@ -717,6 +723,8 @@ def _post_out(
         "status": post.status,
         "community_space": _space_of(post),
         "pinned": post.pinned_at is not None,
+        # Pinned by Kinjy above everything in the feed.
+        "featured": post.featured_at is not None,
         "publish_at": post.publish_at,
         "accepted_comment_id": post.accepted_comment_id,
         "bookmarked": bool(viewer) and db.scalar(
@@ -3336,6 +3344,45 @@ def pin_post(post_id: str, principal: CurrentUser, db: OrmSession = Depends(get_
     return {"pinned": True}
 
 
+@app.post("/posts/{post_id}/feature", tags=["posts"])
+def feature_post(post_id: str, admin: AdminUser, db: OrmSession = Depends(get_db)):
+    """Pin a public post above everything in everybody's feed. Kinjy admins only.
+
+    At most MAX_FEATURED at a time. Only a published public post: one with an
+    audience (followers, a circle, a community) would be pinned for people
+    who may not read it.
+    """
+    post = db.get(models.Post, post_id)
+    if post is None or post.status != "published":
+        raise HTTPException(status_code=404, detail="Post not found")
+    if post.visibility != "public":
+        raise HTTPException(status_code=409, detail="Only a public post can be pinned for everyone")
+    if post.featured_at is None:
+        featured = db.scalar(select(func.count()).select_from(models.Post).where(
+            models.Post.featured_at.is_not(None), models.Post.status == "published")) or 0
+        if featured >= MAX_FEATURED:
+            raise HTTPException(status_code=409,
+                                detail=f"{MAX_FEATURED} posts are pinned for everyone already. Unpin one first.")
+        post.featured_at = datetime.now(timezone.utc)
+        post.featured_by = admin.user_id
+        db.commit()
+        log.info("post %s pinned for everyone by %s", post.id, admin.user_id)
+    return {"featured": True}
+
+
+@app.delete("/posts/{post_id}/feature", tags=["posts"])
+def unfeature_post(post_id: str, admin: AdminUser, db: OrmSession = Depends(get_db)):
+    post = db.get(models.Post, post_id)
+    if post is None:
+        raise HTTPException(status_code=404, detail="Post not found")
+    if post.featured_at is not None:
+        post.featured_at = None
+        post.featured_by = None
+        db.commit()
+        log.info("post %s unpinned for everyone by %s", post.id, admin.user_id)
+    return {"featured": False}
+
+
 @app.delete("/posts/{post_id}/pin", tags=["posts"])
 def unpin_post(post_id: str, principal: CurrentUser, db: OrmSession = Depends(get_db)):
     post, _ = _community_post_for_steward(db, post_id, principal.user_id)
@@ -3575,6 +3622,27 @@ def feed(
     if ctx.muted_authors:
         stmt = stmt.where(models.Post.author_id.not_in(ctx.muted_authors))
 
+    # Posts a Kinjy admin pinned: above everything, on the first page, in
+    # every mode - read from the same visible set, so the age rule, hidden
+    # posts and muted authors still apply. They are left out of the rest of
+    # the feed so nobody sees them twice.
+    featured_rows = db.scalars(
+        stmt.where(models.Post.featured_at.is_not(None)).order_by(models.Post.featured_at.desc()).limit(MAX_FEATURED)
+    ).all()
+    featured_ids = [p.id for p in featured_rows]
+    if featured_ids:
+        stmt = stmt.where(models.Post.id.not_in(featured_ids))
+
+    def with_featured(items: list[dict]) -> list[dict]:
+        if offset or not featured_rows:
+            return items
+        f_authors = _resolve_authors(_author_ids(db, list(featured_rows)))
+        f_reposted = _reposted_by(db, viewer, list(featured_rows))
+        return [
+            _apply_prefs(_post_out(p, db, viewer=viewer, authors=f_authors, reposted=f_reposted), prefs)
+            for p in featured_rows
+        ] + items
+
     # Who the viewer follows came with the rest of their graph in _context().
     # It used to be fetched here from /users/me/following with an empty bearer
     # token, which always failed silently: the Following feed was empty for
@@ -3603,7 +3671,7 @@ def feed(
         # into a void.
         audience = set(following) | ({viewer} if viewer else set())
         if not audience:
-            return {"mode": mode, "algorithm": unranked_algorithm, "items": [],
+            return {"mode": mode, "algorithm": unranked_algorithm, "items": with_featured([]),
                     "age_tier": agefilter.tier_of(age), "degraded": age.degraded,
                     "empty_reason": "not_following_anyone"}
         rows = db.scalars(
@@ -3614,7 +3682,7 @@ def feed(
         ).all()
         if not rows and not following:
             # Still empty, and the reason is the one the member can act on.
-            return {"mode": mode, "algorithm": unranked_algorithm, "items": [],
+            return {"mode": mode, "algorithm": unranked_algorithm, "items": with_featured([]),
                     "age_tier": agefilter.tier_of(age), "degraded": age.degraded,
                     "empty_reason": "not_following_anyone"}
         authors = _resolve_authors(_author_ids(db, list(rows)))
@@ -3631,13 +3699,13 @@ def feed(
             # settles it by coming back empty. Cheaper than counting the table
             # on every scroll.
             "has_more": len(rows) == limit,
-            "items": [
+            "items": with_featured([
                 _with_actors(
                     _apply_prefs(_post_out(p, db, viewer=viewer, authors=authors, reposted=reposted), prefs),
                     actors,
                 )
                 for p in rows
-            ],
+            ]),
         }
 
     if mode == "new":
@@ -3656,13 +3724,13 @@ def feed(
             # settles it by coming back empty. Cheaper than counting the table
             # on every scroll.
             "has_more": len(rows) == limit,
-            "items": [
+            "items": with_featured([
                 _with_actors(
                     _apply_prefs(_post_out(p, db, viewer=viewer, authors=authors, reposted=reposted), prefs),
                     actors,
                 )
                 for p in rows
-            ],
+            ]),
         }
 
     if mode == "local" and city:
@@ -3721,7 +3789,7 @@ def feed(
         },
         # Exact here: the whole candidate pool was scored, so we know.
         "has_more": offset + limit < len(scored),
-        "items": [
+        "items": with_featured([
             _with_actors(
                 _apply_prefs(
                     _post_out(item.post, db, why=item.why(), viewer=viewer, authors=ranked_authors, reposted=reposted),
@@ -3730,7 +3798,7 @@ def feed(
                 actors,
             )
             for item in page
-        ],
+        ]),
     }
 
 

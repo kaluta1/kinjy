@@ -81,6 +81,9 @@ class Post(Base):
     community_space: Mapped[str | None] = mapped_column(String(20))
     # Pinned to the top of its community by a steward.
     pinned_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Pinned by a Kinjy admin above everything, in everybody's feed.
+    featured_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    featured_by: Mapped[str | None] = mapped_column(String(40))
     # When a scheduled post goes out (status "scheduled" until then).
     publish_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     # The comment the asker (or a steward) marked as the answer.
