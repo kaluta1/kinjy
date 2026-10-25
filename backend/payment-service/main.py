@@ -1145,6 +1145,34 @@ def usd_text(amount: Decimal) -> str:
     return f"${amount:,.2f}"
 
 
+RAIL_NAMES = {"kalutapay": "Kaluta Pay", "soncopay": "Sonco Pay", "nowpayments": "NOWPayments",
+              "mangopay": "Mangopay", "mock": "Test"}
+
+
+def _payment_brief(p: models.PaymentIntent) -> dict:
+    """A payment as an admin looks for it at the provider: whose, which rail,
+    and the provider's own id for it."""
+    return {
+        "id": p.id, "user_id": p.user_id, "purpose": p.purpose, "amount": str(p.amount), "currency": p.currency,
+        "rail": p.rail, "rail_name": RAIL_NAMES.get(p.rail, p.rail), "external_id": p.external_id,
+        "status": p.status, "settled_at": p.settled_at, "created_at": p.created_at,
+    }
+
+
+class PaymentIdsIn(BaseModel):
+    ids: list[str] = Field(default_factory=list, max_length=500)
+
+
+@app.post("/admin/payments/lookup", tags=["admin"])
+def admin_payments_lookup(payload: PaymentIdsIn, _: AdminUser, db: OrmSession = Depends(get_db)):
+    """Kinjy payment ids (a journal's reference) with the provider's id."""
+    ids = list({i for i in payload.ids if i and i.startswith("pmt_")})[:500]
+    if not ids:
+        return {"payments": {}}
+    rows = db.scalars(select(models.PaymentIntent).where(models.PaymentIntent.id.in_(ids))).all()
+    return {"payments": {p.id: _payment_brief(p) for p in rows}}
+
+
 @app.get("/admin/kyc", tags=["admin"])
 def admin_kyc(
     _: AdminUser, status: str | None = None, year: int | None = None, limit: int = 100, offset: int = 0,
@@ -1170,6 +1198,10 @@ def admin_kyc(
             models.KycRecord.year == (year or date.today().year), models.KycRecord.fee_paid.is_(True)
         )
     ) or 0
+    fee_payments = {
+        p.id: p for p in db.scalars(select(models.PaymentIntent).where(
+            models.PaymentIntent.id.in_([r.fee_payment_id for r in rows if r.fee_payment_id] or [""]))).all()
+    }
     return {
         "year": year or date.today().year,
         "counts": {**counts, "fee_paid": fees},
@@ -1178,6 +1210,9 @@ def admin_kyc(
                 "user_id": r.user_id, "year": r.year, "fee_paid": r.fee_paid, "fee_payment_id": r.fee_payment_id,
                 "attempts": r.attempts, "max_attempts": r.MAX_ATTEMPTS_PER_YEAR, "status": r.status,
                 "provider_reference": r.provider_reference,
+                # The fee as the payment provider knows it, to find it there.
+                "fee_payment": _payment_brief(fee_payments[r.fee_payment_id])
+                if r.fee_payment_id in fee_payments else None,
             }
             for r in rows
         ],

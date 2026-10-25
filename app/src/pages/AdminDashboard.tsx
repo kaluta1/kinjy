@@ -1,7 +1,8 @@
 import type { ReactNode } from 'react'
-import { useNavigate, useParams } from 'react-router'
+import { Link, Navigate, useLocation, useNavigate, useParams } from 'react-router'
 import {
   Activity,
+  ArrowLeft,
   Dices,
   Gavel,
   LayoutDashboard,
@@ -16,7 +17,7 @@ import {
   Wallet,
   type LucideIcon,
 } from 'lucide-react'
-import AppShell from '@/components/app/AppShell'
+import { useAppTheme } from '@/components/appdemo/theme'
 import { useAuth } from '@/hooks/useAuth'
 import {
   Disputes,
@@ -66,7 +67,9 @@ const ALIASES: Record<string, string> = { wallets: 'payouts' }
  * page only decides what to show.
  */
 export default function AdminDashboard() {
-  const { user } = useAuth()
+  const { user, loading } = useAuth()
+  const { frameStyle, resolved, rtl } = useAppTheme()
+  const location = useLocation()
   const { section: raw = 'overview' } = useParams()
   const navigate = useNavigate()
   const id = ALIASES[raw] ?? raw
@@ -74,18 +77,58 @@ export default function AdminDashboard() {
   const go = (next: string) => navigate(next === 'overview' ? '/admin' : `/admin/${next}`)
   const admin = user?.role === 'admin' || user?.role === 'superadmin'
 
+  if (loading) {
+    return (
+      <div className="flex min-h-[60svh] items-center justify-center" role="status" aria-label="Loading">
+        <div className="h-12 w-12 rounded-full animate-orb-breathe" style={{ background: 'var(--grad-orb)' }} />
+      </div>
+    )
+  }
+  if (!user) {
+    const next = encodeURIComponent(location.pathname + location.search)
+    return <Navigate to={`/join?mode=signin&next=${next}`} replace />
+  }
+
+  // A workspace of its own: no app sidebar, no modules bar, no profile card.
+  // Only the admin menu, the section, and a way back to Kinjy.
   return (
-    <AppShell>
+    <div
+      className="min-h-[100dvh]"
+      style={
+        resolved === 'light'
+          ? { background: 'radial-gradient(circle at 70% -20%, #fff 0, #f8f5ef 48%, #f3efe7 100%)' }
+          : frameStyle
+      }
+      dir={rtl ? 'rtl' : 'ltr'}
+    >
+      <header className="sticky top-0 z-30 border-b border-[var(--cloud-border)] bg-[var(--cloud)]/90 backdrop-blur">
+        <div className="mx-auto flex h-14 max-w-[1500px] items-center gap-3 px-4 lg:px-6">
+          <Link to="/admin" className="flex items-baseline gap-2">
+            <span className="text-lg font-bold tracking-[-0.02em] text-text-hi">Kinjy</span>
+            <span className="rounded-full bg-gold/20 px-2 py-0.5 text-xs font-bold text-gold-soft">Admin</span>
+          </Link>
+          <span className="ms-auto hidden truncate text-sm text-text-mid sm:block">
+            {user.display_name} · {user.role}
+          </span>
+          <Link
+            to="/hub"
+            className="inline-flex min-h-[40px] items-center gap-1.5 rounded-full border border-[var(--cloud-border)] px-4 text-sm font-semibold text-text-mid hover:border-gold/50 hover:text-text-hi sm:ms-0 ms-auto"
+          >
+            <ArrowLeft size={14} aria-hidden="true" />
+            Back to Kinjy
+          </Link>
+        </div>
+      </header>
+
       {!admin ? (
-        <p role="alert" className="rounded-2xl bg-warning/10 px-5 py-4 text-sm text-text-hi">
+        <p role="alert" className="mx-auto mt-8 max-w-xl rounded-2xl bg-warning/10 px-5 py-4 text-sm text-text-hi">
           This page is for Kinjy admins. Your account does not have access.
         </p>
       ) : (
-        <div className="lg:grid lg:grid-cols-[13rem_minmax(0,1fr)] lg:gap-6">
+        <div className="mx-auto max-w-[1500px] px-4 py-6 lg:grid lg:grid-cols-[14rem_minmax(0,1fr)] lg:gap-8 lg:px-6">
           <nav aria-label="Admin sections" className="mb-5 lg:mb-0">
-            <p className="mb-2 hidden px-3 text-lg font-bold tracking-[-0.02em] text-text-hi lg:block">Admin</p>
             <ul
-              className="flex gap-1 overflow-x-auto rounded-full bg-text-hi/[0.06] p-1 [scrollbar-width:none] lg:sticky lg:top-24 lg:flex-col lg:overflow-visible lg:rounded-2xl lg:bg-transparent lg:p-0 [&::-webkit-scrollbar]:hidden"
+              className="flex gap-1 overflow-x-auto rounded-full bg-text-hi/[0.06] p-1 [scrollbar-width:none] lg:sticky lg:top-20 lg:flex-col lg:overflow-visible lg:rounded-2xl lg:bg-transparent lg:p-0 [&::-webkit-scrollbar]:hidden"
             >
               {SECTIONS.map((s) => (
                 <li key={s.id} className="shrink-0">
@@ -115,6 +158,6 @@ export default function AdminDashboard() {
           </main>
         </div>
       )}
-    </AppShell>
+    </div>
   )
 }

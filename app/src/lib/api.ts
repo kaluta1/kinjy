@@ -1897,6 +1897,28 @@ export interface ReferralPoolState {
   rotation_note: string
 }
 
+/** A payment as the provider knows it, for finding it there. */
+export interface AdminPaymentBrief {
+  id: string
+  user_id: string
+  purpose: string
+  amount: string
+  currency: string
+  rail: string
+  rail_name: string
+  external_id: string | null
+  status: string
+  settled_at: string | null
+  created_at: string
+}
+
+export interface AdminMemberBrief {
+  display_name: string
+  handle: string
+  email: string
+  status: string
+}
+
 export interface AdminJournal {
   id: string
   kind: string
@@ -3562,8 +3584,15 @@ export const kaluta = {
           max_attempts: number
           status: string
           provider_reference: string | null
+          fee_payment: AdminPaymentBrief | null
         }>
       }>(`/admin/kyc${status ? `?status=${status}` : ''}`),
+    /** Names for account ids shown on admin screens. */
+    lookupUsers: (ids: string[]) =>
+      api.post<{ users: Record<string, AdminMemberBrief> }>('/admin/users/lookup', { ids }),
+    /** Kinjy payment ids with the provider's own id (Kaluta Pay, Sonco Pay). */
+    lookupPayments: (ids: string[]) =>
+      api.post<{ payments: Record<string, AdminPaymentBrief> }>('/admin/payments/lookup', { ids }),
     fraud: (days = 30) => api.get<FraudSignals>(`/admin/fraud/signals?days=${days}`),
     contactRisk: () =>
       api.get<{

@@ -3,12 +3,14 @@ import { Link } from 'react-router'
 import { ExternalLink, RefreshCw, Search } from 'lucide-react'
 import { Badge, Panel, PanelState, Stat } from '@/components/dashboard/primitives'
 import { useApi } from '@/hooks/useApi'
-import { ApiError, kaluta, type AdminJournal } from '@/lib/api'
+import { ApiError, kaluta, type AdminJournal, type AdminMemberBrief, type AdminPaymentBrief } from '@/lib/api'
 import { FEATURES } from '@/lib/features'
 import { cn } from '@/lib/utils'
 import PayoutWallets from '@/pages/app/PayoutWallets'
 import { BTN, BTN_GOLD, INPUT, usd, when, type Msg } from './format'
 import { Chips, ConfirmButton, Kpi, Message, Row } from './ui'
+import { useMembers, usePayments } from './lookups'
+import { Member, ProviderRef } from './people'
 
 const errorText = (err: unknown, fallback = 'That did not work') => (err instanceof ApiError ? err.message : fallback)
 const thisMonth = () => new Date().toISOString().slice(0, 7)
@@ -237,6 +239,12 @@ function Journals() {
   const [offset, setOffset] = useState(0)
   const journals = useApi(() => kaluta.adminConsole.journals(kind, offset), [kind, offset])
   const [msg, setMsg] = useState<Msg>(null)
+  const items = journals.data?.items ?? []
+  const payments = usePayments(items.map((j) => j.reference))
+  const members = useMembers([
+    ...Object.values(payments).map((p) => p.user_id),
+    ...items.flatMap((j) => j.entries.map((e) => e.beneficiary_id)),
+  ])
   return (
     <Panel title="Journals" subtitle="Every posting, newest first. A journal is never edited: a mistake is reversed by its mirror image.">
       <Chips options={JOURNAL_KINDS} value={kind as (typeof JOURNAL_KINDS)[number]['id']} onChange={(k) => { setKind(k); setOffset(0) }} />
@@ -244,7 +252,7 @@ function Journals() {
       <PanelState loading={journals.loading} error={journals.error} empty={journals.data?.items.length === 0}>
         <ul className="space-y-2">
           {journals.data?.items.map((j) => (
-            <JournalRow key={j.id} j={j} onReversed={(t) => { setMsg({ ok: true, text: t }); journals.reload() }}
+            <JournalRow key={j.id} j={j} payment={j.reference ? payments[j.reference] : undefined} members={members} onReversed={(t) => { setMsg({ ok: true, text: t }); journals.reload() }}
               onError={(t) => setMsg({ ok: false, text: t })} />
           ))}
         </ul>
@@ -254,7 +262,19 @@ function Journals() {
   )
 }
 
-function JournalRow({ j, onReversed, onError }: { j: AdminJournal; onReversed: (t: string) => void; onError: (t: string) => void }) {
+function JournalRow({
+  j,
+  payment,
+  members,
+  onReversed,
+  onError,
+}: {
+  j: AdminJournal
+  payment: AdminPaymentBrief | undefined
+  members: Record<string, AdminMemberBrief> | null
+  onReversed: (t: string) => void
+  onError: (t: string) => void
+}) {
   const [open, setOpen] = useState(false)
   const [reason, setReason] = useState('')
   return (
@@ -264,6 +284,13 @@ function JournalRow({ j, onReversed, onError }: { j: AdminJournal; onReversed: (
           <p className="font-semibold text-text-hi">
             {usd(j.amount)} <span className="caption">· {j.kind}</span>
           </p>
+          {payment && (
+            <div className="mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-sm">
+              <span className="text-text-low">Paid by</span>
+              <Member id={payment.user_id} members={members} inline />
+              <ProviderRef payment={payment} />
+            </div>
+          )}
           <p className="caption mt-1 break-all">
             {j.id} · ref {j.reference ?? '—'} · {when(j.created_at)}
           </p>
@@ -279,7 +306,12 @@ function JournalRow({ j, onReversed, onError }: { j: AdminJournal; onReversed: (
               <li key={i} className="flex flex-wrap justify-between gap-2 py-1.5">
                 <span className="text-text-mid">
                   {e.account}
-                  {e.beneficiary_id ? ` · ${e.beneficiary_id}` : ''}
+                  {e.beneficiary_id && (
+                    <>
+                      {' · '}
+                      <Member id={e.beneficiary_id} members={members} inline />
+                    </>
+                  )}
                 </span>
                 <span className="mono-data text-text-hi">
                   {Number(e.debit) ? `Dr ${e.debit}` : `Cr ${e.credit}`}
@@ -367,6 +399,7 @@ function Reconciliation() {
 export function Kyc() {
   const [status, setStatus] = useState<'' | 'verified' | 'pending' | 'rejected' | 'unverified'>('')
   const kyc = useApi(() => kaluta.adminConsole.kyc(status), [status])
+  const kycMembers = useMembers((kyc.data?.items ?? []).map((r) => r.user_id))
   return (
     <div className="space-y-5">
       {kyc.data && (
@@ -396,10 +429,15 @@ export function Kyc() {
               <Row key={`${r.user_id}-${r.year}`}>
                 <div className="flex flex-wrap items-center justify-between gap-2">
                   <div className="min-w-0">
-                    <p className="break-all text-sm text-text-hi">{r.user_id}</p>
+                    <Member id={r.user_id} members={kycMembers} />
                     <p className="caption mt-1">
                       {r.year} · fee {r.fee_paid ? 'paid' : 'not paid'} · attempts {r.attempts}/{r.max_attempts}
                     </p>
+                    {r.fee_payment && (
+                      <div className="mt-1">
+                        <ProviderRef payment={r.fee_payment} />
+                      </div>
+                    )}
                   </div>
                   <Badge tone={r.status === 'verified' ? 'good' : r.status === 'rejected' ? 'bad' : 'neutral'}>{r.status}</Badge>
                 </div>
@@ -491,6 +529,7 @@ export function Leaders() {
   const [period, setPeriod] = useState(months[1])
   const live = useApi(() => kaluta.leaders.standings(), [])
   const frozen = useApi(() => kaluta.leaders.frozen(period), [period])
+  const leaderMembers = useMembers((live.data?.items ?? []).slice(0, 20).map((l) => l.member_id))
   const [msg, setMsg] = useState<Msg>(null)
   const act = async (fn: () => Promise<unknown>, text: string) => {
     try {
@@ -518,7 +557,10 @@ export function Leaders() {
               <ol className="divide-y divide-[var(--cloud-border)] text-sm">
                 {live.data.items.slice(0, 20).map((l) => (
                   <li key={l.member_id} className="flex justify-between gap-2 py-2">
-                    <span className="truncate text-text-hi">#{l.rank} {l.member_id}</span>
+                    <span className="min-w-0 truncate">
+                      <span className="text-text-low">#{l.rank} </span>
+                      <Member id={l.member_id} members={leaderMembers} inline />
+                    </span>
                     <span className="mono-data text-text-mid">{usd(l.direct_commissions)} → {usd(l.projected_payout)}</span>
                   </li>
                 ))}
@@ -573,6 +615,7 @@ export function Payouts() {
 
 function Withdrawals() {
   const rows = useApi(() => kaluta.payoutAdmin.withdrawals(), [])
+  const withdrawalMembers = useMembers((rows.data?.items ?? []).map((w) => w.user_id))
   const [msg, setMsg] = useState<Msg>(null)
   return (
     <Panel title="Withdrawals" subtitle="Members' commissions paid out in USDT on BSC."
@@ -589,7 +632,8 @@ function Withdrawals() {
               <div className="flex flex-wrap items-start justify-between gap-2">
                 <div className="min-w-0">
                   <p className="font-semibold text-text-hi">{usd(w.amount)} <span className="caption">net {usd(w.net)}</span></p>
-                  <p className="caption mt-1 break-all">{w.user_id} → {w.address} · {when(w.created_at)}</p>
+                  <div className="mt-1 text-sm"><Member id={w.user_id} members={withdrawalMembers} inline /></div>
+                  <p className="caption mt-1 break-all">→ {w.address} · {when(w.created_at)}</p>
                   {w.failure_reason && <p className="mt-1 text-xs text-red-300">{w.failure_reason}</p>}
                 </div>
                 <Badge tone={w.status === 'completed' ? 'good' : w.status === 'failed' ? 'bad' : 'neutral'}>{w.status}</Badge>
@@ -604,6 +648,7 @@ function Withdrawals() {
 
 function Refunds() {
   const rows = useApi(() => kaluta.adminConsole.refunds(), [])
+  const refundMembers = useMembers((rows.data?.items ?? []).map((r) => r.user_id))
   return (
     <Panel title="Refunds" subtitle="Marketplace refunds out of escrow, and pool refunds credited to members' balances.">
       <PanelState loading={rows.loading} error={rows.error} empty={rows.data?.items.length === 0}>
@@ -613,7 +658,8 @@ function Refunds() {
               <div className="flex flex-wrap items-start justify-between gap-2">
                 <div className="min-w-0">
                   <p className="font-semibold text-text-hi">{usd(r.amount)} <span className="caption">· {r.rail}</span></p>
-                  <p className="caption mt-1 break-all">{r.user_id} · for {r.order_id} · {when(r.created_at)}</p>
+                  <div className="mt-1 text-sm"><Member id={r.user_id} members={refundMembers} inline /></div>
+                  <p className="caption mt-1 break-all">for {r.order_id} · {when(r.created_at)}</p>
                   {r.failure_reason && <p className="mt-1 text-xs text-red-300">{r.failure_reason}</p>}
                 </div>
                 <Badge tone={r.status === 'failed' ? 'bad' : r.status === 'pending' ? 'neutral' : 'good'}>{r.status}</Badge>

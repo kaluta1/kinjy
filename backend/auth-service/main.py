@@ -2298,6 +2298,24 @@ def remove_from_team(user_id: str, principal: SuperAdminUser, db: OrmSession = D
     return {"user_id": user.id, "role": "member"}
 
 
+class IdsIn(BaseModel):
+    ids: list[str] = Field(default_factory=list, max_length=500)
+
+
+@app.post("/admin/users/lookup", tags=["admin"])
+def admin_users_lookup(payload: IdsIn, _: AdminUser, db: OrmSession = Depends(get_db)):
+    """Names for the account ids admin screens show: the journal, KYC, the
+    Leaders ranking, payouts. Ids that match no account are simply absent."""
+    ids = list({i for i in payload.ids if i})[:500]
+    if not ids:
+        return {"users": {}}
+    rows = db.scalars(select(models.User).where(models.User.id.in_(ids))).all()
+    return {"users": {
+        u.id: {"display_name": u.display_name, "handle": u.handle, "email": u.email, "status": u.status}
+        for u in rows
+    }}
+
+
 @app.get("/admin/users", tags=["admin"])
 def admin_users(
     _: AdminUser,

@@ -111,6 +111,8 @@ ADMIN_ROUTES: dict[str, str] = {
     "/api/admin/fraud": "http://auth-service:8000",
     "/api/admin/community-settings": "http://community-service:8000",
     "/api/admin/payouts": "http://payment-service:8000",
+    # Payments by Kinjy id, with the provider's own id (admin screens).
+    "/api/admin/payments": "http://payment-service:8000",
     "/api/admin/memorials": "http://memorial-service:8000",
     "/api/admin/ads": "http://commerce-service:8000",
     "/api/admin/assistant": "http://ai-service:8000",
