@@ -196,3 +196,129 @@ their current access; nothing is made public.
 - Share an invitation link to the community, join with another account; the
   community's member list is unchanged in sponsor, "My Short Links" shows
   opens / sign-ups / joins.
+
+### Decisions taken 2026-10-25 (Phase 2)
+
+- Kinjy adds a **markup on top of the owner's price** for memberships and
+  tickets: 20 % by default, adjustable by an admin (`community_markup_pct`).
+- The buyer's sponsor earns the **direct commission on Kinjy's markup**, with
+  the Leaders share, exactly as on every Kinjy revenue (ledger `revenue_split`).
+- **Grace period** after a missed (manual) renewal: 7 days by default,
+  adjustable by an admin (`community_grace_days`).
+- A community's revenue goes **to its owner only**; a change of administrator
+  transfers no financial right.
+- Paid features ship **switched off** (`community_paid_enabled`); an admin
+  switches them on in Admin → Communities.
+
+### Phase 2 — delivered locally 2026-10-25 (not committed, not deployed)
+
+**1. Functionality**
+- Access model per community: free, paid (joining needs a membership), mixed
+  (free to join, chosen spaces for paying members). Members already in keep
+  their place when a community becomes paid.
+- Tiers (monthly, annual, one-time; optional trial and first-period price),
+  codes (% off a first payment), server-made quotes (30 min), checkout through
+  the existing payment rail at the quote's total only.
+- Entitlements kept apart from payments: trial / active / grace / expired /
+  cancelled / refunded. Renewals by hand continue the period; cancellation at
+  period end; reminder 3 days before; grace then expiry and lapse; return by
+  paying. One reminder per period, claimed atomically.
+- Refunds by the owner (or an admin), full or partial, idempotent per request,
+  bounded by what is left: the ledger mirrors the payment pro rata (owner's
+  share, Kinjy's fee, sponsor commission, Leaders) and owes the amount on the
+  buyer's Kinjy balance. A full refund ends the access or the ticket.
+- Events: online / in person / hybrid, UTC + IANA zone (shown in the reader's
+  local time with the event's own), capacity enforced under a row lock,
+  waitlist with promotion, link for registered people only, recording consent,
+  reminders a day before, cancellation (paid tickets refunded), paid tickets
+  (a payment arriving after a sell-out is refunded in full automatically).
+- Community marketplace: members show their own active marketplace listings;
+  checkout, delivery, reviews and disputes stay the marketplace's.
+- Opportunities: a post space (jobs, mentoring, collaborations, quotes).
+- Analytics per community over 7/30/90 days with a definition per metric;
+  money (sales, renewals, cancellations, refunds) for the owner only.
+- Earnings for the owner: members paid, Kinjy fees, owner gross, refunds,
+  owner net, payment list with refunds.
+- Member dashboard: Memberships tab. Admin dashboard: Communities section.
+
+**2. Files**
+- community-service: `paid.py`, `events.py`, `insights.py` (new routers),
+  `models.py` (settings, tiers, coupons, quotes, entitlements, payments,
+  refunds, events, registrations, listings; `access_model`, `paid_only`),
+  `main.py` (routers, paid join, background loop, paid spaces in policy and
+  reader endpoint), `spaces.py` (events, marketplace, opportunities available).
+- ledger-service: `posting.py` (refund: one owed line per payment, seller
+  proceeds clawed back), `main.py` (`/internal/post/community-sale`),
+  `models.py` (`revenue:community_markup`).
+- payment-service: purpose `community`, `/payments/community/checkout`,
+  settlement and reconciler, escrow lines.
+- social-service: opportunities space, paid spaces in feed and direct link
+  (`community_paid_only` answer), `/internal/community-stats`.
+- commerce-service: `/internal/products/batch`.
+- gateway: `/api/events`, `/api/me/community-memberships`,
+  `/api/admin/community-settings`.
+- app: `QuotePayment`, `CommunityMembership`, `CommunityEvents`,
+  `CommunityMarket`, `CommunityOwnerTools`, `MyMemberships`, `CommunityView`,
+  `AdminDashboard` + `adminDash/sections`, `Dashboard`, `lib/api.ts`.
+- `backend/tests/e2e_community_phase2.py` (new).
+
+**3. Shared code touched**
+- ledger `refund_to_balance`: one "owed to payer" line for all cash lines of a
+  journal, and vendor-payable lines clawed back from the seller's wallet.
+  Consumers: pool refunds (one cash line: unchanged, re-tested) and community
+  refunds.
+- payment-service `checkout`: purpose `community` validated against its quote;
+  other purposes unchanged. Reconciler now also retries community payments.
+- social `_readable_post`: posts in a mixed community's paid spaces open for
+  paying members only. Consumers: every route taking a post id.
+- commerce: one additive internal endpoint.
+
+**4. Migrations / configuration** (additive, at service start)
+community: `communities.access_model`, `community_spaces.paid_only`, tables
+`platform_settings`, `community_tiers`, `community_coupons`,
+`community_quotes`, `community_entitlements`, `community_payments`,
+`community_refunds`, `community_events`, `event_registrations`,
+`community_listings`. Settings live in `platform_settings` (admin page).
+
+**5. Tests**
+- `e2e_community_phase2.py`: 68/68 (settings and permissions, tiers, codes,
+  quote-only checkout, double settlement, late and foreign credits, ledger
+  split and balance, renewal continuity, cancellation, grace and expiry,
+  lapse and return, full / partial / repeated / excessive refunds with
+  clawback, trial once and without grace, paid spaces in feed / link /
+  posting, 6 concurrent registrations for 3 places, waitlist promotion,
+  hidden link, paid tickets and the late-payment refund, event cancellation
+  refunds, listings, analytics money for the owner only, one reminder per
+  period, markup change on new quotes).
+- Regression: `e2e_community_phase1` OK, `e2e_pool_rules` OK (refund
+  function shared).
+- Found and fixed by the tests: rows re-read under a lock were served from the
+  session cache (capacity oversold 6/3); now `populate_existing`.
+- `tsc` / `eslint` clean on touched files; browser: admin Communities section,
+  owner's Paid access (tier $10 → members pay $12.00), events at 375 px dark.
+
+**6. Gaps / disabled**
+- Paid features are off until an admin switches them on.
+- No automatic renewal (the rails cannot charge again): manual by design.
+- Refunds go to the member's Kinjy balance, not back through the rail.
+- Courses (Phase 3) not built; the Courses space stays unavailable.
+- Event attendance is registrations only (no check-in); polls / Q&A during
+  events and recordings' transcripts are not built.
+- Analytics retention cohort not built (activation and activity are).
+- The sponsor commission rate itself is the platform setting
+  (`SPONSOR_COMMISSION_PCT`), not adjustable from the admin page yet.
+
+**7. Rollback**
+- Code: revert the Phase 2 commit; the new tables and columns are ignored by
+  the previous code. Before reverting with paid communities live, switch paid
+  off in Admin → Communities so no new payment is taken.
+
+**8. Manual review checklist**
+- Admin → Communities: switch paid on, check markup 20 % and grace 7 days.
+- As an owner: Paid access → "Paid membership", add a $10 monthly tier; the
+  page says members pay $12.00.
+- With another account: open the community, choose the tier, pay; check the
+  receipt (community $10 + Kinjy $2) and the Memberships tab.
+- Owner → Paid access → Earnings → refund $12: access ends, balance shows it.
+- Events: switch the Events space on, create a 2-place event, register 3
+  people: the third is on the waitlist and moves up when one leaves.

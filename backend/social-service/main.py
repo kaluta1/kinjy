@@ -147,7 +147,7 @@ class PostIn(BaseModel):
     media: list[dict] = Field(default_factory=list)
     mature: bool = False
     # A community post's space; by default discussions (articles for an article).
-    space: str | None = Field(default=None, pattern="^(announcements|discussions|articles)$")
+    space: str | None = Field(default=None, pattern="^(announcements|discussions|articles|opportunities)$")
     # Publish later. Up to SCHEDULE_MAX_DAYS ahead, at least a minute away.
     publish_at: datetime | None = None
 
@@ -155,7 +155,8 @@ class PostIn(BaseModel):
 SCHEDULE_MAX_DAYS = 90
 # Pinned posts per community: the top of a group is not a second feed.
 MAX_PINNED = int(os.getenv("COMMUNITY_MAX_PINNED", "5"))
-SPACE_LABELS = {"announcements": "Announcements", "discussions": "Discussions", "articles": "Articles"}
+SPACE_LABELS = {"announcements": "Announcements", "discussions": "Discussions", "articles": "Articles",
+                "opportunities": "Opportunities"}
 
 
 class CommentIn(BaseModel):
@@ -2174,6 +2175,17 @@ def _members_only_or(exc: HTTPException, db: OrmSession, post_id: str) -> None:
             community = _community_summary(post.community_id)
         except HTTPException:
             community = {}
+        if community.get("slug") and _space_of(post) in set(community.get("paid_spaces") or []):
+            # A member who has not paid is not told to join a group they are in.
+            raise HTTPException(
+                status_code=403,
+                detail={
+                    "message": f"This post is for paying members of {community.get('name')}.",
+                    "code": "community_paid_only",
+                    "community": {"slug": community["slug"], "name": community.get("name"),
+                                  "kind": community.get("kind")},
+                },
+            )
         if community.get("slug") and community.get("kind") in ("public", "private", "paid"):
             raise HTTPException(
                 status_code=403,
@@ -3001,10 +3013,42 @@ def _readable_post(db: OrmSession, post_id: str, viewer: str | None) -> models.P
     if post.status in ("pending", "scheduled", "withheld") and post.author_id != viewer:
         raise HTTPException(status_code=404, detail="Post not found")
     if _can_see(post, _viewer_audience(viewer)):
+        _require_paid_space(post, viewer)
         return post
     if post.visibility == "community" and _publishes_publicly(post.community_id):
+        _require_paid_space(post, viewer)
         return post
     raise HTTPException(status_code=404, detail="Post not found")
+
+
+def _reader_spaces(community_id: str, viewer: str | None, fallback: set[str]) -> set[str]:
+    """The spaces this reader may open (community-service decides); without a
+    reader or an answer, the free spaces only - an outage never opens a paid one."""
+    if not viewer:
+        return fallback
+    try:
+        response = httpx.get(f"{COMMUNITY_URL}/internal/communities/{community_id}/reader/{viewer}", timeout=4)
+        response.raise_for_status()
+        return set(response.json().get("spaces", []))
+    except Exception as exc:
+        log.warning("reader lookup failed for %s in %s: %s", viewer, community_id, exc)
+        return fallback
+
+
+def _require_paid_space(post: models.Post, viewer: str | None) -> None:
+    """A post in a paid space opens for paying members only - a link included."""
+    if post.visibility != "community" or not post.community_id or post.author_id == viewer:
+        return
+    try:
+        summary = _community_summary(post.community_id)
+    except HTTPException:
+        raise HTTPException(status_code=404, detail="Post not found")
+    paid_spaces = set(summary.get("paid_spaces") or [])
+    if not paid_spaces or _space_of(post) not in paid_spaces:
+        return
+    readable = _reader_spaces(post.community_id, viewer, set())
+    if _space_of(post) not in readable:
+        raise HTTPException(status_code=404, detail="Post not found")
 
 
 def _require_engagement(post: models.Post, viewer: str) -> None:
@@ -3056,7 +3100,7 @@ def community_feed(
     principal: MaybeUser,
     limit: int = 20,
     offset: int = 0,
-    space: str | None = Query(default=None, pattern="^(announcements|discussions|articles)$"),
+    space: str | None = Query(default=None, pattern="^(announcements|discussions|articles|opportunities)$"),
     sort: str = Query(default="latest", pattern="^(latest|top)$"),
     db: OrmSession = Depends(get_db),
 ):
@@ -3105,8 +3149,11 @@ def community_feed(
         models.Post.visibility == "community",
         models.Post.status == "published",
     )
-    # Posts of a space that is switched off are hidden (kept, not deleted).
+    # Posts of a space that is switched off are hidden (kept, not deleted),
+    # and so are a mixed community's paid spaces for readers without access.
     on = set(community.get("spaces") or ["announcements", "discussions", "articles"])
+    if community.get("paid_spaces"):
+        on = _reader_spaces(community_id, viewer, on - set(community["paid_spaces"]))
     effective = _space_expr()
     stmt = stmt.where(effective.in_(sorted(on & set(SPACE_LABELS))))
     if space:
@@ -3380,6 +3427,28 @@ def post_revisions(post_id: str, principal: MaybeUser, db: OrmSession = Depends(
     rows = db.scalars(select(models.PostRevision).where(models.PostRevision.post_id == post.id)
                       .order_by(models.PostRevision.id.desc()).limit(50)).all()
     return {"items": [{"body": r.body, "written_at": r.written_at, "replaced_at": r.created_at} for r in rows]}
+
+
+@app.get("/internal/community-stats/{community_id}", tags=["internal"])
+def community_stats(community_id: str, days: int = 30, db: OrmSession = Depends(get_db)):
+    """Counts for a community's analytics: never a post's text, only who was
+    active (ids, for the owner's activation figure) and how much."""
+    days = max(1, min(days, 365))
+    since = datetime.now(timezone.utc) - timedelta(days=days)
+    base = and_(models.Post.community_id == community_id, models.Post.visibility == "community")
+    posts = db.scalar(select(func.count()).select_from(models.Post).where(
+        base, models.Post.status == "published", models.Post.created_at >= since)) or 0
+    post_authors = set(db.scalars(select(models.Post.author_id).where(
+        base, models.Post.status == "published", models.Post.created_at >= since).distinct()).all())
+    comment_rows = db.execute(select(models.Comment.author_id).join(models.Post, models.Post.id == models.Comment.post_id)
+                              .where(base, models.Comment.status == "published", models.Comment.created_at >= since)).all()
+    unanswered = db.scalar(select(func.count()).select_from(models.Post).where(
+        base, models.Post.status == "published", models.Post.comments_count == 0,
+        models.Post.created_at < datetime.now(timezone.utc) - timedelta(days=1),
+        _space_expr() == "discussions")) or 0
+    pending = db.scalar(select(func.count()).select_from(models.Post).where(base, models.Post.status == "pending")) or 0
+    return {"posts": posts, "comments": len(comment_rows), "unanswered": unanswered, "pending": pending,
+            "author_ids": sorted(post_authors | {r[0] for r in comment_rows})}
 
 
 class ReadableIn(BaseModel):

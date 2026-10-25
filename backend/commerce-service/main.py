@@ -408,6 +408,22 @@ def my_products(principal: CurrentUser, db: OrmSession = Depends(get_db)):
     }
 
 
+class ProductBatchIn(BaseModel):
+    ids: list[str] = Field(default_factory=list, max_length=100)
+
+
+@app.post("/internal/products/batch", tags=["internal"])
+def products_batch(payload: ProductBatchIn, db: OrmSession = Depends(get_db)):
+    """Active listings by id, in their public shape (communities show a
+    member's listings this way). Paused or removed ones are left out."""
+    if not payload.ids:
+        return {"items": []}
+    rows = db.scalars(select(models.Product).where(
+        models.Product.id.in_(payload.ids), models.Product.status == "active")).all()
+    profiles = _profiles({r.vendor_id for r in rows})
+    return {"items": [_product_item(r, profiles) for r in rows]}
+
+
 @app.get("/commerce/products/{product_id}", tags=["marketplace"])
 def get_product(product_id: str, principal: MaybeUser, db: OrmSession = Depends(get_db)):
     product = db.get(models.Product, product_id)

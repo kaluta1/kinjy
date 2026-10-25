@@ -42,9 +42,9 @@ SPACES: tuple[Space, ...] = (
     Space("articles", "Articles & resources", "Longer pieces, guides and useful links.", "members", True),
     Space("directory", "Member directory", "Who is in the community.", None, True),
     Space("courses", "Courses", "Structured lessons.", "stewards", False),
-    Space("events", "Events", "Meetings, online or in person.", "stewards", False),
-    Space("marketplace", "Marketplace", "Products and services from members.", "members", False),
-    Space("opportunities", "Opportunities", "Jobs, mentoring and collaborations.", "members", False),
+    Space("events", "Events", "Meetings, online or in person.", None, True),
+    Space("marketplace", "Marketplace", "Members' products and services from the Kinjy marketplace.", None, True),
+    Space("opportunities", "Opportunities", "Jobs, mentoring, collaborations and requests for quotes.", "members", True),
     Space("chat", "Chat", "A group conversation for members.", "members", False),
     Space("family", "Family archive", "Albums, documents and stories of the family.", "members", False),
     Space("memorial", "Memorial", "Tributes and memories.", "members", False),
@@ -127,6 +127,17 @@ def spaces_out(on: set[str]) -> list[dict]:
          "available": s.available, "posters": s.posters}
         for s in SPACES
     ]
+
+
+def paid_spaces(db: OrmSession, community: models.Community) -> set[str]:
+    """Spaces marked for paying members (meaningful in a mixed community)."""
+    return {
+        r.space
+        for r in db.scalars(
+            select(models.CommunitySpace).where(
+                models.CommunitySpace.community_id == community.id, models.CommunitySpace.paid_only.is_(True))
+        ).all()
+    }
 
 
 def can_post(space_id: str, role: str | None, on: set[str]) -> bool:

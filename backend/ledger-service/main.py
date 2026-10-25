@@ -281,6 +281,59 @@ def post_creator_revenue(payload: CreatorRevenueIn, db: OrmSession = Depends(get
     return _journal_out(journal, db)
 
 
+class CommunitySaleIn(BaseModel):
+    """A paid community membership or event ticket: the owner's price and Kinjy's markup."""
+
+    payment_id: str
+    buyer_id: str
+    owner_id: str
+    owner_price: Decimal = Field(ge=0)
+    markup: Decimal = Field(ge=0)
+    kind: str = Field(pattern="^(membership|ticket)$")
+    community_id: str
+    idempotency_key: str
+
+
+@app.post("/internal/post/community-sale", tags=["postings"])
+def post_community_sale(payload: CommunitySaleIn, db: OrmSession = Depends(get_db)):
+    """Same shape as a marketplace order. The owner is owed their price (their
+    wallet, withdrawable); Kinjy's revenue is the markup only, and the buyer's
+    sponsor's commission and the Leaders share come out of it. The markup
+    percentage is decided by community-service (an admin setting) and arrives
+    here as an amount, so this journal records exactly what was charged.
+    """
+    existing = posting.find_existing(db, payload.idempotency_key)
+    if existing is not None:
+        return _journal_out(existing, db)
+    owner_price = economy.money(payload.owner_price)
+    markup = economy.money(payload.markup)
+    split = economy.revenue_split(markup, _sponsor(payload.buyer_id), kind=f"community_{payload.kind}")
+    journal = posting.post_split(
+        db,
+        kind=f"community_{payload.kind}",
+        split=split,
+        revenue_account=models.ACC_REVENUE_COMMUNITY,
+        reference=payload.payment_id,
+        description=f"Community {payload.kind} in {payload.community_id}",
+        idempotency_key=payload.idempotency_key,
+        created_by=payload.buyer_id,
+    )
+    if owner_price > 0:
+        db.add(models.Entry(id=new_id("led"), journal_id=journal.id, account=models.ACC_CASH,
+                            debit=owner_price, reason="owner_proceeds_received"))
+        db.add(models.Entry(id=new_id("led"), journal_id=journal.id, account=models.ACC_VENDOR_PAYABLE,
+                            credit=owner_price, beneficiary_id=payload.owner_id, role="community_owner",
+                            reason="owner_proceeds_payable"))
+        posting.get_wallet(db, payload.owner_id).available += owner_price
+    # The journal's amount is what the buyer paid, so a refund of part of it
+    # is a fraction of the whole.
+    journal.amount = owner_price + markup
+    db.flush()
+    posting.assert_balanced(db, journal.id)
+    db.commit()
+    return _journal_out(journal, db)
+
+
 @app.post("/internal/post/marketplace-order", tags=["postings"])
 def post_marketplace_order(payload: MarketplaceOrderIn, db: OrmSession = Depends(get_db)):
     """The seller is paid their asking price; the commission comes out of the markup."""

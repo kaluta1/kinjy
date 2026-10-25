@@ -756,6 +756,72 @@ export function Team() {
   )
 }
 
+/* ------------------------------------------------------------------ communities */
+
+/** Platform rules for paid communities: the markup, the grace days, the switch. */
+export function CommunitiesSettings() {
+  const settings = useApi(() => kaluta.communityPaid.adminSettings(), [])
+  const [markup, setMarkup] = useState('')
+  const [grace, setGrace] = useState('')
+  const [msg, setMsg] = useState<Msg>(null)
+  const d = settings.data
+  const save = async (patch: Parameters<typeof kaluta.communityPaid.setAdminSettings>[0], text: string) => {
+    setMsg(null)
+    try {
+      await kaluta.communityPaid.setAdminSettings(patch)
+      setMsg({ ok: true, text })
+      settings.reload()
+    } catch (err) {
+      setMsg({ ok: false, text: errorText(err) })
+    }
+  }
+  return (
+    <Panel title="Paid communities" subtitle="Rules for community memberships and event tickets, applied to new prices.">
+      <Message msg={msg} />
+      <PanelState loading={settings.loading} error={settings.error}>
+        {d && (
+          <div className="space-y-5">
+            <div className="flex flex-wrap items-center gap-3">
+              <Badge tone={d.community_paid_enabled.value === 'true' ? 'good' : 'neutral'}>
+                {d.community_paid_enabled.value === 'true' ? 'Paid features on' : 'Paid features off'}
+              </Badge>
+              <ConfirmButton
+                label={d.community_paid_enabled.value === 'true' ? 'Switch off' : 'Switch on'}
+                question={d.community_paid_enabled.value === 'true'
+                  ? 'Stop new paid tiers, prices and tickets? Existing access is kept.'
+                  : 'Let community owners sell memberships and tickets?'}
+                onConfirm={() => save({ community_paid_enabled: d.community_paid_enabled.value !== 'true' }, 'Saved.')}
+              />
+            </div>
+            <form className="flex flex-wrap items-end gap-3" onSubmit={(e) => {
+              e.preventDefault()
+              void save({ community_markup_pct: Number(markup || d.community_markup_pct.value),
+                          community_grace_days: Number(grace || d.community_grace_days.value) }, 'Saved: new prices use these rules.')
+            }}>
+              <label className="text-sm text-text-mid">
+                Kinjy markup on top of the owner's price (%)
+                <input type="number" min={0} max={100} step="0.01" placeholder={d.community_markup_pct.value}
+                  value={markup} onChange={(e) => setMarkup(e.target.value)} className={cn(INPUT, 'mt-1 block w-32')} />
+              </label>
+              <label className="text-sm text-text-mid">
+                Grace days after a missed renewal
+                <input type="number" min={0} max={60} placeholder={d.community_grace_days.value}
+                  value={grace} onChange={(e) => setGrace(e.target.value)} className={cn(INPUT, 'mt-1 block w-32')} />
+              </label>
+              <button type="submit" className={BTN_GOLD}>Save</button>
+            </form>
+            <p className="caption">
+              Markup {d.community_markup_pct.value}% (default {d.community_markup_pct.default}) · grace {d.community_grace_days.value} days
+              (default {d.community_grace_days.default}). The sponsor's commission and the Leaders share come out of the markup, as
+              for every Kinjy revenue. A quote already given keeps the markup it was given with.
+            </p>
+          </div>
+        )}
+      </PanelState>
+    </Panel>
+  )
+}
+
 /* ------------------------------------------------------------------ system */
 
 export function System() {

@@ -923,7 +923,7 @@ export interface CircleDetail extends Circle {
   members: CircleMember[]
 }
 
-export type CommunityPostSpace = 'announcements' | 'discussions' | 'articles'
+export type CommunityPostSpace = 'announcements' | 'discussions' | 'articles' | 'opportunities'
 
 export interface CommunitySpace {
   id: string
@@ -946,8 +946,97 @@ export interface CommunityTemplate {
   post_approval: 'none' | 'new_members' | 'all'
 }
 
+export interface CommunityTier {
+  id: string
+  name: string
+  description: string
+  benefits: string[]
+  period: 'monthly' | 'annual' | 'one_time'
+  trial_days: number
+  active: boolean
+  /** The owner's price. */
+  owner_price: string
+  /** What a member pays: the owner's price plus Kinjy's fee. */
+  price: string
+  intro_price: string | null
+}
+
+export interface CommunityEntitlement {
+  id: string
+  community_id: string
+  tier_id: string
+  status: 'trial' | 'active' | 'grace' | 'expired' | 'cancelled' | 'refunded'
+  has_access: boolean
+  period_end: string | null
+  grace_until: string | null
+  cancel_at_period_end: boolean
+  started_at: string
+}
+
+export interface CommunityPaymentRow {
+  id: string
+  kind: 'membership' | 'ticket'
+  tier_id: string | null
+  event_id: string | null
+  owner_price: string
+  kinjy_fee: string
+  total: string
+  refunded: string
+  status: string
+  coupon_code: string | null
+  period_from: string | null
+  period_to: string | null
+  payment_ref: string
+  created_at: string
+  user_id: string
+}
+
+export interface CommunityQuote {
+  quote_id: string
+  kind: 'membership' | 'ticket'
+  owner_price: string
+  markup_pct: string
+  markup: string
+  total: string
+  expires_at: string
+  /** Present when a 100% code made it free: credited at once. */
+  credited?: { payment_id: string }
+}
+
+export interface CommunityEvent {
+  id: string
+  community_id: string
+  title: string
+  description: string
+  starts_at: string
+  ends_at: string | null
+  timezone: string
+  mode: 'online' | 'in_person' | 'hybrid'
+  location: string | null
+  /** For registered attendees and hosts only. */
+  online_url: string | null
+  capacity: number | null
+  registered_count: number
+  places_left: number | null
+  waitlist: boolean
+  speakers: string[]
+  recording_consent: boolean
+  recording_url: string | null
+  status: 'scheduled' | 'cancelled'
+  host_id: string
+  ticket_owner_price: string | null
+  /** What a member pays for a ticket (owner's price + Kinjy's fee). */
+  ticket_price: string | null
+  my_status: 'registered' | 'waitlisted' | 'cancelled' | null
+}
+
 /** Template, spaces and the rules of the house, with what the reader may do. */
 export interface CommunitySpaceView {
+  /** free, paid (joining needs a membership) or mixed (some spaces are paid). */
+  access_model?: 'free' | 'paid' | 'mixed'
+  paid_spaces?: string[]
+  /** Whether the reader has paid access (or runs the community). */
+  my_entitled?: boolean
   template: string
   spaces: CommunitySpace[]
   post_approval: 'none' | 'new_members' | 'all'
@@ -2605,6 +2694,134 @@ export const kaluta = {
         // take part, their own queued posts, what they saved - for the reader.
         `/feed/community/${id}?limit=${limit}&offset=${offset}${space ? `&space=${space}` : ''}${sort !== 'latest' ? `&sort=${sort}` : ''}`,
       ),
+  },
+
+  /** Paid communities, events, listings and analytics (community-service). */
+  communityPaid: {
+    tiers: (id: string) =>
+      api.get<{
+        paid_enabled: boolean
+        access_model: 'free' | 'paid' | 'mixed'
+        markup_pct: string
+        grace_days: number
+        tiers: CommunityTier[]
+        my_entitlement: CommunityEntitlement | null
+      }>(`/communities/${id}/tiers`),
+    createTier: (
+      id: string,
+      tier: { name: string; description?: string; benefits?: string[]; price: number; period: string; trial_days?: number; intro_price?: number },
+    ) => api.post<CommunityTier>(`/communities/${id}/tiers`, tier),
+    editTier: (id: string, tierId: string, patch: { name?: string; description?: string; benefits?: string[]; active?: boolean }) =>
+      api.patch<CommunityTier>(`/communities/${id}/tiers/${tierId}`, patch),
+    setAccess: (id: string, patch: { access_model?: 'free' | 'paid' | 'mixed'; paid_spaces?: Record<string, boolean> }) =>
+      api.patch<{ access_model: string; paid_spaces: string[] }>(`/communities/${id}/access`, patch),
+    coupons: (id: string) =>
+      api.get<{ items: Array<{ id: string; code: string; percent_off: number; max_redemptions: number | null; redemptions: number; expires_at: string | null; active: boolean }> }>(
+        `/communities/${id}/coupons`,
+      ),
+    createCoupon: (id: string, coupon: { code: string; percent_off: number; max_redemptions?: number; expires_at?: string }) =>
+      api.post(`/communities/${id}/coupons`, coupon),
+    disableCoupon: (id: string, couponId: string) => api.post(`/communities/${id}/coupons/${couponId}/disable`, {}),
+    /** The price for this member, computed by the server. */
+    quote: (id: string, input: { tier_id?: string; event_id?: string; coupon?: string }) =>
+      api.post<CommunityQuote>(`/communities/${id}/quote`, input),
+    trial: (id: string, tierId: string) => api.post<CommunityEntitlement>(`/communities/${id}/trial`, { tier_id: tierId }),
+    /** Start paying a quote (Kaluta Pay / Sonco Pay, as for every payment). */
+    checkout: (quoteId: string) =>
+      api.post<{ payment_id: string; rail: string; amount: string; checkout_url?: string; mock?: boolean }>(
+        '/payments/community/checkout',
+        { quote_id: quoteId },
+      ),
+    billing: (id: string) =>
+      api.get<{ entitlement: CommunityEntitlement | null; payments: CommunityPaymentRow[]; grace_days: number }>(
+        `/communities/${id}/billing`,
+      ),
+    cancel: (id: string) => api.post<CommunityEntitlement>(`/communities/${id}/membership/cancel`, {}),
+    resume: (id: string) => api.post<CommunityEntitlement>(`/communities/${id}/membership/resume`, {}),
+    mine: () =>
+      api.get<{
+        items: Array<
+          CommunityEntitlement & {
+            community: { name: string; slug: string } | null
+            tier: { name: string; period: string } | null
+          }
+        >
+      }>('/me/community-memberships'),
+    subscribers: (id: string) => api.get<{ items: Array<CommunityEntitlement & { user_id: string }> }>(`/communities/${id}/subscribers`),
+    earnings: (id: string) =>
+      api.get<{
+        currency: string
+        members_paid: string
+        kinjy_fees: string
+        owner_gross: string
+        refunded_to_members: string
+        owner_refunded: string
+        owner_net: string
+        by_kind: Record<string, string>
+        payments: CommunityPaymentRow[]
+        note: string
+      }>(`/communities/${id}/earnings`),
+    refund: (id: string, paymentId: string, amount: number, reason: string, requestId: string) =>
+      api.post<{ refund_id: string; status: string; payment: CommunityPaymentRow }>(
+        `/communities/${id}/payments/${paymentId}/refund`,
+        { amount, reason, request_id: requestId },
+      ),
+    events: (id: string, past = false) =>
+      api.get<{ items: CommunityEvent[] }>(`/communities/${id}/events${past ? '?past=true' : ''}`),
+    createEvent: (
+      id: string,
+      event: {
+        title: string
+        description?: string
+        starts_at: string
+        ends_at?: string
+        timezone: string
+        mode: string
+        location?: string
+        online_url?: string
+        capacity?: number
+        waitlist?: boolean
+        ticket_price?: number
+        speakers?: string[]
+        recording_consent?: boolean
+      },
+    ) => api.post<CommunityEvent>(`/communities/${id}/events`, event),
+    register: (eventId: string) => api.post<CommunityEvent>(`/events/${eventId}/register`, {}),
+    unregister: (eventId: string) => api.post<CommunityEvent>(`/events/${eventId}/unregister`, {}),
+    cancelEvent: (eventId: string) => api.post<{ cancelled: boolean; told: number }>(`/events/${eventId}/cancel`, {}),
+    attendees: (eventId: string) =>
+      api.get<{ items: Array<{ user_id: string; status: string; paid: boolean; created_at: string }> }>(`/events/${eventId}/attendees`),
+    listings: (id: string) =>
+      api.get<{ items: Array<{ id: string; title: string; description: string; kind: string; customer_price: string; currency: string; images: string[]; vendor?: { display_name?: string } | null; listed_by: string }> }>(
+        `/communities/${id}/listings`,
+      ),
+    addListing: (id: string, productId: string) => api.post(`/communities/${id}/listings`, { product_id: productId }),
+    removeListing: (id: string, productId: string) => api.delete(`/communities/${id}/listings/${productId}`),
+    analytics: (id: string, days = 30) =>
+      api.get<{
+        window_days: number
+        definitions: Record<string, string>
+        members_total: number
+        new_members: number
+        via_invitations: number
+        activated: number
+        active_contributors: number
+        posts: number | null
+        comments: number | null
+        unanswered: number | null
+        pending_posts: number | null
+        moderation_actions: number
+        event_registrations: number
+        upcoming_events: number
+        money: { sales: number; owner_gross: string; renewals: number; cancellations: number; refunds: string; currency: string } | null
+      }>(`/communities/${id}/analytics?days=${days}`),
+    /** Admin: community markup, grace days, the switch for paid features. */
+    adminSettings: () =>
+      api.get<Record<'community_markup_pct' | 'community_grace_days' | 'community_paid_enabled', { value: string; default: string; updated_by: string | null; updated_at: string | null }>>(
+        '/admin/community-settings',
+      ),
+    setAdminSettings: (patch: { community_markup_pct?: number; community_grace_days?: number; community_paid_enabled?: boolean }) =>
+      api.patch('/admin/community-settings', patch),
   },
 
   forums: {

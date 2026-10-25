@@ -12,6 +12,7 @@ import {
   Trophy,
   UserCog,
   Users,
+  UsersRound,
   Wallet,
   type LucideIcon,
 } from 'lucide-react'
@@ -29,6 +30,7 @@ import {
   Payouts,
   System,
   Team,
+  CommunitiesSettings,
 } from '@/components/adminDash/sections'
 import PoolAdmin from '@/pages/app/PoolAdmin'
 import { cn } from '@/lib/utils'
@@ -47,6 +49,7 @@ const SECTIONS: Section[] = [
   { id: 'disputes', label: 'Disputes', icon: Gavel, render: () => <Disputes /> },
   { id: 'moderation', label: 'Moderation', icon: Layers, render: () => <Moderation /> },
   { id: 'team', label: 'Team', icon: UserCog, render: () => <Team /> },
+  { id: 'communities', label: 'Communities', icon: UsersRound, render: () => <CommunitiesSettings /> },
   { id: 'system', label: 'System', icon: Activity, render: () => <System /> },
 ]
 /** Older addresses that now open a section. */

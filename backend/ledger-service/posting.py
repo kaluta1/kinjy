@@ -254,16 +254,14 @@ def refund_to_balance(
     db.flush()
 
     lines: list[models.Entry] = []
+    cash_seen = False
     for row in db.scalars(select(models.Entry).where(models.Entry.journal_id == journal.id)).all():
         debit = (Decimal(row.credit or 0) * ratio).quantize(Decimal("0.01"))
         credit = (Decimal(row.debit or 0) * ratio).quantize(Decimal("0.01"))
         if row.account == models.ACC_CASH:
-            # Owed back to the payer, not paid out yet.
-            lines.append(models.Entry(
-                id=new_id("led"), journal_id=refund.id, account=models.ACC_MEMBER_PAYABLE,
-                beneficiary_id=member_id, role="refund", debit=Decimal("0"), credit=amount,
-                currency=row.currency, reason="refund_to_balance",
-            ))
+            # A sale has a cash line per share (the seller's, Kinjy's): the
+            # payer is owed the refunded amount once, whatever their number.
+            cash_seen = True
             continue
         if not debit and not credit:
             continue
@@ -275,6 +273,16 @@ def refund_to_balance(
             wallet = get_wallet(db, row.beneficiary_id, row.currency)
             wallet.available -= debit
             wallet.lifetime_earned -= debit
+        elif debit and row.beneficiary_id and row.account == models.ACC_VENDOR_PAYABLE:
+            # A seller's (or community owner's) proceeds come back in proportion.
+            get_wallet(db, row.beneficiary_id, row.currency).available -= debit
+    if cash_seen:
+        # Owed back to the payer, not paid out yet.
+        lines.append(models.Entry(
+            id=new_id("led"), journal_id=refund.id, account=models.ACC_MEMBER_PAYABLE,
+            beneficiary_id=member_id, role="refund", debit=Decimal("0"), credit=amount,
+            currency=journal.currency, reason="refund_to_balance",
+        ))
 
     gap = sum((e.credit for e in lines), Decimal("0")) - sum((e.debit for e in lines), Decimal("0"))
     if gap:
@@ -361,6 +369,8 @@ _WHAT = {
     "marketplace_order": "completed an order",
     "creator_revenue": "earned creator revenue",
     "service_fee": "paid for a service",
+    "community_membership": "joined a paid community",
+    "community_ticket": "bought an event ticket",
 }
 
 

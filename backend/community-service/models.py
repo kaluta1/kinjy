@@ -74,6 +74,9 @@ class Community(Base):
     # Sent once to each new member when they are let in.
     welcome_message: Mapped[str | None] = mapped_column(Text)
     rules: Mapped[str] = mapped_column(Text, default="", server_default="")
+    # free | paid (joining needs an entitlement) | mixed (free to join; some
+    # spaces and events need one).
+    access_model: Mapped[str] = mapped_column(String(10), default="free", server_default="free")
 
 
 class CommunitySpace(Base):
@@ -86,6 +89,8 @@ class CommunitySpace(Base):
     space: Mapped[str] = mapped_column(String(20), primary_key=True)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     position: Mapped[int] = mapped_column(Integer, default=0)
+    # In a mixed community: only members with a paid entitlement open it.
+    paid_only: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
 
 
 class CommunityAudit(Base):
@@ -125,7 +130,7 @@ class Membership(Base):
     community_id: Mapped[str] = mapped_column(String(40), index=True)
     user_id: Mapped[str] = mapped_column(String(40), index=True)
     role: Mapped[str] = mapped_column(String(20), default="member")  # member|moderator|owner
-    status: Mapped[str] = mapped_column(String(20), default="active")  # pending|active|banned
+    status: Mapped[str] = mapped_column(String(20), default="active")  # pending|active|banned|lapsed (paid access ended)
     joined_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
     # Pinned to the member's sidebar, and when. On the membership because a pin
     # belongs to somebody *in* the group: leaving deletes the row and the pin
@@ -283,3 +288,216 @@ class ContentSafetyClassification(Base):
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, onupdate=_now)
+
+
+# --- Phase 2: paid access, events, listings (25/10) -------------------------
+#
+# Payment state and access are kept apart on purpose: a CommunityPayment says
+# what money moved, a CommunityEntitlement says what the member may open, and
+# only the second is read by access checks.
+
+
+class PlatformSetting(Base):
+    """A platform rule an administrator adjusts (community markup, grace days...)."""
+
+    __tablename__ = "platform_settings"
+    __table_args__ = {"schema": SCHEMA}
+
+    key: Mapped[str] = mapped_column(String(60), primary_key=True)
+    value: Mapped[str] = mapped_column(String(200))
+    updated_by: Mapped[str | None] = mapped_column(String(40))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
+class CommunityTier(Base):
+    """A way in to a paid community: its owner's price, per period or once."""
+
+    __tablename__ = "community_tiers"
+    __table_args__ = (Index("ix_community_tiers_community", "community_id", "position"), {"schema": SCHEMA})
+
+    id: Mapped[str] = mapped_column(String(40), primary_key=True, default=lambda: new_id("tier"))
+    community_id: Mapped[str] = mapped_column(String(40))
+    name: Mapped[str] = mapped_column(String(80))
+    description: Mapped[str] = mapped_column(Text, default="")
+    benefits: Mapped[str] = mapped_column(Text, default="")  # one per line
+    # The owner's price. What the member pays adds Kinjy's markup on top.
+    price: Mapped[float] = mapped_column(Numeric(18, 2))
+    period: Mapped[str] = mapped_column(String(10))  # monthly|annual|one_time
+    trial_days: Mapped[int] = mapped_column(Integer, default=0)
+    # A lower owner price for the first period, if any.
+    intro_price: Mapped[float | None] = mapped_column(Numeric(18, 2))
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
+    position: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
+class CommunityCoupon(Base):
+    __tablename__ = "community_coupons"
+    __table_args__ = (UniqueConstraint("community_id", "code", name="uq_community_coupon"), {"schema": SCHEMA})
+
+    id: Mapped[str] = mapped_column(String(40), primary_key=True, default=lambda: new_id("cpn"))
+    community_id: Mapped[str] = mapped_column(String(40))
+    code: Mapped[str] = mapped_column(String(32))
+    # 1..100, off the owner's price of the first payment only.
+    percent_off: Mapped[int] = mapped_column(Integer)
+    max_redemptions: Mapped[int | None] = mapped_column(Integer)
+    redemptions: Mapped[int] = mapped_column(Integer, default=0)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
+class CommunityQuote(Base):
+    """A price computed on the server for one member and one tier or ticket.
+
+    The payment is created for exactly this total and credited against it; a
+    quote is used once (``payment_ref`` unique) and expires.
+    """
+
+    __tablename__ = "community_quotes"
+    __table_args__ = {"schema": SCHEMA}
+
+    id: Mapped[str] = mapped_column(String(40), primary_key=True, default=lambda: new_id("cq"))
+    community_id: Mapped[str] = mapped_column(String(40), index=True)
+    user_id: Mapped[str] = mapped_column(String(40), index=True)
+    kind: Mapped[str] = mapped_column(String(10))  # membership|ticket
+    tier_id: Mapped[str | None] = mapped_column(String(40))
+    event_id: Mapped[str | None] = mapped_column(String(40))
+    coupon_id: Mapped[str | None] = mapped_column(String(40))
+    owner_price: Mapped[float] = mapped_column(Numeric(18, 2))
+    markup_pct: Mapped[float] = mapped_column(Numeric(6, 2))
+    markup: Mapped[float] = mapped_column(Numeric(18, 2))
+    total: Mapped[float] = mapped_column(Numeric(18, 2))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    payment_ref: Mapped[str | None] = mapped_column(String(80), unique=True)
+
+
+class CommunityEntitlement(Base):
+    """What a member may open in a community, whatever the payments did.
+
+    status: trial | active | grace | expired | cancelled | refunded. Access is
+    granted for trial, active and grace. One per member and community.
+    """
+
+    __tablename__ = "community_entitlements"
+    __table_args__ = (
+        UniqueConstraint("community_id", "user_id", name="uq_community_entitlement"),
+        Index("ix_entitlements_due", "status", "period_end"),
+        {"schema": SCHEMA},
+    )
+
+    id: Mapped[str] = mapped_column(String(40), primary_key=True, default=lambda: new_id("ent"))
+    community_id: Mapped[str] = mapped_column(String(40))
+    user_id: Mapped[str] = mapped_column(String(40), index=True)
+    tier_id: Mapped[str] = mapped_column(String(40))
+    status: Mapped[str] = mapped_column(String(12), default="active")
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    # Null for one-time access, which does not end.
+    period_end: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    grace_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    cancel_at_period_end: Mapped[bool] = mapped_column(Boolean, default=False)
+    trial_used: Mapped[bool] = mapped_column(Boolean, default=False)
+    # The period end a renewal reminder was sent for: one reminder per period.
+    reminded_for: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
+class CommunityPayment(Base):
+    """Money that moved for a community: once per payment (``payment_ref`` unique)."""
+
+    __tablename__ = "community_payments"
+    __table_args__ = (Index("ix_community_payments_community", "community_id", "created_at"), {"schema": SCHEMA})
+
+    id: Mapped[str] = mapped_column(String(40), primary_key=True, default=lambda: new_id("cpay"))
+    community_id: Mapped[str] = mapped_column(String(40))
+    user_id: Mapped[str] = mapped_column(String(40), index=True)
+    quote_id: Mapped[str] = mapped_column(String(40))
+    payment_ref: Mapped[str] = mapped_column(String(80), unique=True)
+    kind: Mapped[str] = mapped_column(String(10))  # membership|ticket
+    tier_id: Mapped[str | None] = mapped_column(String(40))
+    event_id: Mapped[str | None] = mapped_column(String(40))
+    owner_price: Mapped[float] = mapped_column(Numeric(18, 2))
+    markup: Mapped[float] = mapped_column(Numeric(18, 2))
+    total: Mapped[float] = mapped_column(Numeric(18, 2))
+    coupon_code: Mapped[str | None] = mapped_column(String(32))
+    period_from: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    period_to: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    status: Mapped[str] = mapped_column(String(20), default="paid")  # paid|partially_refunded|refunded
+    refunded: Mapped[float] = mapped_column(Numeric(18, 2), default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
+class CommunityRefund(Base):
+    """A refund of (part of) a community payment, once per request id."""
+
+    __tablename__ = "community_refunds"
+    __table_args__ = {"schema": SCHEMA}
+
+    id: Mapped[str] = mapped_column(String(40), primary_key=True)
+    payment_id: Mapped[str] = mapped_column(String(40), index=True)
+    amount: Mapped[float] = mapped_column(Numeric(18, 2))
+    reason: Mapped[str] = mapped_column(String(300), default="")
+    actor_id: Mapped[str] = mapped_column(String(40))
+    status: Mapped[str] = mapped_column(String(20), default="pending")  # pending|done|failed
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
+class CommunityEvent(Base):
+    __tablename__ = "community_events"
+    __table_args__ = (Index("ix_community_events_when", "community_id", "starts_at"), {"schema": SCHEMA})
+
+    id: Mapped[str] = mapped_column(String(40), primary_key=True, default=lambda: new_id("evt"))
+    community_id: Mapped[str] = mapped_column(String(40))
+    host_id: Mapped[str] = mapped_column(String(40))
+    title: Mapped[str] = mapped_column(String(200))
+    description: Mapped[str] = mapped_column(Text, default="")
+    # Stored in UTC; ``timezone`` is where it happens (IANA name), for display.
+    starts_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    ends_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    timezone: Mapped[str] = mapped_column(String(60), default="UTC")
+    mode: Mapped[str] = mapped_column(String(12), default="online")  # online|in_person|hybrid
+    location: Mapped[str | None] = mapped_column(String(300))
+    # Shown to registered attendees only.
+    online_url: Mapped[str | None] = mapped_column(String(500))
+    capacity: Mapped[int | None] = mapped_column(Integer)
+    waitlist: Mapped[bool] = mapped_column(Boolean, default=True)
+    # The owner's ticket price; null or 0 = free.
+    ticket_price: Mapped[float | None] = mapped_column(Numeric(18, 2))
+    speakers: Mapped[str] = mapped_column(Text, default="")
+    recording_consent: Mapped[bool] = mapped_column(Boolean, default=False)
+    recording_url: Mapped[str | None] = mapped_column(String(500))
+    status: Mapped[str] = mapped_column(String(12), default="scheduled")  # scheduled|cancelled
+    registered_count: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
+class EventRegistration(Base):
+    __tablename__ = "event_registrations"
+    __table_args__ = (
+        UniqueConstraint("event_id", "user_id", name="uq_event_registration"),
+        Index("ix_event_registrations_queue", "event_id", "status", "created_at"),
+        {"schema": SCHEMA},
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    event_id: Mapped[str] = mapped_column(String(40))
+    user_id: Mapped[str] = mapped_column(String(40), index=True)
+    status: Mapped[str] = mapped_column(String(12))  # registered|waitlisted|cancelled
+    payment_id: Mapped[str | None] = mapped_column(String(40))
+    reminded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
+class CommunityListing(Base):
+    """A member's marketplace product shown in a community's marketplace space."""
+
+    __tablename__ = "community_listings"
+    __table_args__ = (UniqueConstraint("community_id", "product_id", name="uq_community_listing"), {"schema": SCHEMA})
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    community_id: Mapped[str] = mapped_column(String(40), index=True)
+    product_id: Mapped[str] = mapped_column(String(40))
+    added_by: Mapped[str] = mapped_column(String(40))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)

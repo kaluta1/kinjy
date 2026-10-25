@@ -1,11 +1,15 @@
 import { useEffect, useState } from 'react'
 import { Link, useLocation } from 'react-router'
-import { ArrowLeft, Bell, BellOff, ClipboardCheck, Globe, History, Link2, Lock, LogOut, Pencil, Pin, PinOff, ScrollText, UsersRound } from 'lucide-react'
+import { ArrowLeft, BarChart3, Bell, BellOff, ClipboardCheck, Coins, Globe, History, Link2, Lock, LogOut, Pencil, Pin, PinOff, ScrollText, UsersRound } from 'lucide-react'
 import Composer from '@/components/social/Composer'
 import LinkQr from '@/components/ui-kit/LinkQr'
 import PostCard from '@/components/social/PostCard'
 import { CommunityMembersDialog, CommunitySettingsDialog } from '@/components/community/CommunityDialogs'
 import { AuditDialog, PendingPostsDialog } from '@/components/community/CommunityModeration'
+import { AnalyticsDialog, PaidAccessDialog } from '@/components/community/CommunityOwnerTools'
+import CommunityEvents from '@/components/community/CommunityEvents'
+import CommunityMarket from '@/components/community/CommunityMarket'
+import CommunityMembership from '@/components/community/CommunityMembership'
 import { useApi } from '@/hooks/useApi'
 import { useAuth } from '@/hooks/useAuth'
 import { ApiError, kaluta, type CommunityPostSpace, type Post } from '@/lib/api'
@@ -58,6 +62,10 @@ export default function CommunityView({
   const communityId = detail.data?.id ?? ''
   // Which space is shown (all of them by default) and in what order.
   const [space, setSpace] = useState<CommunityPostSpace | ''>('')
+  // Events and the marketplace are sections of their own, not streams of posts.
+  const [section, setSection] = useState<'posts' | 'events' | 'marketplace'>('posts')
+  const [showPaid, setShowPaid] = useState(false)
+  const [showAnalytics, setShowAnalytics] = useState(false)
   const [sort, setSort] = useState<'latest' | 'top'>('latest')
   const feed = useApi(
     () => (communityId ? kaluta.communities.feed(communityId, 20, 0, space || undefined, sort) : Promise.resolve(null)),
@@ -448,8 +456,22 @@ export default function CommunityView({
             </details>
           )}
 
+          {user && community.access_model && community.access_model !== 'free' && (
+            <CommunityMembership communityId={community.id} slug={community.slug} onChanged={refresh} />
+          )}
+
           {isSteward && (
             <div className="flex flex-wrap gap-2">
+              {isOwner && (
+                <button type="button" onClick={() => setShowPaid(true)}
+                  className="inline-flex items-center gap-1.5 rounded-full border border-[var(--cloud-border)] px-4 py-2 text-sm font-semibold text-text-mid hover:border-gold/50 hover:text-gold-soft">
+                  <Coins size={13} aria-hidden="true" /> Paid access
+                </button>
+              )}
+              <button type="button" onClick={() => setShowAnalytics(true)}
+                className="inline-flex items-center gap-1.5 rounded-full border border-[var(--cloud-border)] px-4 py-2 text-sm font-semibold text-text-mid hover:border-gold/50 hover:text-gold-soft">
+                <BarChart3 size={13} aria-hidden="true" /> Analytics
+              </button>
               <button type="button" onClick={() => setShowQueue(true)}
                 className="inline-flex items-center gap-1.5 rounded-full border border-[var(--cloud-border)] px-4 py-2 text-sm font-semibold text-text-mid hover:border-gold/50 hover:text-gold-soft">
                 <ClipboardCheck size={13} aria-hidden="true" /> Posts to approve
@@ -461,7 +483,7 @@ export default function CommunityView({
             </div>
           )}
 
-          {isMember && myPostSpaces.length > 0 ? (
+          {section !== 'posts' ? null : isMember && myPostSpaces.length > 0 ? (
             <Composer
               community={{
                 id: community.id,
@@ -518,20 +540,39 @@ export default function CommunityView({
                     key={s.id || 'all'}
                     type="button"
                     role="tab"
-                    aria-selected={space === s.id}
+                    aria-selected={section === 'posts' && space === s.id}
                     onClick={() => {
                       setFresh([])
+                      setSection('posts')
                       setSpace(s.id as CommunityPostSpace | '')
                     }}
                     className={cn(
                       'rounded-full px-3.5 py-1.5 text-xs font-semibold',
-                      space === s.id ? 'bg-gold text-ink' : 'bg-text-hi/[0.06] text-text-mid hover:bg-text-hi/[0.1]',
+                      section === 'posts' && space === s.id ? 'bg-gold text-ink' : 'bg-text-hi/[0.06] text-text-mid hover:bg-text-hi/[0.1]',
                     )}
                   >
                     {s.label}
                   </button>
                 ))}
+                {(community.spaces ?? [])
+                  .filter((s) => s.enabled && (s.id === 'events' || s.id === 'marketplace'))
+                  .map((s) => (
+                    <button
+                      key={s.id}
+                      type="button"
+                      role="tab"
+                      aria-selected={section === s.id}
+                      onClick={() => setSection(s.id as 'events' | 'marketplace')}
+                      className={cn(
+                        'rounded-full px-3.5 py-1.5 text-xs font-semibold',
+                        section === s.id ? 'bg-gold text-ink' : 'bg-text-hi/[0.06] text-text-mid hover:bg-text-hi/[0.1]',
+                      )}
+                    >
+                      {s.label}
+                    </button>
+                  ))}
               </div>
+              {section === 'posts' && (
               <label className="inline-flex items-center gap-1.5 text-xs text-text-low">
                 Order
                 <select
@@ -546,12 +587,17 @@ export default function CommunityView({
                   <option value="top">Most engaged</option>
                 </select>
               </label>
+              )}
             </div>
           )}
 
           {/* A 404 here is the private-community answer, not a broken page: the
               posts exist and are not for this viewer yet. */}
-          {feed.error ? (
+          {section === 'events' ? (
+            <CommunityEvents communityId={community.id} slug={community.slug} steward={isSteward} member={isMember} />
+          ) : section === 'marketplace' ? (
+            <CommunityMarket communityId={community.id} member={isMember} steward={isSteward} currentUserId={user?.id ?? null} />
+          ) : feed.error ? (
             <p className="cloud-card p-4 text-sm text-text-mid">
               {isMember
                 ? feed.error
@@ -594,6 +640,10 @@ export default function CommunityView({
               onChanged={refresh}
             />
           )}
+          {showPaid && isOwner && (
+            <PaidAccessDialog communityId={community.id} spaces={community.spaces ?? []} paidSpaces={community.paid_spaces ?? []} onClose={() => setShowPaid(false)} onChanged={refresh} />
+          )}
+          {showAnalytics && isSteward && <AnalyticsDialog communityId={community.id} onClose={() => setShowAnalytics(false)} />}
           {showQueue && isSteward && (
             <PendingPostsDialog communityId={community.id} onClose={() => setShowQueue(false)} onChanged={refresh} />
           )}

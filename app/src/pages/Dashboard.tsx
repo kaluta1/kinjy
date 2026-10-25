@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { Navigate, Link, useSearchParams } from 'react-router'
-import { Check, Copy, Gift, KeyRound, Link2, Lock, LogOut, Settings, ShieldCheck, SlidersHorizontal, UserRound, Wallet, type LucideIcon } from 'lucide-react'
+import { Check, Copy, Crown, Gift, KeyRound, Link2, Lock, LogOut, Settings, ShieldCheck, SlidersHorizontal, UserRound, Wallet, type LucideIcon } from 'lucide-react'
 import { useAuth } from '@/hooks/useAuth'
 import Earnings from '@/components/dashboard/Earnings'
 import Security from '@/components/dashboard/Security'
@@ -10,6 +10,7 @@ import Experience from '@/components/dashboard/Experience'
 import Privacy from '@/components/dashboard/Privacy'
 import ProfileEditor from '@/components/dashboard/ProfileEditor'
 import ShortLinks from '@/components/dashboard/ShortLinks'
+import MyMemberships from '@/components/dashboard/MyMemberships'
 import { Badge, Panel } from '@/components/dashboard/primitives'
 import LinkQr from '@/components/ui-kit/LinkQr'
 import { useShortLink } from '@/lib/shortLink'
@@ -22,6 +23,7 @@ import { cn } from '@/lib/utils'
 const TABS: ReadonlyArray<{ id: string; label: string; icon: LucideIcon }> = [
   { id: 'earnings', label: 'Earnings', icon: Wallet },
   { id: 'links', label: 'Short links', icon: Link2 },
+  { id: 'memberships', label: 'Memberships', icon: Crown },
   { id: 'profile', label: 'Profile', icon: UserRound },
   { id: 'verification', label: 'Verification', icon: ShieldCheck },
   { id: 'privacy', label: 'Privacy', icon: Lock },
@@ -30,7 +32,7 @@ const TABS: ReadonlyArray<{ id: string; label: string; icon: LucideIcon }> = [
   { id: 'account', label: 'Account', icon: Settings },
 ]
 
-type TabId = 'earnings' | 'links' | 'profile' | 'verification' | 'privacy' | 'experience' | 'security' | 'account'
+type TabId = 'earnings' | 'links' | 'memberships' | 'profile' | 'verification' | 'privacy' | 'experience' | 'security' | 'account'
 
 /**
  * The two pages an invitation can open, as short links (kinjy.com/s/<token>).
@@ -250,6 +252,7 @@ export default function Dashboard() {
           </div>
         )}
         {tab === 'links' && <ShortLinks />}
+        {tab === 'memberships' && <MyMemberships />}
         {tab === 'profile' && <ProfileEditor />}
         {tab === 'verification' && <Verification />}
         {tab === 'privacy' && <Privacy />}

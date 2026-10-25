@@ -104,7 +104,7 @@ app.include_router(payouts.router)
 
 
 class CheckoutIn(BaseModel):
-    purpose: str = Field(pattern="^(order|subscription|ad_credit|kyc_fee|tribute|referral_pool)$")
+    purpose: str = Field(pattern="^(order|subscription|ad_credit|kyc_fee|tribute|referral_pool|community)$")
     amount: Decimal = Field(gt=0)
     reference: str | None = None
     rail: str | None = Field(default=None, pattern="^(soncopay|nowpayments|mangopay|mock)$")
@@ -123,6 +123,7 @@ PURPOSE_LABELS = {
     "kyc_fee": "KinjyKYC annual verification",
     "tribute": "Kinjy tribute",
     "referral_pool": "Kinjy referral pool units",
+    "community": "Kinjy community membership or ticket",
 }
 
 
@@ -181,6 +182,13 @@ def checkout(payload: CheckoutIn, principal: CurrentUser, db: OrmSession = Depen
         )
         if paid is not None:
             raise HTTPException(status_code=409, detail="This year's verification fee is already paid")
+
+    if payload.purpose == "community":
+        # A community payment is for one server-made quote, at its total.
+        quote = community_quote((payload.reference or "")[3:]) if (payload.reference or "").startswith("cq:") else None
+        if (quote is None or quote["user_id"] != principal.user_id or quote["used"] or quote["expired"]
+                or economy.money(payload.amount) != economy.money(quote["total"])):
+            raise HTTPException(status_code=400, detail="Start community payments from the community page")
 
     if payload.purpose == "referral_pool":
         # The quantity is in the reference, the price is the server's: a
@@ -358,7 +366,7 @@ def _escrow_lines(intent: models.PaymentIntent) -> list[dict] | None:
             "label": "Marketplace order held until the buyer confirms delivery",
             "source": {"external_id": intent.user_id},
         }]
-    if intent.purpose not in ("kyc_fee", "referral_pool", "ad_credit"):
+    if intent.purpose not in ("kyc_fee", "referral_pool", "ad_credit", "community"):
         return []
     if intent.purpose == "kyc_fee" and not settings.KYC_FEE_COMMISSIONABLE:
         return []
@@ -756,6 +764,9 @@ async def _on_settled(intent: models.PaymentIntent, db: OrmSession) -> None:
     elif intent.purpose == "referral_pool":
         fulfil_pool_purchase(intent)
 
+    elif intent.purpose == "community":
+        fulfil_community_purchase(intent)
+
     elif intent.purpose == "kyc_fee":
         year = date.today().year
         record = db.scalar(
@@ -925,22 +936,97 @@ def fulfil_pool_purchase(intent: models.PaymentIntent) -> bool:
     return True
 
 
+COMMUNITY_URL = "http://community-service:8000"
+
+
+def community_quote(quote_id: str) -> dict | None:
+    if not quote_id:
+        return None
+    try:
+        response = httpx.get(f"{COMMUNITY_URL}/internal/community-quotes/{quote_id}", timeout=6)
+    except Exception as exc:
+        log.error("community quote %s unreachable: %s", quote_id, exc)
+        raise HTTPException(status_code=503, detail="The community cannot be reached right now")
+    return response.json() if response.status_code == 200 else None
+
+
+class CommunityCheckoutIn(BaseModel):
+    quote_id: str
+
+
+@app.post("/payments/community/checkout", status_code=201, tags=["community"])
+def community_checkout(payload: CommunityCheckoutIn, principal: CurrentUser, rail: str | None = None,
+                       db: OrmSession = Depends(get_db)):
+    """Pay a community quote (membership or ticket): exactly its total."""
+    quote = community_quote(payload.quote_id)
+    if quote is None or quote["user_id"] != principal.user_id:
+        raise HTTPException(status_code=404, detail="Quote not found")
+    if quote["used"] or quote["expired"]:
+        raise HTTPException(status_code=409, detail="This price has expired. Choose again.")
+    return checkout(
+        CheckoutIn(purpose="community", amount=Decimal(quote["total"]), reference=f"cq:{quote['quote_id']}",
+                   rail=rail, return_path=f"/communities/{quote['community_id']}"),
+        principal,
+        db,
+    )
+
+
+def fulfil_community_purchase(intent: models.PaymentIntent) -> bool:
+    """Credit a settled community payment, then post it to the ledger.
+
+    Access first (community-service, idempotent on the payment), money second
+    (ledger, idempotent on ``payment:{id}``): the owner's price to the owner,
+    Kinjy's markup split with the buyer's sponsor and the Leaders pool. A
+    ticket paid after the event filled up is refunded in full to the buyer's
+    balance. Returns True once everything has landed.
+    """
+    if intent.fulfilled_at is not None or intent.status == "refund_due":
+        return intent.fulfilled_at is not None
+    quote_id = (intent.reference or "")[3:]
+    try:
+        response = httpx.post(f"{COMMUNITY_URL}/internal/community-payments",
+                              json={"quote_id": quote_id, "payment_ref": intent.id, "amount": str(intent.amount)},
+                              timeout=10)
+        if response.status_code in (400, 404, 409):
+            intent.status = "refund_due"
+            log.error("community payment %s refused (%s): must be refunded", intent.id, response.text[:200])
+            return False
+        response.raise_for_status()
+        credit = response.json()
+        httpx.post(f"{LEDGER_URL}/internal/post/community-sale", json={
+            "payment_id": intent.id, "buyer_id": credit["buyer_id"], "owner_id": credit["owner_id"],
+            "owner_price": credit["owner_price"], "markup": credit["markup"], "kind": credit["kind"],
+            "community_id": credit["community_id"], "idempotency_key": f"payment:{intent.id}",
+        }, timeout=10).raise_for_status()
+        if credit.get("needs_refund"):
+            httpx.post(f"{COMMUNITY_URL}/internal/community-payments/{credit['payment_id']}/auto-refund",
+                       timeout=15).raise_for_status()
+    except Exception as exc:
+        log.error("community payment %s not credited yet: %s", intent.id, exc)
+        return False
+    intent.fulfilled_at = datetime.now(timezone.utc)
+    return True
+
+
 def reconcile_pool_purchases() -> int:
-    """Settled pool payments whose units were never credited."""
+    """Settled pool and community payments whose credit never landed."""
     from common.database import SessionLocal
 
     done = 0
     with SessionLocal() as db:
         rows = db.scalars(
             select(models.PaymentIntent).where(
-                models.PaymentIntent.purpose == "referral_pool",
+                models.PaymentIntent.purpose.in_(("referral_pool", "community")),
                 models.PaymentIntent.settled_at.is_not(None),
                 models.PaymentIntent.fulfilled_at.is_(None),
                 models.PaymentIntent.status == "finished",
             ).limit(100)
         ).all()
         for intent in rows:
-            done += fulfil_pool_purchase(intent)
+            if intent.purpose == "community":
+                done += fulfil_community_purchase(intent)
+            else:
+                done += fulfil_pool_purchase(intent)
             db.commit()
     return done
 

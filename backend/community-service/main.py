@@ -129,14 +129,49 @@ MIGRATIONS = [
     f"ALTER TABLE {models.SCHEMA}.memberships ADD COLUMN IF NOT EXISTS invite_token VARCHAR(16)",
     f"ALTER TABLE {models.SCHEMA}.memberships ADD COLUMN IF NOT EXISTS welcomed_at TIMESTAMPTZ",
     f"CREATE INDEX IF NOT EXISTS ix_community_memberships_invited_by ON {models.SCHEMA}.memberships (invited_by)",
+    # Paid access (25/10): free for every existing community.
+    f"ALTER TABLE {models.SCHEMA}.communities ADD COLUMN IF NOT EXISTS access_model VARCHAR(10) NOT NULL DEFAULT 'free'",
+    f"ALTER TABLE {models.SCHEMA}.community_spaces ADD COLUMN IF NOT EXISTS paid_only BOOLEAN NOT NULL DEFAULT FALSE",
 ]
+
+
+def _start_loops() -> None:
+    import asyncio
+    asyncio.get_event_loop().create_task(_due_loop())
+
+
+async def _due_loop() -> None:
+    """Renewal reminders, grace and expiry, event reminders. Every five minutes,
+    every worker: each step claims its rows, so nothing is sent or ended twice."""
+    import asyncio
+    from common.database import SessionLocal
+    import events as event_rules
+    import paid as paid_rules
+    while True:
+        await asyncio.sleep(300)
+        try:
+            with SessionLocal() as db:
+                await asyncio.to_thread(paid_rules.run_due, db)
+            with SessionLocal() as db:
+                await asyncio.to_thread(event_rules.remind_upcoming, db)
+        except Exception as exc:  # pragma: no cover - logged, retried next round
+            log.error("community due loop: %s", exc)
 
 app = create_app(
     name="community-service",
     schema=models.SCHEMA,
     migrations=MIGRATIONS,
     description="Communities and groups, geographic + topic forums, forum-to-knowledge.",
+    on_startup=[_start_loops],
 )
+
+import events as _events_routes  # noqa: E402  (routers need `app` created first)
+import insights as _insights_routes  # noqa: E402
+import paid as _paid_routes  # noqa: E402
+
+app.include_router(_paid_routes.router)
+app.include_router(_events_routes.router)
+app.include_router(_insights_routes.router)
 
 GEO_SCOPES = ["global", "continent", "region", "country", "state", "district", "city", "neighborhood"]
 
@@ -426,11 +461,9 @@ def join(
     community = db.get(models.Community, community_id)
     if community is None:
         raise HTTPException(status_code=404, detail="Community not found")
-    if community.kind == "paid":
-        raise HTTPException(
-            status_code=402,
-            detail="This community requires a purchase. Complete checkout in commerce-service first.",
-        )
+    if community.kind == "paid" or community.access_model == "paid":
+        if not _paid_routes.entitled(db, community, principal.user_id):
+            raise HTTPException(status_code=402, detail="This community needs a membership. Choose one to join.")
 
     existing = db.scalar(
         select(models.Membership).where(
@@ -441,6 +474,12 @@ def join(
     if existing:
         if existing.status == "banned":
             raise HTTPException(status_code=403, detail="You are banned from this community")
+        if existing.status == "lapsed":
+            # Came back with a valid entitlement (checked above): in again.
+            existing.status = "active"
+            community.members_count += 1
+            db.commit()
+            return {"joined": True, "status": "active"}
         return {"joined": True, "status": existing.status, "already": True}
 
     if community.kind == "secret" and not _invite_matches(community, invite):
@@ -867,13 +906,19 @@ def _space_view(db: OrmSession, community: models.Community, membership: models.
     """Template, spaces and the rules of the house, with what this reader may do."""
     on = space_rules.enabled_spaces(db, community)
     role = membership.role if membership and membership.status == "active" else None
+    paid_spaces = space_rules.paid_spaces(db, community)
+    entitled = _paid_routes.entitled(db, community, membership.user_id if membership else None)
+    readable = on if entitled or community.access_model != "mixed" else on - paid_spaces
     return {
+        "access_model": community.access_model or "free",
+        "paid_spaces": sorted(paid_spaces),
+        "my_entitled": entitled,
         "template": community.template or space_rules.DEFAULT_TEMPLATE,
         "spaces": space_rules.spaces_out(on),
         "post_approval": community.post_approval or "none",
         "welcome_message": community.welcome_message if role in ("owner", "moderator") else None,
         "rules": community.rules or "",
-        "my_can_post": {s: space_rules.can_post(s, role, on) for s in space_rules.POST_SPACES},
+        "my_can_post": {s: space_rules.can_post(s, role, readable) for s in space_rules.POST_SPACES},
         "directory_open": "directory" in on or role in ("owner", "moderator"),
     }
 
@@ -1124,6 +1169,8 @@ def post_policy(community_id: str, user_id: str, db: OrmSession = Depends(get_db
     role = membership.role if active else None
     on = space_rules.enabled_spaces(db, community)
     steward = role in ("owner", "moderator")
+    if community.access_model == "mixed" and not _paid_routes.entitled(db, community, user_id):
+        on = on - space_rules.paid_spaces(db, community)
     approval = community.post_approval or "none"
     new_member = bool(
         membership and membership.joined_at
@@ -2325,7 +2372,22 @@ def community_summary(community_id: str, db: OrmSession = Depends(get_db)):
         "members_count": community.members_count,
         # Spaces switched on: posts of a space that is off are not shown.
         "spaces": sorted(space_rules.enabled_spaces(db, community)),
+        # In a mixed community, spaces for paying members only.
+        "paid_spaces": sorted(space_rules.paid_spaces(db, community)) if community.access_model == "mixed" else [],
     }
+
+
+@app.get("/internal/communities/{community_id}/reader/{user_id}", tags=["internal"])
+def community_reader(community_id: str, user_id: str, db: OrmSession = Depends(get_db)):
+    """The spaces one person may read here: all that are on, less the paid ones
+    unless they have paid access (or run the community)."""
+    community = _resolve(db, community_id)
+    if community is None:
+        raise HTTPException(status_code=404, detail="Community not found")
+    on = space_rules.enabled_spaces(db, community)
+    if community.access_model == "mixed" and not _paid_routes.entitled(db, community, user_id):
+        on = on - space_rules.paid_spaces(db, community)
+    return {"spaces": sorted(on), "entitled": _paid_routes.entitled(db, community, user_id)}
 
 
 @app.get("/internal/communities/{community_id}/post-audience", tags=["internal"])

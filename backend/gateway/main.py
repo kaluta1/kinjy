@@ -57,6 +57,9 @@ ROUTES: dict[str, str] = {
     "/api/communities": "http://community-service:8000",
     # Community templates and spaces (24/10).
     "/api/community-templates": "http://community-service:8000",
+    # Community events and a member's paid memberships (25/10).
+    "/api/events": "http://community-service:8000",
+    "/api/me/community-memberships": "http://community-service:8000",
     "/api/forums": "http://community-service:8000",
     "/api/discover": "http://community-service:8000",
     "/api/threads": "http://community-service:8000",
@@ -104,6 +107,7 @@ ADMIN_ROUTES: dict[str, str] = {
     "/api/admin/pool-refunds": "http://payment-service:8000",
     "/api/admin/kyc": "http://payment-service:8000",
     "/api/admin/fraud": "http://auth-service:8000",
+    "/api/admin/community-settings": "http://community-service:8000",
     "/api/admin/payouts": "http://payment-service:8000",
     "/api/admin/memorials": "http://memorial-service:8000",
     "/api/admin/ads": "http://commerce-service:8000",
