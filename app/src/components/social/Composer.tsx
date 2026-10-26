@@ -2,11 +2,8 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Link } from 'react-router'
 import {
-  Clapperboard,
   FileText,
   Globe2,
-  Languages,
-  Newspaper,
   Image as ImageIcon,
   Loader2,
   Lock,
@@ -23,7 +20,16 @@ import { useAuth } from '@/hooks/useAuth'
 import { useMyProfile } from '@/hooks/useMyProfile'
 import { useAppTheme } from '@/components/appdemo/theme'
 import MemberAvatar from './MemberAvatar'
-import { ApiError, kaluta, type CommunityPostSpace, type Post, type UploadedMedia } from '@/lib/api'
+import {
+  ApiError,
+  kaluta,
+  type CommunityPostSpace,
+  type OneToManyCapabilities,
+  type OneToManyTarget,
+  type Post,
+  type UploadedMedia,
+} from '@/lib/api'
+import { ONE_TO_MANY_OPTIONS } from '@/lib/oneToMany'
 import RichTextEditor from './RichTextEditor'
 import { MentionList, useMentionSuggest } from './MentionSuggest'
 import { onChange } from '@/lib/live'
@@ -33,23 +39,16 @@ import { cn } from '@/lib/utils'
 
 const MAX = 20000
 
-/** "Translate ×4" — the platform's four other languages. */
-const TRANSLATE_LANGS = ['en', 'sw', 'fr', 'ar', 'zh']
-
 /**
- * One-to-Many (blueprint §Creator Studio), the way /app shows it.
- *
- * These are *declarations of intent*, not transformations: the pipeline that
- * would turn one post into a short, a newsletter and four translations does
- * not exist yet. The chips record what the author asked for so the post
- * carries it, and the strip says plainly that the work is queued rather than
- * done — a chip that silently did nothing would be the worse lie.
+ * One-to-Many: once the post exists, creator-service also makes it into a
+ * short video, a newsletter draft and/or its four translations, in the
+ * background. A chip is only offered when the server can really do it.
  */
-const ONE_TO_MANY = [
-  { id: 'short', icon: Clapperboard, label: 'Short video' },
-  { id: 'newsletter', icon: Newspaper, label: 'Newsletter' },
-  { id: 'translate', icon: Languages, label: 'Translate ×4' },
-] as const
+const ONE_TO_MANY_NAMES: Record<OneToManyTarget, string> = {
+  short_video: 'a short video',
+  newsletter: 'a newsletter draft',
+  translation: 'four translations',
+}
 
 /**
  * Mirrors HASHTAG_RE in social-service. Keeping the two in step matters: a tag
@@ -194,7 +193,8 @@ export default function Composer({
   const [articleUploading, setArticleUploading] = useState(false)
   const [visibility, setVisibility] = useState<string>(community ? 'community' : 'public')
   const [circleId, setCircleId] = useState('')
-  const [extras, setExtras] = useState<string[]>([])
+  const [extras, setExtras] = useState<OneToManyTarget[]>([])
+  const [oneToMany, setOneToMany] = useState<OneToManyCapabilities | null>(null)
   const [provenance, setProvenance] = useState<string>('original')
   const uploadInline = useCallback(
     async (file: File) => {
@@ -239,6 +239,23 @@ export default function Composer({
   // Declared, not detected: the language gateway can only separate scripts, so
   // an author saying "this is Swahili" beats the server guessing "English".
   const [lang, setLang] = useState(i18n.language.slice(0, 2))
+  // What One-to-Many can really make for a post in this language, asked when
+  // the composer opens. A chip it cannot fulfil is greyed out with the reason.
+  useEffect(() => {
+    if (!open) return
+    let live = true
+    kaluta.creators
+      .capabilities(lang)
+      .then((r) => {
+        if (!live) return
+        setOneToMany(r.targets)
+        setExtras((xs) => xs.filter((x) => r.targets[x]?.available))
+      })
+      .catch(() => live && setOneToMany(null))
+    return () => {
+      live = false
+    }
+  }, [open, lang])
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   // Separate from `error`: the post succeeded, and only the extra formats have
@@ -418,29 +435,16 @@ export default function Composer({
       // a failed publish.
       let publishNote: string | null = null
       if (extras.length > 0) {
-        const targets = extras
-          .map((id) => ({ short: 'short_video', newsletter: 'newsletter', translate: 'translation' })[id])
-          .filter(Boolean) as string[]
-        const plain = kind === 'article' ? htmlToText(body) : body.trim()
+        const names = extras.map((x) => ONE_TO_MANY_NAMES[x])
+        const asked = names.length > 1 ? `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}` : names[0]
         try {
-          const job = await kaluta.creators.publish({
-            source_text: plain,
-            source_lang: lang,
-            source_ref: post.id,
-            targets,
-            target_langs: extras.includes('translate')
-              ? TRANSLATE_LANGS
-              : [lang],
-          })
-          const skipped = job.unsupported.length
-            ? ` ${job.unsupported.join(', ')} still needs a media pipeline.`
-            : ''
-          publishNote = `Posted. ${job.ready} of ${job.outputs} formats produced.${skipped}`
+          await kaluta.creators.publish({ source_ref: post.id, targets: extras })
+          publishNote = `Posted. Making ${asked} from it now: open "Other formats" on the post to follow them.`
         } catch (err) {
           publishNote =
             err instanceof ApiError
-              ? `Posted, but the publishing engine refused: ${err.message}`
-              : 'Posted, but the publishing engine could not be reached.'
+              ? `Posted, but ${asked} could not be started: ${err.message}`
+              : `Posted, but ${asked} could not be started. You can start them from "Other formats" on the post.`
         }
       }
 
@@ -825,24 +829,28 @@ export default function Composer({
               </span>
             </label>
 
-            {/* One-to-Many, as /app presents it. */}
+            {/* One-to-Many: also made from the post once it is out. */}
             <div className="mt-3 rounded-card-md border border-indigo/25 bg-indigo/8 p-3">
-              <p className="mb-2 flex items-center gap-1.5 text-[0.68rem] font-bold uppercase tracking-wider text-sky">
-                <Sparkles size={11} aria-hidden="true" /> One-to-Many · also create
+              <p className={cn('mb-2 flex items-center gap-1.5 text-xs font-semibold', tok.mid)}>
+                <Sparkles size={12} className="text-sky" aria-hidden="true" /> Also make from this post
               </p>
               <div className="flex flex-wrap gap-1.5">
-                {ONE_TO_MANY.map((o) => {
+                {ONE_TO_MANY_OPTIONS.map((o) => {
                   const on = extras.includes(o.id)
+                  const cap = oneToMany?.[o.id]
+                  const unavailable = !cap?.available
                   return (
                     <button
                       key={o.id}
                       type="button"
                       aria-pressed={on}
+                      disabled={unavailable}
+                      title={cap && unavailable ? cap.reason ?? undefined : undefined}
                       onClick={() =>
                         setExtras((xs) => (on ? xs.filter((x) => x !== o.id) : [...xs, o.id]))
                       }
                       className={cn(
-                        'inline-flex items-center gap-1.5 rounded-full px-3 py-1.5 text-xs font-semibold',
+                        'inline-flex items-center gap-1.5 rounded-full px-3 py-1.5 text-xs font-semibold disabled:opacity-40',
                         on
                           ? 'bg-gradient-to-br from-gold-soft to-gold text-ink'
                           : cn(tok.subtleBg, tok.mid, tok.hoverBg),
@@ -853,11 +861,24 @@ export default function Composer({
                   )
                 })}
               </div>
-              {extras.length > 0 && (
-                <p className={cn('mt-2 text-[0.68rem]', tok.low)}>
-                  Recorded with the post. The pipeline that produces these is not built yet, so
-                  nothing is generated today — this is a request, not a result.
-                </p>
+              {oneToMany === null ? (
+                <p className={cn('mt-2 text-[0.7rem]', tok.low)}>Checking what can be made…</p>
+              ) : (
+                <>
+                  {ONE_TO_MANY_OPTIONS.filter((o) => !oneToMany[o.id].available).map((o) => (
+                    <p key={o.id} className={cn('mt-2 text-[0.7rem]', tok.low)}>
+                      {o.label}: {oneToMany[o.id].reason}
+                    </p>
+                  ))}
+                  {extras.length > 0 && (
+                    <p className={cn('mt-2 text-[0.7rem]', tok.low)}>
+                      Made in the background once you post, from the post itself, and visible only to you under
+                      "Other formats" on the post.
+                      {extras.includes('newsletter') && ' The newsletter is a draft: nothing is sent.'}
+                      {extras.includes('translation') && ' Translations are kept for you, not posted.'}
+                    </p>
+                  )}
+                </>
               )}
             </div>
 

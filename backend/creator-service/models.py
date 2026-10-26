@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import date, datetime, timezone
 from decimal import Decimal
 
-from sqlalchemy import Boolean, Date, DateTime, Integer, Numeric, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, Date, DateTime, Float, Integer, Numeric, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from common.database import Base
@@ -68,11 +68,23 @@ class PublishingJob(Base):
     source_lang: Mapped[str] = mapped_column(String(5), default="en")
     targets: Mapped[str] = mapped_column(String(255))     # csv of TARGETS
     target_langs: Mapped[str | None] = mapped_column(String(120))
-    status: Mapped[str] = mapped_column(String(20), default="queued")  # queued|running|done|failed
+    status: Mapped[str] = mapped_column(String(20), default="queued")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    # One job per (creator, post): asking again returns it instead of a second
+    # set of outputs. NULL on jobs made before the durable pipeline.
+    idem_key: Mapped[str | None] = mapped_column(String(120))
+    updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class PublishingOutput(Base):
+    """One thing a job produces: a short video, a newsletter draft, one translation.
+
+    Rows with ``pipeline = 'v2'`` are the durable queue the worker in
+    onetomany.py drains: claimed with a lease, retried a bounded number of
+    times, and failed for good when they run out. Older rows (``pipeline`` NULL)
+    are history and are only touched by the backfill an admin runs.
+    """
+
     __tablename__ = "publishing_outputs"
     __table_args__ = {"schema": SCHEMA}
 
@@ -88,6 +100,29 @@ class PublishingOutput(Base):
     provenance: Mapped[str] = mapped_column(String(20), default="ai_generated")
     error: Mapped[str | None] = mapped_column(String(300))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+    STATUSES = ("queued", "processing", "completed", "failed", "cancelled")
+
+    pipeline: Mapped[str | None] = mapped_column(String(10))
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    max_attempts: Mapped[int] = mapped_column(Integer, default=3)
+    lease_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    next_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # The post as it stood when this was produced; a newer one makes it stale.
+    source_revision: Mapped[str | None] = mapped_column(String(40))
+    provider: Mapped[str | None] = mapped_column(String(40))
+    # Newsletter draft: subject, preview line, HTML (sanitized) - `content` is its plain text.
+    title: Mapped[str | None] = mapped_column(String(300))
+    preview_text: Mapped[str | None] = mapped_column(String(300))
+    content_html: Mapped[str | None] = mapped_column(Text)
+    # The author changed the draft; regenerating must not silently replace it.
+    user_edited: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Short video: the restricted asset in media-service.
+    media_id: Mapped[str | None] = mapped_column(String(40))
+    duration_s: Mapped[float | None] = mapped_column(Float)
 
 
 class Subscription(Base):

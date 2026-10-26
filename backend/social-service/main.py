@@ -3528,6 +3528,41 @@ def readable_posts(payload: ReadableIn, db: OrmSession = Depends(get_db)):
     return {"post_ids": [item["id"] for item in kept]}
 
 
+@app.get("/internal/posts/{post_id}/source", tags=["internal"])
+def post_source(post_id: str, db: OrmSession = Depends(get_db)):
+    """A post as One-to-Many (creator-service) needs it: who wrote it, who may
+    read it, its text and its pictures, and when it last changed.
+
+    creator-service works from this rather than from what the composer sent, so
+    nothing it produces can say more than the post does, and it can tell when
+    the post was edited, hidden or deleted after it was asked for.
+    """
+    post = db.get(models.Post, post_id)
+    if post is None:
+        raise HTTPException(status_code=404, detail="Post not found")
+    media = db.scalars(
+        select(models.PostMedia).where(models.PostMedia.post_id == post.id).order_by(models.PostMedia.position)
+    ).all()
+    author = _authors({post.author_id}).get(post.author_id) or {}
+    revision = (post.edited_at or post.created_at).isoformat() if (post.edited_at or post.created_at) else ""
+    return {
+        "id": post.id,
+        "author_id": post.author_id,
+        "author_name": author.get("display_name"),
+        "author_handle": author.get("handle"),
+        "status": post.status,
+        "visibility": post.visibility,
+        "circle_id": post.circle_id,
+        "community_id": post.community_id,
+        "format": post.format,
+        "lang": post.lang,
+        "body": post.body or "",
+        "mature": bool(post.mature),
+        "revision": revision,
+        "media": [{"media_id": m.media_id, "kind": m.kind} for m in media],
+    }
+
+
 @app.get("/shorts", tags=["shorts"])
 def shorts(
     principal: MaybeUser,

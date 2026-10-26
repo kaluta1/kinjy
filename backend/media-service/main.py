@@ -32,6 +32,7 @@ import profileimages
 import imagesize
 import poster as videocover
 import preview
+import shortvideo
 import signatures
 import uploadcenter
 
@@ -1597,6 +1598,147 @@ def discard_post_media(asset_id: str, payload: DiscardIn, db: OrmSession = Depen
     _discard_bytes(asset)
     db.delete(asset)
     db.commit()
+
+
+# --- One-to-Many: a short video rendered from a post ---------------------------
+
+class RenderShortIn(BaseModel):
+    owner_id: str = Field(min_length=1, max_length=40)
+    # One render per output slot: a retry after a crash finds the file it made.
+    job_ref: str = Field(min_length=1, max_length=80, pattern=r"^[A-Za-z0-9_.:-]+$")
+    # The post's text; cut into title cards here, so every caller cuts alike.
+    text: str = Field(default="", max_length=20000)
+    image_ids: list[str] = Field(default_factory=list, max_length=10)
+    byline: str | None = Field(default=None, max_length=120)
+
+
+# One encode at a time: it is the heaviest thing this service does, and the
+# uploads being served next to it must not wait behind four of them.
+_render_lock = threading.Lock()
+
+
+@app.get("/internal/media/render-capabilities", tags=["internal"])
+def render_capabilities():
+    ok, reason = shortvideo.available()
+    return {
+        "short_video": {
+            "available": ok,
+            "reason": reason,
+            "unsupported_langs": list(shortvideo.UNSUPPORTED_LANGS),
+        }
+    }
+
+
+def _picture_source(asset: models.Asset, folder: Path) -> Path | None:
+    """A local file to draw a post picture from: its feed copy, its original,
+    or a copy fetched from UploadCenter."""
+    for candidate in (asset.preview_path, asset.storage_path):
+        if candidate and os.path.exists(candidate):
+            return Path(candidate)
+    if asset.provider != "uploadcenter" or not asset.external_id:
+        return None
+    target = folder / f"{asset.id}.src"
+    client, response = uploadcenter.open_stream(_remote_link(asset))
+    try:
+        if response.status_code != 200:
+            return None
+        written = 0
+        with target.open("wb") as out:
+            for chunk in response.iter_bytes():
+                written += len(chunk)
+                if written > 40 * 1024 * 1024:
+                    return None
+                out.write(chunk)
+    finally:
+        response.close()
+        client.close()
+    return target
+
+
+@app.post("/internal/media/render-short", tags=["internal"])
+def render_short(payload: RenderShortIn, db: OrmSession = Depends(get_db)):
+    """Render a post's words and pictures into a vertical MP4 owned by its author.
+
+    Only pictures the named owner uploaded are used, so a caller cannot put
+    somebody else's photo in a video. The file is restricted from the first
+    byte: it is served on a ticket, like the post media it was made from.
+    Idempotent per ``job_ref``.
+    """
+    name = f"short-{payload.job_ref}.mp4"
+    existing = db.scalar(
+        select(models.Asset).where(
+            models.Asset.owner_id == payload.owner_id,
+            models.Asset.purpose == "short",
+            models.Asset.filename == name,
+            models.Asset.status == "ready",
+        )
+    )
+    if existing is not None and existing.storage_path and os.path.exists(existing.storage_path):
+        info = shortvideo.probe(Path(existing.storage_path))
+        return {"asset_id": existing.id, "url": existing.url, **info, "reused": True}
+
+    pictures: list[models.Asset] = []
+    for asset_id in dict.fromkeys(payload.image_ids):
+        asset = db.get(models.Asset, asset_id)
+        if (
+            asset is None
+            or asset.owner_id != payload.owner_id
+            or asset.kind != "image"
+            or asset.private
+            or asset.status != "ready"
+        ):
+            continue
+        pictures.append(asset)
+
+    asset_id = new_id("mda")
+    folder = ROOT / payload.owner_id[:12]
+    folder.mkdir(parents=True, exist_ok=True)
+    workdir = ROOT / "renders" / asset_id
+    destination = folder / f"{asset_id}.mp4"
+    workdir.mkdir(parents=True, exist_ok=True)
+    try:
+        with _render_lock:
+            sources = [src for src in (_picture_source(a, workdir) for a in pictures) if src]
+            info = shortvideo.render(shortvideo.scenes_from_text(payload.text), sources, destination, workdir, byline=payload.byline)
+    except shortvideo.RenderError as exc:
+        destination.unlink(missing_ok=True)
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except uploadcenter.UploadCenterError as exc:
+        destination.unlink(missing_ok=True)
+        raise HTTPException(status_code=503, detail="A picture of the post could not be read") from exc
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
+
+    digest = hashlib.sha256()
+    with destination.open("rb") as handle:
+        while chunk := handle.read(1024 * 1024):
+            digest.update(chunk)
+    covers = ROOT / "previews" / payload.owner_id[:12]
+    covers.mkdir(parents=True, exist_ok=True)
+    made_poster = videocover.make(destination, covers / asset_id)
+    asset = models.Asset(
+        id=asset_id,
+        owner_id=payload.owner_id,
+        filename=name,
+        content_type=shortvideo.CONTENT_TYPE,
+        size_bytes=info["size_bytes"],
+        sha256=digest.hexdigest(),
+        storage_path=str(destination),
+        url=f"{settings.MEDIA_PUBLIC_BASE}/{asset_id}",
+        kind="video",
+        # Assembled by the platform from the author's own words and pictures.
+        provenance="ai_assisted",
+        provenance_signed=False,
+        derived_from=pictures[0].id if pictures else None,
+        width=info["width"],
+        height=info["height"],
+        poster_path=str(made_poster) if made_poster else None,
+        access="restricted",
+        purpose="short",
+    )
+    db.add(asset)
+    db.commit()
+    return {"asset_id": asset.id, "url": asset.url, **info, "reused": False}
 
 
 @app.get("/internal/media/{asset_id}", tags=["internal"])

@@ -4,10 +4,11 @@ import { useLayoutEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import VideoPlayer from './VideoPlayer'
 import { useTranslation } from 'react-i18next'
-import { Bookmark, BookmarkCheck, Check, Columns2, Eye, EyeOff, Flag, HelpCircle, History, Languages, Link2, Lock, MapPin, MessageCircle, Pencil, Pin, PinOff, Repeat2, Share2, ShieldX, SlidersHorizontal, Trash2 } from 'lucide-react'
+import { Bookmark, BookmarkCheck, Check, Columns2, Eye, EyeOff, Flag, HelpCircle, History, Languages, Link2, Lock, MapPin, MessageCircle, Pencil, Pin, PinOff, Repeat2, Share2, ShieldX, SlidersHorizontal, Sparkles, Trash2 } from 'lucide-react'
 import { ApiError, kaluta, type Post, type WhyFactor } from '@/lib/api'
 import { useTopic } from '@/hooks/useRealtime'
 import EditPostDialog from './EditPostDialog'
+import { OneToManyDialog } from './OneToManyPanel'
 import { articleMediaIds, htmlToText, hydrateArticle, looksLikeHtml, readableText, sanitizeHtml } from '@/lib/richtext'
 import { useAuth } from '@/hooks/useAuth'
 import { isLink, LINK_RE, splitTrailing, TAG_OR_MENTION } from '@/lib/linkify'
@@ -306,6 +307,7 @@ export default function PostCard({
   // making that claim.
   const { user: me } = useAuth()
   const [shareOpen, setShareOpen] = useState(false)
+  const [formatsOpen, setFormatsOpen] = useState(false)
   const [withRef, setWithRef] = useState(true)
   const [shareNote, setShareNote] = useState<string | null>(null)
   const [reporting, setReporting] = useState(false)
@@ -987,6 +989,19 @@ export default function PostCard({
           </button>
         )}
 
+        {isOwn && !post.repost_of && (
+          /* One-to-Many: what was made from this post, and a way to make more.
+             The author's alone; the server refuses everyone else. */
+          <button
+            type="button"
+            onClick={() => setFormatsOpen(true)}
+            className="inline-flex items-center gap-1.5 rounded-full px-3 py-1.5 text-xs font-semibold text-text-low hover:text-text-hi"
+          >
+            <Sparkles size={13} aria-hidden="true" />
+            Other formats
+          </button>
+        )}
+
         {(me?.role === 'admin' || me?.role === 'superadmin') && (target.visibility === 'public' || featured) && (
           <button
             type="button"
@@ -1055,6 +1070,10 @@ export default function PostCard({
           In place it pushed every post below it down the page, and it put a
           long URL and a checkbox into the middle of a feed. Sharing is a
           decision with a few choices in it, which is what a dialog is for. */}
+      {isOwn && !post.repost_of && (
+        <OneToManyDialog postId={post.id} lang={post.lang} open={formatsOpen} onOpenChange={setFormatsOpen} />
+      )}
+
       <Dialog open={shareOpen && shareable} onOpenChange={setShareOpen}>
         <DialogContent className="sm:max-w-md">
           <DialogHeader>

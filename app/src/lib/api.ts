@@ -2220,6 +2220,50 @@ export interface ShareLinkOut {
   created?: boolean
 }
 
+export type OneToManyTarget = 'short_video' | 'newsletter' | 'translation'
+
+export type OneToManyCapabilities = {
+  short_video: { available: boolean; reason: string | null }
+  newsletter: { available: boolean; reason: string | null }
+  translation: { available: boolean; reason: string | null; langs: string[] }
+}
+
+export type OneToManyOutput = {
+  id: number
+  target: OneToManyTarget | string
+  lang: string
+  rtl: boolean
+  status: 'queued' | 'processing' | 'completed' | 'failed' | 'cancelled'
+  error: string | null
+  attempts: number
+  max_attempts: number
+  provenance: string
+  provider: string | null
+  updated_at: string | null
+  completed_at: string | null
+  /** Made from an earlier version of the post. */
+  stale: boolean
+  legacy: boolean
+  user_edited: boolean
+  content: string | null
+  title: string | null
+  preview_text: string | null
+  html: string | null
+  video_url: string | null
+  download_url: string | null
+  duration_s: number | null
+  warning: string | null
+}
+
+export type OneToManyJob = {
+  job_id: string
+  post_id: string | null
+  status: 'queued' | 'processing' | 'completed' | 'partial' | 'failed' | 'cancelled'
+  created_at: string | null
+  source: { deleted: boolean; reachable: boolean; visibility: string | null; lang: string | null }
+  outputs: OneToManyOutput[]
+}
+
 export const kaluta = {
   status: () => api.get<StackStatus>('/status', { auth: false }),
 
@@ -2266,40 +2310,33 @@ export const kaluta = {
 
   creators: {
     /**
-     * One-to-Many (blueprint §Creator Studio): one idea, several formats.
-     *
-     * Targets that need a media pipeline come back `unsupported` with the
-     * reason rather than sitting queued forever, so the UI can say why.
+     * One-to-Many: a post also made into a short video, a newsletter draft and
+     * its translations. Asked for after the post exists; produced in the
+     * background by creator-service, which reads the post itself. Only the
+     * author can ask, and only the author sees what comes out.
      */
-    publish: (input: {
-      source_text: string
-      source_lang: string
-      targets: string[]
-      target_langs?: string[]
-      source_ref?: string
-    }) =>
-      api.post<{
-        job_id: string
-        status: string
-        outputs: number
-        ready: number
-        unsupported: string[]
-      }>('/creators/publish', { source_kind: 'text', ...input }),
+    capabilities: (lang: string) =>
+      api.get<{ targets: OneToManyCapabilities }>(`/creators/publish/capabilities?lang=${encodeURIComponent(lang)}`),
 
-    job: (jobId: string) =>
-      api.get<{
-        job_id: string
-        status: string
-        outputs: Array<{
-          target: string
-          lang: string
-          status: string
-          content: string | null
-          media_url: string | null
-          provenance: string
-          error: string | null
-        }>
-      }>(`/creators/publish/${jobId}`),
+    publish: (input: { source_ref: string; targets: OneToManyTarget[] }) =>
+      api.post<OneToManyJob & { created: boolean; added: number }>('/creators/publish', input),
+
+    job: (jobId: string) => api.get<OneToManyJob>(`/creators/publish/${jobId}`),
+
+    jobForPost: (postId: string) =>
+      api.get<{ job: OneToManyJob | null }>(`/creators/publish/by-post/${encodeURIComponent(postId)}`),
+
+    retryOutput: (outputId: number, force = false) =>
+      api.post<OneToManyJob>(`/creators/publish/outputs/${outputId}/retry${force ? '?force=true' : ''}`),
+
+    retryFailed: (jobId: string) =>
+      api.post<OneToManyJob & { requeued: number }>(`/creators/publish/${jobId}/retry-failed`),
+
+    cancelOutput: (outputId: number) => api.post<OneToManyJob>(`/creators/publish/outputs/${outputId}/cancel`),
+
+    /** Save an edited newsletter draft. Saved only: Kinjy never sends it. */
+    editNewsletter: (outputId: number, input: { subject: string; preview_text: string; html: string }) =>
+      api.patch<OneToManyJob>(`/creators/publish/outputs/${outputId}`, input),
 
     enable: () => api.post<{ enabled: boolean }>('/creators/enable'),
   },

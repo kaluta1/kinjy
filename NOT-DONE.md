@@ -10,7 +10,7 @@ Rules for this file:
 - Anything that cannot be verified in the current environment is marked
   **unverified** rather than assumed good.
 
-Last reviewed: 2026-10-18 (open communities that publish publicly)
+Last reviewed: 2026-10-26 (One-to-Many pipeline)
 
 ---
 
@@ -22,6 +22,7 @@ Last reviewed: 2026-10-18 (open communities that publish publicly)
 | **End-to-end encrypted messages** | Messages and chat attachments are **encrypted at rest** (`MESSAGES_ENCRYPTION_KEY`), so a stolen database or backup reveals nothing — but the server holds the key and can read them. No key exchange exists, so nothing is end-to-end; the thread header says “Encrypted on our servers”, not “end-to-end”. | Per-device keys, a key agreement (Signal/MLS via a vetted library), multi-device and key backup. |
 | **Voice and video calls** | *Signalling* is built: offer/answer/ICE relay over the existing socket, payload never inspected. **No TURN server**, so peers behind symmetric NATs will fail to connect, and **no group calls** (an offer to 3+ is refused rather than left to fail mysteriously). | A TURN relay, and an SFU for groups. |
 | **Real payment rails** | **Sonco Pay** takes every payment and pays withdrawals once `SONCOPAY_API_KEY` is set (18/10, see the section at the end). Without it, the old rails stay in mock mode. NowPayments and Mangopay themselves are still not wired. | Sonco Pay: the server IP declared in its dashboard, and a funded Sonco Pay balance for withdrawals. |
+| **Machine translation (One-to-Many "Translate ×4")** | The pipeline is real and calls Anthropic through its SDK, but **no `ANTHROPIC_API_KEY` is set on the server**, so the composer shows the chip greyed out with the reason. Short videos cannot draw Arabic or Chinese title cards (no CJK font, no Arabic shaping), so the chip is greyed out for posts in those languages. | `ANTHROPIC_API_KEY` in `/opt/kaluta/.env` (model: `AI_ANTHROPIC_MODEL`, default `claude-opus-5-5`); for ar/zh videos, Noto fonts and libraqm in the media-service image. |
 | **WebAuthn off localhost** | Passkeys work on `http://localhost`. From another machine over plain HTTP the ceremony **will fail**. | HTTPS. |
 
 ## 2. Rules stored but not enforced
@@ -131,11 +132,15 @@ Each of these was checked against https://kinjy.com, not only locally.
   could answer; joining one was a request into a void. Queue, admit, decline,
   ban, promote are now real, and a *secret* community answers 404 rather than
   403 to a non-member — confirming an id exists would leak what the tier hides.
-- **One-to-Many.** `/creators/publish` returned 202 and created empty rows on the
-  promise that "the AI layer fills them in"; nothing did. Translations,
-  newsletters and articles are produced for real; short video, long video, audio
-  and carousel come back `unsupported` **with the reason**, because no media
-  pipeline exists. Verified: 8 outputs, 6 produced.
+- **One-to-Many (26/10).** Short video, newsletter draft and the four
+  translations are a durable queue in creator-service (lease, 3 tries, partial
+  success, retry of the failed ones only), produced from the post as
+  social-service has it. The video is a real vertical H.264 MP4 (title cards +
+  the post's pictures), restricted to the author. The newsletter is an editable
+  draft and is **never sent**. Translations refuse placeholder output. Verified
+  locally by `backend/tests/e2e_one_to_many.py` (76 checks, against a stand-in
+  for the model vendor). **Still missing:** see section 1, "Machine
+  translation".
 - **Disappearing messages.** The timer belongs to the room, not the sender, and
   everyone is told when it changes. Expiry deletes on the read and write paths
   rather than from a sweeper, so there is no window where a "disappeared"
@@ -183,8 +188,8 @@ Checked on production 2026-08-20, promise by promise.
 
 ## 4. Not started
 
-- **Creator Studio / One-to-Many publishing** (one idea → article, video, audio,
-  newsletter). Backend service exists; no UI, no transformation pipeline.
+- **One-to-Many: long video, audio, carousel, article.** The model still lists
+  them; the API refuses them. Only short video, newsletter and translations exist.
 - **Advertising platform UI** — commerce-service has campaigns and the rate card;
   no screen to buy or manage one.
 - **Forum → knowledge base** distillation with citations.

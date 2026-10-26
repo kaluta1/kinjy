@@ -39,6 +39,8 @@ class TranslateIn(BaseModel):
     text: str = Field(min_length=1, max_length=20000)
     source_lang: str | None = None
     target_lang: str
+    # Refuse rather than return placeholder text when no real model is set up.
+    require_live: bool = False
 
 
 class AssistIn(BaseModel):
@@ -80,6 +82,20 @@ def providers():
     }
 
 
+@app.get("/internal/ai/capabilities", tags=["internal"])
+def capabilities():
+    """Which tasks a real model performs here - for services that must not
+    accept placeholder output."""
+    provider = gateway.live_provider("translate")
+    return {
+        "translate": {
+            "live": provider is not None,
+            "provider": provider.name if provider else None,
+            "model": provider.models.get("translate") if provider else None,
+        }
+    }
+
+
 @app.post("/ai/run", tags=["gateway"])
 def run_task(payload: RunIn, principal: MaybeUser, db: OrmSession = Depends(get_db)):
     try:
@@ -111,13 +127,22 @@ def translate(payload: TranslateIn, principal: MaybeUser, db: OrmSession = Depen
     if source_lang == payload.target_lang:
         return {"translated": payload.text, "source_lang": source_lang, "cached": False, "noop": True}
 
+    if payload.require_live and gateway.live_provider("translate", source_lang) is None:
+        raise HTTPException(status_code=503, detail="No translation model is configured")
+
     digest = hashlib.sha256(f"{source_lang}:{payload.target_lang}:{payload.text}".encode()).hexdigest()
-    cached = db.scalar(select(models.Translation).where(models.Translation.source_hash == digest))
+    # A placeholder cached before a model was configured is not a translation.
+    cached = db.scalar(
+        select(models.Translation).where(
+            models.Translation.source_hash == digest, models.Translation.provider != "mock"
+        )
+    )
     if cached:
         return {
             "translated": cached.translated_text,
             "source_lang": cached.source_lang,
             "provider": cached.provider,
+            "mock": False,
             "cached": True,
         }
 
@@ -127,17 +152,29 @@ def translate(payload: TranslateIn, principal: MaybeUser, db: OrmSession = Depen
         )
     except gateway.NoProviderError as exc:
         raise HTTPException(status_code=503, detail=str(exc))
+    except gateway.ProviderError as exc:
+        raise HTTPException(status_code=502 if exc.retryable else 422, detail=f"Translation failed: {exc}")
+    if payload.require_live and result["mock"]:
+        raise HTTPException(status_code=503, detail="No translation model is configured")
 
-    db.add(
-        models.Translation(
-            source_hash=digest,
-            source_lang=source_lang,
-            target_lang=payload.target_lang,
-            source_text=payload.text,
-            translated_text=result["output"],
-            provider=result["provider"],
-        )
-    )
+    if not result["mock"]:
+        # The cache holds translations only; a placeholder would outlive the
+        # day a real model is configured.
+        existing = db.scalar(select(models.Translation).where(models.Translation.source_hash == digest))
+        if existing is not None:
+            existing.translated_text = result["output"]
+            existing.provider = result["provider"]
+        else:
+            db.add(
+                models.Translation(
+                    source_hash=digest,
+                    source_lang=source_lang,
+                    target_lang=payload.target_lang,
+                    source_text=payload.text,
+                    translated_text=result["output"],
+                    provider=result["provider"],
+                )
+            )
     _record(db, result, principal.user_id if principal else None, False)
     db.commit()
     return {

@@ -38,6 +38,11 @@ RUN if [ "$SERVICE" = "media-service" ]; then \
         apt-get update && apt-get install -y --no-install-recommends ffmpeg \
         && rm -rf /var/lib/apt/lists/*; \
     fi
+# ai-service alone talks to a model vendor. Pinned to the 1.x line it was
+# written against; installed here so the other images keep their layers.
+RUN if [ "$SERVICE" = "ai-service" ]; then \
+        pip install --retries 5 --timeout 120 "anthropic>=1.17,<2"; \
+    fi
 COPY ${SERVICE} /app
 
 EXPOSE 8000

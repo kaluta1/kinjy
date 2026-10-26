@@ -8,9 +8,11 @@ import httpx
 from fastapi import Depends, HTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session as OrmSession
 
 from common import agefeatures, events, settings
+from common.article_html import sanitize_article
 from common.agesafety import engine as age_engine
 from common.auth import CurrentUser
 from common.database import get_db
@@ -18,25 +20,63 @@ from common.ids import new_id
 from common.service import create_app
 
 import models
-import derive
+import onetomany
 
 AI_URL = "http://ai-service:8000"
 LEDGER_URL = "http://ledger-service:8000"
+
+_S = models.SCHEMA
+MIGRATIONS = [
+    # One-to-Many as a durable queue (25/10). Additive: older rows keep their
+    # values, and `pipeline` stays NULL on them so the worker leaves them alone.
+    f"ALTER TABLE {_S}.publishing_jobs ADD COLUMN IF NOT EXISTS idem_key VARCHAR(120)",
+    f"ALTER TABLE {_S}.publishing_jobs ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ",
+    f"CREATE UNIQUE INDEX IF NOT EXISTS uq_publishing_jobs_idem ON {_S}.publishing_jobs (idem_key) WHERE idem_key IS NOT NULL",
+    f"CREATE INDEX IF NOT EXISTS ix_publishing_jobs_source ON {_S}.publishing_jobs (creator_id, source_ref)",
+    f"ALTER TABLE {_S}.publishing_outputs ADD COLUMN IF NOT EXISTS pipeline VARCHAR(10)",
+    f"ALTER TABLE {_S}.publishing_outputs ADD COLUMN IF NOT EXISTS attempts INTEGER NOT NULL DEFAULT 0",
+    f"ALTER TABLE {_S}.publishing_outputs ADD COLUMN IF NOT EXISTS max_attempts INTEGER NOT NULL DEFAULT 3",
+    f"ALTER TABLE {_S}.publishing_outputs ADD COLUMN IF NOT EXISTS lease_until TIMESTAMPTZ",
+    f"ALTER TABLE {_S}.publishing_outputs ADD COLUMN IF NOT EXISTS next_attempt_at TIMESTAMPTZ",
+    f"ALTER TABLE {_S}.publishing_outputs ADD COLUMN IF NOT EXISTS started_at TIMESTAMPTZ",
+    f"ALTER TABLE {_S}.publishing_outputs ADD COLUMN IF NOT EXISTS completed_at TIMESTAMPTZ",
+    f"ALTER TABLE {_S}.publishing_outputs ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ",
+    f"ALTER TABLE {_S}.publishing_outputs ADD COLUMN IF NOT EXISTS source_revision VARCHAR(40)",
+    f"ALTER TABLE {_S}.publishing_outputs ADD COLUMN IF NOT EXISTS provider VARCHAR(40)",
+    f"ALTER TABLE {_S}.publishing_outputs ADD COLUMN IF NOT EXISTS title VARCHAR(300)",
+    f"ALTER TABLE {_S}.publishing_outputs ADD COLUMN IF NOT EXISTS preview_text VARCHAR(300)",
+    f"ALTER TABLE {_S}.publishing_outputs ADD COLUMN IF NOT EXISTS content_html TEXT",
+    f"ALTER TABLE {_S}.publishing_outputs ADD COLUMN IF NOT EXISTS user_edited BOOLEAN NOT NULL DEFAULT FALSE",
+    f"ALTER TABLE {_S}.publishing_outputs ADD COLUMN IF NOT EXISTS media_id VARCHAR(40)",
+    f"ALTER TABLE {_S}.publishing_outputs ADD COLUMN IF NOT EXISTS duration_s DOUBLE PRECISION",
+    f"CREATE UNIQUE INDEX IF NOT EXISTS uq_publishing_outputs_slot ON {_S}.publishing_outputs (job_id, target, lang)",
+    f"CREATE INDEX IF NOT EXISTS ix_publishing_outputs_due ON {_S}.publishing_outputs (status, next_attempt_at) WHERE pipeline = 'v2'",
+]
 
 app = create_app(
     name="creator-service",
     schema=models.SCHEMA,
     description="Creator profiles, one-to-many publishing, series, subscriptions, badges.",
+    migrations=MIGRATIONS,
+    on_startup=[onetomany.start_worker],
 )
 
 
 class PublishIn(BaseModel):
-    source_kind: str = Field(default="text", pattern="^(text|video|audio)$")
+    # The post to produce from. Its text, language and pictures are read from
+    # social-service; the fields below are accepted from older clients and ignored.
+    source_ref: str = Field(min_length=1, max_length=120)
+    targets: list[str] = Field(min_length=1, max_length=5)
+    source_kind: str | None = None
     source_text: str | None = None
-    source_ref: str | None = None
-    source_lang: str = "en"
-    targets: list[str] = Field(min_length=1)
+    source_lang: str | None = None
     target_langs: list[str] = Field(default_factory=list)
+
+
+class NewsletterEditIn(BaseModel):
+    subject: str = Field(min_length=1, max_length=300)
+    preview_text: str = Field(default="", max_length=300)
+    html: str = Field(min_length=1, max_length=100_000)
 
 
 class SubscribeIn(BaseModel):
@@ -149,151 +189,306 @@ def enable_creator(principal: CurrentUser, db: OrmSession = Depends(get_db)):
 
 
 # --- publishing engine -----------------------------------------------------
+#
+# One-to-Many: the composer asks, once the post exists, for a short video, a
+# newsletter draft and/or the post in the four other languages. The request is
+# recorded as queued rows; onetomany.py's worker produces them. Only the
+# author of the post can ask, and only they can see what comes out.
+
+def _own_source(post_id: str, principal_id: str) -> dict:
+    try:
+        source = onetomany.fetch_source(post_id)
+    except onetomany.Retryable:
+        raise HTTPException(status_code=503, detail="The post cannot be read right now. Try again in a moment.")
+    if onetomany.source_deleted(source) or source["author_id"] != principal_id:
+        raise HTTPException(status_code=404, detail="Post not found")
+    return source
+
+
+def _own_job(db: OrmSession, job_id: str, principal_id: str) -> models.PublishingJob:
+    job = db.get(models.PublishingJob, job_id)
+    if job is None or job.creator_id != principal_id:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return job
+
+
+def _own_output(db: OrmSession, output_id: int, principal_id: str) -> tuple[models.PublishingOutput, models.PublishingJob]:
+    output = db.get(models.PublishingOutput, output_id)
+    job = db.get(models.PublishingJob, output.job_id) if output else None
+    if output is None or job is None or job.creator_id != principal_id:
+        raise HTTPException(status_code=404, detail="Output not found")
+    return output, job
+
+
+@app.get("/creators/publish/capabilities", tags=["publishing"])
+def publish_capabilities(principal: CurrentUser, lang: str | None = None):
+    """What One-to-Many can really produce right now, for a post in ``lang``.
+
+    The composer greys out what is not available and says why, instead of
+    accepting a request nothing will fulfil.
+    """
+    return {"targets": onetomany.capabilities(lang if lang in settings.SUPPORTED_LANGS else None)}
+
 
 @app.post("/creators/publish", status_code=202, tags=["publishing"])
 async def publish(payload: PublishIn, principal: CurrentUser, db: OrmSession = Depends(get_db)):
-    """Create once, publish many.
+    """Queue One-to-Many outputs for a post the caller wrote.
 
-    Returns immediately with one output row per (target, language) pair; the AI
-    layer fills them in asynchronously. A creator can watch the article land
-    while the dubbing is still rendering.
+    Idempotent per post: asking again returns the same job, with any target not
+    asked for before added to it. A target that cannot be produced on this
+    server is refused, and nothing is queued.
     """
-    unknown = set(payload.targets) - set(models.PublishingJob.TARGETS)
+    targets = list(dict.fromkeys(payload.targets))
+    unknown = [t for t in targets if t not in onetomany.TARGETS]
     if unknown:
         raise HTTPException(
             status_code=400,
-            detail=f"Unknown targets: {', '.join(sorted(unknown))}. Available: {', '.join(models.PublishingJob.TARGETS)}",
+            detail=f"Not available: {', '.join(unknown)}. One-to-Many produces {', '.join(onetomany.TARGETS)}.",
         )
-    if payload.source_kind == "text" and not payload.source_text:
-        raise HTTPException(status_code=400, detail="source_text is required for a text source")
+    source = _own_source(payload.source_ref, principal.user_id)
+    lang = source.get("lang") if source.get("lang") in settings.SUPPORTED_LANGS else "en"
+    caps = onetomany.capabilities(lang)
+    refused = {t: caps[t]["reason"] for t in targets if not caps[t]["available"]}
+    if refused:
+        raise HTTPException(
+            status_code=409,
+            detail="Not available right now: " + " ".join(f"{t.replace('_', ' ')}: {r}" for t, r in refused.items()),
+        )
 
-    langs = payload.target_langs or [payload.source_lang]
-    bad_langs = set(langs) - set(settings.SUPPORTED_LANGS)
-    if bad_langs:
-        raise HTTPException(status_code=400, detail=f"Unsupported languages: {', '.join(sorted(bad_langs))}")
+    key = f"{principal.user_id}:{payload.source_ref}"
+    job = db.scalar(select(models.PublishingJob).where(models.PublishingJob.idem_key == key).with_for_update())
+    created = job is None
+    if job is None:
+        job = models.PublishingJob(
+            id=new_id("pub"),
+            creator_id=principal.user_id,
+            source_kind="post",
+            source_ref=payload.source_ref,
+            source_lang=lang,
+            targets=",".join(targets),
+            target_langs=",".join(sorted({l for t, l in onetomany.planned_outputs(targets, lang)})),
+            status="queued",
+            idem_key=key,
+        )
+        db.add(job)
+        try:
+            db.flush()
+        except IntegrityError:
+            # The same request, a moment earlier, from another tab or a retry.
+            db.rollback()
+            job = db.scalar(select(models.PublishingJob).where(models.PublishingJob.idem_key == key).with_for_update())
+            created = False
+    else:
+        job.targets = ",".join(dict.fromkeys([*(job.targets or "").split(","), *targets]).keys()).strip(",")
 
-    job = models.PublishingJob(
-        id=new_id("pub"),
-        creator_id=principal.user_id,
-        source_kind=payload.source_kind,
-        source_ref=payload.source_ref,
-        source_text=payload.source_text,
-        source_lang=payload.source_lang,
-        targets=",".join(payload.targets),
-        target_langs=",".join(langs),
-    )
-    db.add(job)
-    db.flush()
-
-    # Produced here rather than left for a worker that does not exist. The
-    # endpoint used to return 202 and create empty rows on the promise that
-    # "the AI layer fills them in asynchronously" — nothing did, so every job
-    # stayed queued forever while looking like it had been accepted.
-    #
-    # The work is text transformation and one HTTP call per translation, which
-    # is fast enough to do inline. When a real media pipeline exists, the
-    # unsupported targets are what move to a queue.
-    produced = 0
-    for target in payload.targets:
-        for lang in langs:
-            result = derive.produce(target, lang, payload.source_text or "", payload.source_lang)
-            db.add(
-                models.PublishingOutput(
-                    job_id=job.id,
-                    target=target,
-                    lang=lang,
-                    status=result["status"],
-                    content=result["content"],
-                    error=result["error"],
-                    # The column is NOT NULL with a default; an unsupported or
-                    # failed row has no provenance to declare, so let the
-                    # default stand rather than insert NULL.
-                    **({"provenance": result["provenance"]} if result["provenance"] else {}),
-                )
+    existing = {(o.target, o.lang) for o in db.scalars(select(models.PublishingOutput).where(models.PublishingOutput.job_id == job.id))}
+    added = 0
+    for target, out_lang in onetomany.planned_outputs(targets, lang):
+        if (target, out_lang) in existing:
+            continue
+        db.add(
+            models.PublishingOutput(
+                job_id=job.id,
+                target=target,
+                lang=out_lang,
+                status="queued",
+                pipeline="v2",
+                attempts=0,
+                max_attempts=onetomany.MAX_ATTEMPTS,
+                provenance="ai_generated" if target == "translation" else "ai_assisted",
+                updated_at=onetomany.now(),
             )
-            if result["status"] == "ready":
-                produced += 1
-
-    # The job is only "done" when nothing is still waiting on a pipeline.
-    job.status = "done" if produced else "partial"
-    db.commit()
+        )
+        added += 1
+    db.flush()
+    onetomany.refresh_job(db, job)
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        job = db.scalar(select(models.PublishingJob).where(models.PublishingJob.idem_key == key))
+        added = 0
 
     await events.publish(
         "creator.publish_requested",
-        {"job_id": job.id, "creator_id": principal.user_id, "targets": payload.targets, "langs": langs},
+        {"job_id": job.id, "creator_id": principal.user_id, "targets": targets, "post_id": payload.source_ref},
     )
-    return {
-        "job_id": job.id,
-        "status": job.status,
-        "outputs": len(payload.targets) * len(langs),
-        "ready": produced,
-        # Stated plainly so the client never has to guess why a target is empty.
-        "unsupported": sorted(set(payload.targets) & set(derive.NEEDS_MEDIA_PIPELINE)),
-    }
+    return {**onetomany.job_view(db, job, principal.user_id), "created": created, "added": added}
+
+
+@app.get("/creators/publish/by-post/{post_id}", tags=["publishing"])
+def publish_for_post(post_id: str, principal: CurrentUser, db: OrmSession = Depends(get_db)):
+    """The One-to-Many job of one of the caller's posts, or ``{"job": null}``."""
+    job = db.scalar(
+        select(models.PublishingJob)
+        .where(models.PublishingJob.creator_id == principal.user_id, models.PublishingJob.source_ref == post_id)
+        .order_by(models.PublishingJob.idem_key.is_(None), models.PublishingJob.created_at.desc())
+        .limit(1)
+    )
+    return {"job": onetomany.job_view(db, job, principal.user_id) if job else None}
 
 
 @app.get("/creators/publish/{job_id}", tags=["publishing"])
 def publish_status(job_id: str, principal: CurrentUser, db: OrmSession = Depends(get_db)):
-    job = db.get(models.PublishingJob, job_id)
-    if job is None or job.creator_id != principal.user_id:
-        raise HTTPException(status_code=404, detail="Job not found")
-    outputs = db.scalars(
-        select(models.PublishingOutput).where(models.PublishingOutput.job_id == job_id)
-    ).all()
-    return {
-        "job_id": job.id,
-        "status": job.status,
-        "outputs": [
-            {
-                "target": o.target,
-                "lang": o.lang,
-                "status": o.status,
-                "content": o.content,
-                "media_url": o.media_url,
-                "provenance": o.provenance,
-                "error": o.error,
-            }
-            for o in outputs
-        ],
-    }
+    return onetomany.job_view(db, _own_job(db, job_id, principal.user_id), principal.user_id)
 
 
-@app.post("/internal/publish/{job_id}/outputs", tags=["internal"])
-def fill_output(
-    job_id: str,
-    target: str,
-    lang: str,
-    content: str | None = None,
-    media_url: str | None = None,
-    error: str | None = None,
-    db: OrmSession = Depends(get_db),
-):
-    """ai-service writes a finished output back here."""
-    output = db.scalar(
-        select(models.PublishingOutput).where(
-            models.PublishingOutput.job_id == job_id,
-            models.PublishingOutput.target == target,
-            models.PublishingOutput.lang == lang,
-        )
-    )
-    if output is None:
-        raise HTTPException(status_code=404, detail="Output slot not found")
-    output.content = content
-    output.media_url = media_url
-    output.error = error
-    output.status = "failed" if error else "done"
+def _requeue(output: models.PublishingOutput) -> None:
+    output.status = "queued"
+    output.pipeline = "v2"
+    output.attempts = 0
+    output.max_attempts = onetomany.MAX_ATTEMPTS
+    output.error = None
+    output.lease_until = None
+    output.next_attempt_at = None
+    output.updated_at = onetomany.now()
 
-    remaining = db.scalar(
-        select(func.count())
-        .select_from(models.PublishingOutput)
-        .where(models.PublishingOutput.job_id == job_id, models.PublishingOutput.status.in_(["queued", "running"]))
-    ) or 0
-    if remaining == 0:
-        job = db.get(models.PublishingJob, job_id)
-        if job is not None:
-            job.status = "done"
+
+@app.post("/creators/publish/outputs/{output_id}/retry", tags=["publishing"])
+def retry_output(output_id: int, principal: CurrentUser, force: bool = False, db: OrmSession = Depends(get_db)):
+    """Produce one output again: a failed one, or a completed one whose post has
+    changed since. A newsletter draft the author edited is only replaced when
+    they say so (``force``)."""
+    output, job = _own_output(db, output_id, principal.user_id)
+    _own_source(job.source_ref or "", principal.user_id)
+    status = onetomany.LEGACY_STATUS.get(output.status, output.status)
+    if status in onetomany.ACTIVE:
+        raise HTTPException(status_code=409, detail="This is already being produced.")
+    if output.target not in onetomany.TARGETS:
+        raise HTTPException(status_code=409, detail="Nothing produces this format.")
+    if output.target == "translation" and output.lang == job.source_lang:
+        raise HTTPException(status_code=409, detail="This is the post's own language.")
+    if output.user_edited and not force:
+        raise HTTPException(status_code=409, detail="You edited this draft. Regenerating replaces your edits.")
+    caps = onetomany.capabilities(job.source_lang)
+    if not caps[output.target]["available"]:
+        raise HTTPException(status_code=409, detail=caps[output.target]["reason"])
+    _requeue(output)
+    output.user_edited = False if force else output.user_edited
+    onetomany.refresh_job(db, job)
     db.commit()
-    return {"status": output.status, "remaining": remaining}
+    return onetomany.job_view(db, job, principal.user_id)
+
+
+@app.post("/creators/publish/{job_id}/retry-failed", tags=["publishing"])
+def retry_failed(job_id: str, principal: CurrentUser, db: OrmSession = Depends(get_db)):
+    """Try again every output of this job that failed - and only those."""
+    job = _own_job(db, job_id, principal.user_id)
+    _own_source(job.source_ref or "", principal.user_id)
+    caps = onetomany.capabilities(job.source_lang)
+    requeued = 0
+    for output in db.scalars(select(models.PublishingOutput).where(models.PublishingOutput.job_id == job.id)):
+        if onetomany.LEGACY_STATUS.get(output.status, output.status) != "failed":
+            continue
+        if output.target not in onetomany.TARGETS or not caps[output.target]["available"]:
+            continue
+        _requeue(output)
+        requeued += 1
+    onetomany.refresh_job(db, job)
+    db.commit()
+    return {**onetomany.job_view(db, job, principal.user_id), "requeued": requeued}
+
+
+@app.post("/creators/publish/outputs/{output_id}/cancel", tags=["publishing"])
+def cancel_output(output_id: int, principal: CurrentUser, db: OrmSession = Depends(get_db)):
+    """Stop an output that has not been produced yet."""
+    output, job = _own_output(db, output_id, principal.user_id)
+    if output.status != "queued":
+        raise HTTPException(status_code=409, detail="Only an output still waiting can be cancelled.")
+    output.status = "cancelled"
+    output.error = "Cancelled by you."
+    output.updated_at = onetomany.now()
+    onetomany.refresh_job(db, job)
+    db.commit()
+    return onetomany.job_view(db, job, principal.user_id)
+
+
+@app.patch("/creators/publish/outputs/{output_id}", tags=["publishing"])
+def edit_newsletter(output_id: int, payload: NewsletterEditIn, principal: CurrentUser, db: OrmSession = Depends(get_db)):
+    """Edit a newsletter draft. Saved, sanitized, marked as yours - and not sent:
+    Kinjy does not e-mail newsletters on anyone's behalf."""
+    output, job = _own_output(db, output_id, principal.user_id)
+    _own_source(job.source_ref or "", principal.user_id)
+    if output.target != "newsletter" or output.status != "completed":
+        raise HTTPException(status_code=409, detail="Only a finished newsletter draft can be edited.")
+    safe = sanitize_article(payload.html)
+    text = onetomany.plain_text({"format": "article", "body": safe})
+    if not text:
+        raise HTTPException(status_code=422, detail="The newsletter needs some text.")
+    output.title = payload.subject.strip()[:300]
+    output.preview_text = payload.preview_text.strip()[:300]
+    output.content_html = safe
+    output.content = f"{output.title}\n\n{text}"
+    output.user_edited = True
+    output.updated_at = onetomany.now()
+    db.commit()
+    return onetomany.job_view(db, job, principal.user_id)
+
+
+@app.post("/internal/publish/backfill", tags=["internal"])
+def backfill_publishing(limit: int = 20, dry_run: bool = True, db: OrmSession = Depends(get_db)):
+    """Bring jobs recorded before the durable pipeline into it - by hand, never on startup.
+
+    Those jobs produced placeholder translations and marked short videos
+    "unsupported". For each one whose post still exists, its short video,
+    newsletter and translation rows are queued again (a translation into the
+    post's own language is cancelled), and the job gets its idempotency key -
+    unless the post already has a newer job, in which case it is left as history.
+    ``dry_run`` (the default) only reports what would change.
+    """
+    legacy = db.scalars(
+        select(models.PublishingJob)
+        .where(models.PublishingJob.idem_key.is_(None), models.PublishingJob.source_ref.isnot(None))
+        .order_by(models.PublishingJob.created_at)
+        .limit(max(1, min(limit, 200)))
+    ).all()
+    report = []
+    for job in legacy:
+        key = f"{job.creator_id}:{job.source_ref}"
+        entry = {"job_id": job.id, "post_id": job.source_ref, "action": None, "outputs": 0}
+        if db.scalar(select(models.PublishingJob.id).where(models.PublishingJob.idem_key == key)):
+            entry["action"] = "skipped: the post has a newer job"
+            report.append(entry)
+            continue
+        try:
+            source = onetomany.fetch_source(job.source_ref)
+        except onetomany.Retryable:
+            entry["action"] = "skipped: social-service unreachable"
+            report.append(entry)
+            continue
+        outputs = db.scalars(select(models.PublishingOutput).where(models.PublishingOutput.job_id == job.id)).all()
+        if onetomany.source_deleted(source) or source["author_id"] != job.creator_id:
+            entry["action"] = "withdrawn: the post is gone"
+            if not dry_run:
+                for o in outputs:
+                    o.pipeline = "v2"
+                    o.status = "cancelled"
+                    o.error = "The post was deleted, so this was withdrawn."
+                job.idem_key = key
+                onetomany.refresh_job(db, job)
+        else:
+            lang = source.get("lang") or job.source_lang
+            entry["action"] = "requeued"
+            for o in outputs:
+                if o.target not in onetomany.TARGETS:
+                    continue
+                entry["outputs"] += 1
+                if dry_run:
+                    continue
+                if o.target == "translation" and o.lang == lang:
+                    o.pipeline = "v2"
+                    o.status = "cancelled"
+                    o.error = "The post is already in this language."
+                else:
+                    _requeue(o)
+            if not dry_run:
+                job.idem_key = key
+                job.source_lang = lang
+                onetomany.refresh_job(db, job)
+        report.append(entry)
+    if not dry_run:
+        db.commit()
+    return {"dry_run": dry_run, "jobs": report}
 
 
 # --- series ----------------------------------------------------------------

@@ -1,0 +1,15 @@
+# Local only: points ai-service at tests/fake_anthropic.py so One-to-Many
+# translations take the real (live) code path without a vendor.
+#   docker compose -f docker-compose.yml -f backend/tests/compose.onetomany-test.yml up -d --no-deps ai-service creator-service
+# Without this file ai-service has no model key and translation is "unavailable". Never on a server.
+services:
+  ai-service:
+    environment:
+      ANTHROPIC_API_KEY: sk-ant-fake-for-e2e
+      ANTHROPIC_BASE_URL: http://host.docker.internal:8799
+    extra_hosts: ["host.docker.internal:host-gateway"]
+  creator-service:
+    environment:
+      ONE_TO_MANY_POLL_S: "1"
+      ONE_TO_MANY_RETRY_BASE_S: "2"
+      ONE_TO_MANY_LEASE_S: "20"
