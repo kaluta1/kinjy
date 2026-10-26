@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { useSearchParams } from 'react-router'
+import { Link, useSearchParams } from 'react-router'
 import {
   ArrowLeft,
   ArrowUp,
@@ -72,6 +72,8 @@ export default function Forums() {
   const [view, setView] = useState<'discussions' | 'knowledge'>('discussions')
   const [params, setParams] = useSearchParams()
   const linkedThread = useRef(params.get('thread'))
+  // /forums?forum=… (from a community's Forums tab) opens that forum.
+  const linkedForum = useRef(params.get('forum'))
   const [threadsLoading, setThreadsLoading] = useState(false)
   // Replies whose vote or acceptance is in flight: a second tap waits for the first.
   const [busyReplies, setBusyReplies] = useState<ReadonlySet<string>>(new Set())
@@ -158,6 +160,13 @@ export default function Forums() {
       }
     })()
   }, [fetchThreads, setParams])
+
+  useEffect(() => {
+    const id = linkedForum.current
+    if (!id) return
+    linkedForum.current = null
+    void loadThreads(id).finally(() => setParams({}, { replace: true }))
+  }, [loadThreads, setParams])
 
   const openFromKnowledge = (threadId: string) => {
     setView('discussions')
@@ -402,6 +411,12 @@ export default function Forums() {
                                     <span className="capitalize text-gold-soft">{forum.scope}</span>
                                   </>
                                 )}
+                                {forum.community && (
+                                  <>
+                                    <span>·</span>
+                                    <span className="truncate text-gold-soft">{forum.community.name}</span>
+                                  </>
+                                )}
                               </span>
                             </div>
                           </div>
@@ -472,6 +487,17 @@ export default function Forums() {
                         </div>
                         <p className="caption text-text-low mt-0.5">
                           {threads.length} discussion{threads.length === 1 ? '' : 's'}
+                          {activeForum?.community && (
+                            <>
+                              {' · in '}
+                              <Link
+                                to={`/communities/${activeForum.community.slug}`}
+                                className="font-semibold text-gold-soft hover:underline"
+                              >
+                                {activeForum.community.name}
+                              </Link>
+                            </>
+                          )}
                         </p>
                       </div>
                     </div>

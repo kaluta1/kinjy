@@ -1076,6 +1076,9 @@ export interface Forum {
   scope_value: string | null
   parent_id: string | null
   threads_count: number
+  description?: string
+  /** The community the forum belongs to, when it belongs to one. */
+  community?: { id: string; slug: string; name: string } | null
 }
 
 export type ThreadSort = 'recent' | 'trending' | 'solved' | 'unanswered'
@@ -3009,27 +3012,30 @@ export const kaluta = {
         provider?: string
         model?: string
         mock?: boolean
-      }>(`/threads/${threadId}/summary?lang=${lang}`, { auth: false }),
+      }>(`/threads/${threadId}/summary?lang=${lang}`),
 
-    list: (params: { hierarchy?: string; scope?: string } = {}) => {
+    // Forum reads carry the sign-in when there is one: a forum of a private
+    // community is for its members, and an anonymous read would refuse them.
+    list: (params: { hierarchy?: string; scope?: string; community_id?: string } = {}) => {
       const query = new URLSearchParams()
       if (params.hierarchy) query.set('hierarchy', params.hierarchy)
       if (params.scope) query.set('scope', params.scope)
-      return api.get<{ geo_scopes: string[]; items: Forum[] }>(`/forums?${query}`, { auth: false })
+      if (params.community_id) query.set('community_id', params.community_id)
+      return api.get<{ geo_scopes: string[]; items: Forum[] }>(`/forums?${query}`)
     },
-    create: (input: { name: string; description?: string; hierarchy?: string; scope?: string; scope_value?: string }) =>
+    /** With `community_id`, the forum belongs to that community (owner and moderators only). */
+    create: (input: { name: string; description?: string; hierarchy?: string; scope?: string; scope_value?: string; community_id?: string }) =>
       api.post<{ id: string; slug: string }>('/forums', { hierarchy: 'topic', ...input }),
     threads: (forumId: string, sort: ThreadSort = 'recent') =>
-      api.get<{ items: Thread[] }>(`/forums/${forumId}/threads?sort=${sort}`, { auth: false }),
+      api.get<{ items: Thread[] }>(`/forums/${forumId}/threads?sort=${sort}`),
     createThread: (forumId: string, input: { title: string; body: string; lang?: string }) =>
       api.post<{ id: string }>(`/forums/${forumId}/threads`, input),
-    thread: (threadId: string) => api.get<ThreadDetail>(`/threads/${threadId}`, { auth: false }),
+    thread: (threadId: string) => api.get<ThreadDetail>(`/threads/${threadId}`),
     reply: (threadId: string, body: string) => api.post<{ id: string }>(`/threads/${threadId}/replies`, { body }),
     /** What a forum has settled, with the discussions it came from. */
     knowledge: (forumId: string, q = '') =>
       api.get<{ items: KnowledgeEntry[] }>(
         `/forums/${forumId}/knowledge${q ? `?q=${encodeURIComponent(q)}` : ''}`,
-        { auth: false },
       ),
     /** Upvote a reply, or take the vote back. One vote each, never on your own reply. */
     upvote: (replyId: string) => api.post<{ upvotes: number; voted: boolean }>(`/replies/${replyId}/upvote`),

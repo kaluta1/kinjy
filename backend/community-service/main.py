@@ -1600,9 +1600,15 @@ def list_forums(
     hierarchy: str | None = None,
     parent_id: str | None = None,
     scope: str | None = None,
+    community_id: str | None = None,
     db: OrmSession = Depends(get_db),
 ):
     stmt = select(models.Forum)
+    if community_id:
+        # One community's forums, for its page. Its own door first: whoever
+        # cannot enter the community is told no more than its page would say.
+        _community_door(db, community_id, principal)
+        stmt = stmt.where(models.Forum.community_id == community_id)
     # A secret community's forum is not listed to outsiders, only to its members.
     secret = select(models.Community.id).where(models.Community.kind == "secret")
     if principal:
@@ -1635,6 +1641,15 @@ def list_forums(
     # is its parent's, so the chain is walked here: a child of a secret forum
     # is not listed to someone who could not open the parent.
     rows = [r for r in rows if _can_enter_or_listed(db, r, principal)]
+    # The community each forum belongs to, so a forum can say where it lives
+    # and lead back there.
+    owners = {r.community_id for r in rows if r.community_id}
+    communities = {
+        c.id: c
+        for c in (
+            db.scalars(select(models.Community).where(models.Community.id.in_(owners))).all() if owners else []
+        )
+    }
     return {
         "geo_scopes": GEO_SCOPES,
         "items": [
@@ -1647,6 +1662,12 @@ def list_forums(
                 "scope_value": r.scope_value,
                 "parent_id": r.parent_id,
                 "threads_count": r.threads_count,
+                "description": r.description,
+                "community": (
+                    {"id": r.community_id, "slug": communities[r.community_id].slug,
+                     "name": communities[r.community_id].name}
+                    if r.community_id in communities else None
+                ),
             }
             for r in rows
         ],
