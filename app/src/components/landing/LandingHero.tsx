@@ -98,41 +98,57 @@ export default function LandingHero() {
   const join = useJoinTarget()
   const { t } = useTranslation()
   return (
-    <header className="kl-split kl-pad-x relative items-stretch gap-[clamp(40px,6vw,96px)] pb-12 pt-14">
-      <div className="kl-rise flex flex-col justify-between gap-14">
-        <div>
-          <h1
-            className="kl-serif mb-8 font-semibold"
-            style={{ fontSize: 'clamp(56px, 7.6vw, 104px)', lineHeight: 0.92, letterSpacing: '-.02em' }}
-          >
-            {/* <Trans> rather than two keys: the highlighted word sits in a
-                different place in every language - at the end in French, in the
-                middle in Chinese - so the sentence has to be translated whole
-                and carry the emphasis with it. */}
-            <Trans i18nKey="hero.title">
-              A new way to <span className="text-[var(--kl-gold-deep)]">connect</span>.
-            </Trans>
-          </h1>
-          <p className="mb-10 max-w-[420px] text-[19px] leading-[1.55] text-[var(--kl-mid)]" style={{ textWrap: 'pretty' }}>
-            {t('hero.sub')}
-          </p>
-          <Link
-            to={join.to}
-            className="kl-sheen inline-flex items-center gap-[18px] rounded-[20px] py-[7px] pe-[7px] ps-[30px] text-[17px] font-semibold shadow-[0_14px_30px_-12px_rgba(169,118,28,.55)] transition-transform hover:-translate-y-0.5"
-          >
-            {join.to.startsWith('/join') ? t('hero.cta') : join.label}
-            <span className="grid h-12 w-12 place-items-center rounded-full bg-white text-xl text-[var(--kl-night)]" aria-hidden="true">
-              →
-            </span>
-          </Link>
-        </div>
-        <div className="flex flex-col gap-4 border-t border-[var(--kl-paper-2)] pt-7">
-          <span className="text-sm font-semibold text-[var(--kl-low)]">{t('hero.app')}</span>
-          <StoreBadges />
+    <header className="kl-pad-x relative pb-12 pt-14">
+      {/* The headline beside its words and buttons, the banner under both,
+          as wide as the hero: ten people need the room a side column lacks. */}
+      <div className="kl-split kl-rise items-end gap-x-[clamp(40px,6vw,96px)] gap-y-8">
+        <h1
+          className="kl-serif font-semibold"
+          style={{ fontSize: 'clamp(56px, 7.6vw, 104px)', lineHeight: 0.92, letterSpacing: '-.02em' }}
+        >
+          {/* <Trans> rather than two keys: the highlighted word sits in a
+              different place in every language - at the end in French, in the
+              middle in Chinese - so the sentence has to be translated whole
+              and carry the emphasis with it. */}
+          <Trans i18nKey="hero.title">
+            A new way to <span className="text-[var(--kl-gold-deep)]">connect</span>.
+          </Trans>
+        </h1>
+        <div className="flex flex-col gap-8">
+          <div>
+            <p className="mb-8 max-w-[460px] text-[19px] leading-[1.55] text-[var(--kl-mid)]" style={{ textWrap: 'pretty' }}>
+              {t('hero.sub')}
+            </p>
+            <Link
+              to={join.to}
+              className="kl-sheen inline-flex items-center gap-[18px] rounded-[20px] py-[7px] pe-[7px] ps-[30px] text-[17px] font-semibold shadow-[0_14px_30px_-12px_rgba(169,118,28,.55)] transition-transform hover:-translate-y-0.5"
+            >
+              {join.to.startsWith('/join') ? t('hero.cta') : join.label}
+              <span className="grid h-12 w-12 place-items-center rounded-full bg-white text-xl text-[var(--kl-night)]" aria-hidden="true">
+                →
+              </span>
+            </Link>
+          </div>
+          <div className="flex flex-col gap-4 border-t border-[var(--kl-paper-2)] pt-7">
+            <span className="text-sm font-semibold text-[var(--kl-low)]">{t('hero.app')}</span>
+            <StoreBadges />
+          </div>
         </div>
       </div>
 
-      <HeroCollage />
+      {/* The whole picture, never cropped: width follows the hero, height
+          follows the image. Seen on arrival, so loaded first, not lazily. */}
+      <img
+        src="/landing/kinjy-homepage-banner.webp"
+        alt="Diverse men and women wearing Kinjy T-shirts featuring family trees, digital memorials, and social media icons."
+        width={800}
+        height={267}
+        loading="eager"
+        fetchPriority="high"
+        decoding="async"
+        className="kl-rise kl-card-shadow mt-[clamp(32px,5vw,56px)] block h-auto w-full rounded-2xl"
+        style={{ ['--kl-delay' as string]: '.15s' }}
+      />
     </header>
   )
 }
