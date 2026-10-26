@@ -6,6 +6,7 @@ member wallets, and records the reporting rows — in one transaction.
 """
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from decimal import Decimal
 
 from sqlalchemy import select
@@ -51,8 +52,13 @@ def post_split(
     idempotency_key: str | None = None,
     created_by: str | None = None,
     credit_wallets: bool = True,
+    pending: bool = False,
 ) -> models.Journal:
     """Post a distribution.
+
+    With ``pending``, members are credited to their wallet's *pending* balance:
+    owed, but not withdrawable until the money behind it is confirmed with the
+    payment provider (``release_pending``).
 
     Shape of the journal, for a $100 ad purchase:
 
@@ -146,11 +152,40 @@ def post_split(
 
         if credit_wallets:
             wallet = get_wallet(db, share.beneficiary, currency)
-            wallet.available += share.amount
+            if pending:
+                wallet.pending += share.amount
+            else:
+                wallet.available += share.amount
             wallet.lifetime_earned += share.amount
 
     assert_balanced(db, journal.id)
     return journal
+
+
+# Accounts whose credits are what members are owed, and so what a wallet holds.
+PAYABLE_ACCOUNTS = ("liabilities:member_payable", "liabilities:vendor_payable")
+
+
+def release_pending(db: OrmSession, journal: models.Journal) -> bool:
+    """Make a journal's member credits withdrawable, once.
+
+    Called when the money behind them is confirmed with the payment provider.
+    Returns False when it was already done (a retry changes nothing).
+    """
+    if journal.funds_released_at is not None:
+        return False
+    rows = db.scalars(select(models.Entry).where(
+        models.Entry.journal_id == journal.id,
+        models.Entry.account.in_(PAYABLE_ACCOUNTS),
+        models.Entry.beneficiary_id.is_not(None),
+        models.Entry.credit > 0,
+    )).all()
+    for row in rows:
+        wallet = get_wallet(db, row.beneficiary_id, row.currency)
+        wallet.pending -= row.credit
+        wallet.available += row.credit
+    journal.funds_released_at = datetime.now(timezone.utc)
+    return True
 
 
 def assert_balanced(db: OrmSession, journal_id: str) -> None:
@@ -318,6 +353,7 @@ def post_escrow(
     currency: str = "USD",
     idempotency_key: str | None = None,
     created_by: str | None = None,
+    beneficiary_id: str | None = None,
 ) -> models.Journal:
     """Move money into or out of custody.
 
@@ -326,8 +362,10 @@ def post_escrow(
     journal can recognise the revenue) or ``escrow_refund`` (the money goes
     back to the buyer and no revenue is ever recognised).
     """
-    if kind not in ("escrow_hold", "escrow_release", "escrow_refund"):
+    if kind not in ("escrow_hold", "escrow_release", "escrow_refund", "escrow_refund_balance"):
         raise ValueError(f"unknown escrow kind {kind}")
+    if kind == "escrow_refund_balance" and not beneficiary_id:
+        raise ValueError("a refund to a member's balance needs the member")
 
     existing = find_existing(db, idempotency_key)
     if existing is not None:
@@ -353,6 +391,14 @@ def post_escrow(
     if kind == "escrow_hold":
         line(account=models.ACC_CUSTODY, debit=value, reason="escrow_funded")
         line(account=models.ACC_ESCROW_HELD, credit=value, reason="escrow_owed_to_parties")
+    elif kind == "escrow_refund_balance":
+        # The held money now belongs to the buyer, on their Kinjy balance. It is
+        # posted only once the payment provider has confirmed the allocation.
+        line(account=models.ACC_ESCROW_HELD, debit=value, reason="escrow_refund_to_balance")
+        line(account=models.ACC_MEMBER_PAYABLE, credit=value, beneficiary_id=beneficiary_id,
+             role="refund", reason="order_refund_payable")
+        wallet = get_wallet(db, beneficiary_id, currency)
+        wallet.available += value
     else:
         line(account=models.ACC_ESCROW_HELD, debit=value, reason=f"{kind}_cleared")
         line(account=models.ACC_CUSTODY, credit=value, reason=f"{kind}_paid_out")

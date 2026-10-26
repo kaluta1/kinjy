@@ -226,8 +226,8 @@ export function EbookOwnerPanel({ item, onChanged }: { item: ProductDetail; onCh
       )}
       {sales.data && sales.data.awaiting_release > 0 && (
         <p className="text-xs text-text-low">
-          {sales.data.awaiting_release} paid order{sales.data.awaiting_release === 1 ? '' : 's'} still in escrow, released after the
-          confirmation window. <Link to="/market/seller" className="text-gold-soft underline">Seller dashboard</Link>
+          {sales.data.awaiting_release} paid order{sales.data.awaiting_release === 1 ? '' : 's'} still held: each becomes final at the
+          buyer's first successful download. <Link to="/market/seller" className="text-gold-soft underline">Seller dashboard</Link>
         </p>
       )}
       {note && (

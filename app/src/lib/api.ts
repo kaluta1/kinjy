@@ -209,11 +209,10 @@ export interface EconomyRules {
   creator_revenue: { creator_pct: string; note: string }
   leaders: { pool_pct: string; pool_size: number; ranked_by: string; allocation: string }
   referral_pool: { entry_price: string; cap: number }
-  escrow: {
-    custodian: string
-    licence: string
-    auto_release_days: number
-    note: string
+  marketplace_payments: {
+    held_until: string
+    automatic_release: boolean
+    payments: string
   }
   payout: { threshold_usd: string; requires: string[] }
 }
@@ -1619,6 +1618,50 @@ export interface ProductDetail {
   margin?: string
   markup_pct?: string
   ebook?: EbookDetail
+  /** What the buyer is told before paying. Null fields mean "none". */
+  protection?: ProductProtection
+}
+
+/** A seller's guarantee or warranty, as they state it. */
+export interface ProductGuarantee {
+  scope: string
+  duration: string
+  exclusions: string
+  claim_contact: string
+}
+
+/** Insurance included with a purchase, as the seller states it. */
+export interface ProductInsurance {
+  insurer: string
+  coverage: string
+  exclusions: string
+  claim_process: string
+  premium_included: boolean
+}
+
+export interface ProductProtection {
+  guarantee: ProductGuarantee | null
+  insurance: ProductInsurance | null
+  /** A service: what "completed" means and how the buyer can check it. */
+  service_terms: string | null
+  /** buyer_confirmation (products, services) or first_download (ebooks). */
+  final_when: 'buyer_confirmation' | 'first_download'
+  /** Always false: Kinjy does not arbitrate ordinary marketplace disputes. */
+  kinjy_arbitrates: boolean
+  policy_version: string
+}
+
+/** The marketplace policy a buyer acknowledges (GET /commerce/marketplace/policy). */
+export interface MarketplacePolicy {
+  version: string
+  checkout: string[]
+  acceptance: string[]
+  download: string[]
+  handover_awaiting: string
+  handover_verified: string
+  payments: string
+  automatic_release: boolean
+  kinjy_arbitrates: boolean
 }
 
 export interface MyProduct extends ProductPricing {
@@ -1649,6 +1692,10 @@ export interface ProductPatch {
   images?: string[]
   status?: 'active' | 'paused' | 'draft'
   ebook?: EbookInput
+  /** null states there is none. */
+  guarantee?: ProductGuarantee | null
+  insurance?: ProductInsurance | null
+  service_terms?: string | null
 }
 
 export interface Sale extends Order {
@@ -1709,22 +1756,67 @@ export interface Order {
   vendor_price: string
   margin: string
   refunded_amount: string
-  /** pending | in_escrow | delivered | settled | part_refunded | refunded | disputed | cancelled */
+  /**
+   * pending | in_escrow | delivered | accepted | settled | refund_pending | refunded | cancelled
+   * (disputed and part_refunded on orders from before 27/10 only)
+   */
   status: string
-  custodian: string | null
-  custodian_name?: string
+  /** kalutapay | soncopay | mock (a development machine) */
+  payment_rail: string | null
   escrow_funded_at: string | null
   delivered_at: string | null
   delivery_note: string | null
-  dispute_window_ends: string | null
   escrow_released_at: string | null
-  dispute_id?: string | null
+  /** The purchase made final - the one record both back offices show. */
+  acceptance: OrderAcceptance
+  /** For the seller only: what to do with the goods now. */
+  handover: string | null
+  /** Separate from acceptance: "seller paid" only when confirmed. */
+  settlement: { status: 'none' | 'pending' | 'confirmed' | 'action_required'; error: string | null; confirmed_at: string | null }
+  cancellation: OrderCancellation | null
+  /** Detail only (GET /commerce/orders/{id}). */
+  protection?: ProductProtection | null
+  final_when?: 'buyer_confirmation' | 'first_download'
+  can_confirm?: boolean
   /** Only present for the buyer and the vendor of the order. */
   shipping?: OrderShipping | null
   carrier?: string | null
   tracking_number?: string | null
   tracking_url?: string | null
   created_at: string
+}
+
+export interface OrderAcceptance {
+  accepted: boolean
+  /** awaiting | buyer_confirmed | first_download */
+  status: 'awaiting' | 'buyer_confirmed' | 'first_download'
+  /** The server's time. */
+  accepted_at: string | null
+  reference: string | null
+  kind: 'buyer_confirmation' | 'first_download' | null
+  policy_version: string | null
+}
+
+export interface OrderCancellation {
+  cancelled_at: string
+  reason: 'cannot_supply' | 'refused_at_handover' | 'delivery_failed' | 'unpaid' | 'operational'
+  note: string | null
+  refund_status: 'none' | 'pending' | 'confirmed' | 'action_required'
+  refund_error: string | null
+}
+
+export type SupportKind = 'payment_problem' | 'duplicate_charge' | 'not_handed_over' | 'file_problem' | 'fraud' | 'legal'
+
+export interface SupportCase {
+  id: string
+  order_id: string
+  role: 'buyer' | 'seller'
+  kind: SupportKind
+  message: string
+  status: 'open' | 'closed'
+  resolution_note: string | null
+  created_at: string
+  closed_at: string | null
 }
 
 export interface OrderPayment {
@@ -1766,18 +1858,6 @@ export interface ReviewsSummary {
   /** Review counts keyed '1'..'5'. */
   distribution: Record<string, number>
   items: ProductReview[]
-}
-
-export interface EscrowTerms {
-  custodian: string
-  provider: string
-  licence: string
-  holds_funds: string
-  released_when: string
-  auto_release_days: number
-  dispute_response_days: number
-  arbitration_days: number
-  outcomes: string[]
 }
 
 export interface DisputeMessage {
@@ -3441,6 +3521,10 @@ export const kaluta = {
       images?: string[]
       status?: 'active' | 'draft'
       ebook?: EbookInput
+      guarantee?: ProductGuarantee | null
+      insurance?: ProductInsurance | null
+      /** Required for a service. */
+      service_terms?: string | null
     }) =>
       api.post<{ id: string; status: string; pricing: Record<string, string> }>('/commerce/products', input),
 
@@ -3448,8 +3532,16 @@ export const kaluta = {
     ebookTerms: () => api.get<EbookTerms>('/commerce/ebooks/terms', { auth: false }),
     /** The buyer's ebooks. */
     library: () => api.get<{ items: LibraryItem[] }>('/commerce/library'),
-    /** A short-lived link to an owned ebook. Checked by the server every time. */
-    downloadEbook: (orderId: string) => api.post<EbookDownloadLink>(`/commerce/library/${orderId}/download`),
+    /**
+     * A short-lived link to an owned ebook. Checked by the server every time.
+     * Before the purchase is final the buyer must acknowledge that the first
+     * successful download makes it final (428 without it).
+     */
+    downloadEbook: (orderId: string, acknowledge?: { policy_version: string }) =>
+      api.post<EbookDownloadLink>(
+        `/commerce/library/${orderId}/download`,
+        acknowledge ? { acknowledge_final: true, policy_version: acknowledge.policy_version } : {},
+      ),
     /** A new version of the book's file; buyers get it from their library. */
     replaceEbookFile: (productId: string, assetId: string, note?: string) =>
       api.post<{ version: number; unchanged?: boolean }>(`/commerce/products/${productId}/ebook/file`, {
@@ -3461,11 +3553,14 @@ export const kaluta = {
         items: Array<{ version: number; filename: string; format: string; size_bytes: number; note: string | null; created_at: string; current: boolean }>
       }>(`/commerce/products/${productId}/ebook/files`),
     productSales: (productId: string) => api.get<ProductSales>(`/commerce/products/${productId}/sales`),
-    order: (productId: string, quantity = 1, shipping?: OrderShipping) =>
-      api.post<{ id: string; status: string; customer_price: string }>('/commerce/orders', {
+    /** Place an order. The buyer acknowledges the marketplace policy (its version) before paying. */
+    order: (productId: string, quantity = 1, shipping: OrderShipping | undefined, policyVersion: string) =>
+      api.post<{ id: string; status: string; customer_price: string; policy_version: string }>('/commerce/orders', {
         product_id: productId,
         quantity,
         ...(shipping ? { shipping } : {}),
+        acknowledge_policy: true,
+        policy_version: policyVersion,
       }),
     myOrders: (params: { status?: string; role?: 'buyer' | 'seller' } = {}) => {
       const query = new URLSearchParams()
@@ -3494,10 +3589,10 @@ export const kaluta = {
       return api.get<StorefrontResponse>(`/commerce/vendors/${id}?${query}`, { auth: false })
     },
 
-    /** Who holds the money and for how long. Readable signed out on purpose. */
-    escrowTerms: () => api.get<EscrowTerms>('/commerce/escrow/terms', { auth: false }),
+    /** The marketplace policy the buyer acknowledges. Readable signed out on purpose. */
+    marketplacePolicy: () => api.get<MarketplacePolicy>('/commerce/marketplace/policy', { auth: false }),
 
-    /** The seller says it has shipped. This does not release the money. */
+    /** The seller says it is on its way / ready / the service performed. This never releases the money. */
     markDelivered: (
       orderId: string,
       input: string | { note?: string; carrier?: string; tracking_number?: string; tracking_url?: string } = '',
@@ -3507,9 +3602,28 @@ export const kaluta = {
         typeof input === 'string' ? { note: input } : input,
       ),
 
-    /** The buyer releases the escrow. Only they can. */
-    confirmDelivery: (orderId: string) =>
-      api.post<{ id: string; status: string }>(`/commerce/orders/${orderId}/confirm-delivery`, {}),
+    /**
+     * The buyer confirms receipt: the purchase is final and settlement starts.
+     * Only the buyer, after acknowledging what it means; a repeat returns the
+     * same acceptance.
+     */
+    confirmDelivery: (orderId: string, policyVersion: string) =>
+      api.post<Order>(`/commerce/orders/${orderId}/confirm-delivery`, {
+        acknowledge_final: true,
+        policy_version: policyVersion,
+      }),
+
+    /** Cancel before the purchase is final. Seller: a paid order; buyer: an unpaid one. */
+    cancelOrder: (
+      orderId: string,
+      reason: 'cannot_supply' | 'refused_at_handover' | 'delivery_failed' | 'unpaid',
+      note = '',
+    ) => api.post<Order>(`/commerce/orders/${orderId}/cancel`, { reason, note }),
+
+    /** Operational support on an order (not arbitration). */
+    openSupport: (orderId: string, kind: SupportKind, message: string) =>
+      api.post<SupportCase>(`/commerce/orders/${orderId}/support`, { kind, message }),
+    mySupportCases: () => api.get<{ items: SupportCase[] }>('/commerce/support/me'),
 
     /**
      * Start paying for an order. The amount must be the order's price: the server
@@ -3527,17 +3641,9 @@ export const kaluta = {
     settleMockPayment: (paymentId: string) =>
       api.post<{ payment_id: string; status: string; mock: boolean }>(`/payments/${paymentId}/mock-settle`, {}),
 
-    openDispute: (
-      orderId: string,
-      input: { category: string; reason: string; amount_claimed?: string; evidence?: string[] },
-    ) => api.post<Dispute>(`/commerce/orders/${orderId}/dispute`, input),
-
+    /** Disputes opened before 27/10, read-only history. */
     myDisputes: () => api.get<{ items: Dispute[] }>('/commerce/disputes/me'),
     dispute: (id: string) => api.get<Dispute>(`/commerce/disputes/${id}`),
-    replyToDispute: (id: string, input: { body: string; evidence?: string[] }) =>
-      api.post<{ ok: boolean; status: string }>(`/commerce/disputes/${id}/messages`, input),
-    withdrawDispute: (id: string) => api.post<Dispute>(`/commerce/disputes/${id}/withdraw`, {}),
-    concedeDispute: (id: string) => api.post<Dispute>(`/commerce/disputes/${id}/concede`, {}),
 
     /** Buyer only, once the order is settled; one review per order. */
     reviewOrder: (orderId: string, input: { rating: number; comment?: string }) =>
@@ -3655,13 +3761,36 @@ export const kaluta = {
           created_at: string
         }>
       }>('/admin/refunds?limit=100'),
+    /** Disputes from before 27/10: history only, nothing can be resolved any more. */
     disputes: () => api.get<{ items: Array<Record<string, unknown>> } | Array<Record<string, unknown>>>('/admin/disputes'),
-    resolveDispute: (disputeId: string, outcome: 'release_to_seller' | 'refund_buyer' | 'split', note: string, refundAmount?: string) =>
-      api.post<Record<string, unknown>>(`/admin/disputes/${disputeId}/resolve`, {
-        outcome,
-        note,
-        refund_amount: refundAmount || undefined,
-      }),
+    /** Marketplace orders; `attention`: a settlement or refund pending or waiting for a person. */
+    marketOrders: (attention = false) =>
+      api.get<{ items: Order[] }>(`/admin/commerce/orders${attention ? '?attention=true' : ''}`),
+    retryMarketOrder: (orderId: string) => api.post<Order>(`/admin/commerce/orders/${orderId}/retry`, {}),
+    cancelMarketOrder: (orderId: string, note: string) =>
+      api.post<Order>(`/admin/commerce/orders/${orderId}/cancel`, { note }),
+    supportCases: (status: 'open' | 'closed' | '' = 'open') =>
+      api.get<{ items: SupportCase[] }>(`/admin/commerce/support${status ? `?status=${status}` : '?status='}`),
+    closeSupportCase: (caseId: string, note: string) =>
+      api.post<SupportCase>(`/admin/commerce/support/${caseId}/close`, { note }),
+    /** Every allocation of marketplace order money, with what the provider answered. */
+    orderFunds: (status?: string) =>
+      api.get<{
+        items: Array<{
+          reference: string
+          order_id: string
+          purpose: 'settlement' | 'refund'
+          rail: string | null
+          amount: string
+          status: string
+          backing: string | null
+          provider_refs: string | null
+          attempts: number
+          error: string | null
+          created_at: string
+          confirmed_at: string | null
+        }>
+      }>(`/admin/payments/order-funds${status ? `?status=${status}` : ''}`),
     leadersSnapshot: (period: string) =>
       api.post<Record<string, unknown>>(`/admin/leaders-pool/snapshot?period=${period}`, {}),
     leadersReviewed: (period: string) =>
@@ -4003,12 +4132,6 @@ export const kaluta = {
       return api.get<CommissionsPage>(`/commissions?${query}`)
     },
     payoutEligibility: () => api.get<PayoutEligibility>('/payments/eligibility'),
-    addPayoutDestination: (input: { address: string; rail?: string; currency?: string; label?: string }) =>
-      api.post<{ rail: string; address: string; whitelisted: boolean; note: string }>(
-        '/payments/destinations',
-        { rail: 'nowpayments', currency: 'usdtbsc', ...input },
-      ),
-
     kyc: () => api.get<KycStatus>('/kyc/status'),
     /** Opens (or reopens) the Kaluta KYC session; `verification_url` is where the member goes next. */
     startKyc: () =>

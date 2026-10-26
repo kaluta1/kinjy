@@ -140,12 +140,12 @@ check("the sample downloads without an account", httpx.get(detail["ebook"]["samp
 
 print()
 print("Checkout and payment")
-r = c.post("/commerce/orders", headers=buyer["h"], json={"product_id": pid})
+r = c.post("/commerce/orders", headers=buyer["h"], json={"acknowledge_policy": True, "policy_version": "2026-10-27", "product_id": pid})
 check("no shipping address is asked for", r.status_code == 201, r.text[:200])
 order = r.json()
-again = c.post("/commerce/orders", headers=buyer["h"], json={"product_id": pid}).json()
+again = c.post("/commerce/orders", headers=buyer["h"], json={"acknowledge_policy": True, "policy_version": "2026-10-27", "product_id": pid}).json()
 check("checking out twice gives the same pending order", again["id"] == order["id"], (again, order))
-check("not paid: no download", c.post(f"/commerce/library/{order['id']}/download", headers=buyer["h"]).status_code == 403)
+check("not paid: no download", c.post(f"/commerce/library/{order['id']}/download", headers=buyer["h"], json={"acknowledge_final": True, "policy_version": "2026-10-27"}).status_code == 403)
 r = c.post("/payments/checkout", headers=buyer["h"], json={"purpose": "order", "amount": "0.01",
                                                           "reference": order["id"], "rail": "mock"})
 check("paying one cent for it is refused", r.status_code == 400, r.text[:200])
@@ -156,22 +156,22 @@ check("the old public 'mark as paid' route is gone",
       c.post(f"/commerce/orders/{order['id']}/paid").status_code in (404, 405))
 r = httpx.post(f"{COMMERCE}/internal/orders/{order['id']}/funded", params={"amount": "1.00"})
 check("a payment of the wrong amount does not open the order", r.status_code == 409, r.text[:200])
-check("still not downloadable", c.post(f"/commerce/library/{order['id']}/download", headers=buyer["h"]).status_code == 403)
+check("still not downloadable", c.post(f"/commerce/library/{order['id']}/download", headers=buyer["h"], json={"acknowledge_final": True, "policy_version": "2026-10-27"}).status_code == 403)
 pay = c.post("/payments/checkout", headers=buyer["h"], json={"purpose": "order", "amount": order["customer_price"],
                                                             "reference": order["id"], "rail": "mock"}).json()
 c.post(f"/payments/{pay['payment_id']}/mock-settle", headers=buyer["h"]).raise_for_status()
 r = httpx.post(f"{COMMERCE}/internal/orders/{order['id']}/funded", params={"amount": order["customer_price"]})
-check("a duplicate payment event changes nothing", r.status_code == 200 and r.json()["status"] == "delivered", r.text[:200])
+check("a duplicate payment event changes nothing", r.status_code == 200 and r.json()["status"] == "in_escrow", r.text[:200])
 holds = httpx.get(f"{LEDGER}/internal/journals/by-key", params={"key": f"escrow:hold:{order['id']}"})
 check("one escrow hold in the ledger", holds.status_code == 200, holds.status_code)
-check("one order, delivered", psql(f"select count(*), max(status) from commerce.orders where product_id='{pid}'") == "1|delivered")
+check("one order, paid and waiting in the library", psql(f"select count(*), max(status) from commerce.orders where product_id='{pid}'") == "1|in_escrow")
 
 print()
 print("The library and the download")
 lib = c.get("/commerce/library", headers=buyer["h"]).json()["items"]
 item = next((i for i in lib if i["order_id"] == order["id"]), None)
 check("the ebook is in the buyer's library, downloadable", item and item["state"] == "active", lib)
-r = c.post(f"/commerce/library/{order['id']}/download", headers=buyer["h"])
+r = c.post(f"/commerce/library/{order['id']}/download", headers=buyer["h"], json={"acknowledge_final": True, "policy_version": "2026-10-27"})
 check("a download link is given", r.status_code == 200, r.text[:200])
 link = r.json()
 url = link["url"] if link["url"].startswith("http") else "http://localhost:8200" + link["url"]
@@ -186,23 +186,23 @@ check("a forged signature: nothing", forged != url and httpx.get(forged).status_
 check("served as a download, not shown in a tab",
       "attachment" in got.headers.get("content-disposition", ""), got.headers.get("content-disposition"))
 check("a stranger asking for the buyer's order: nothing",
-      c.post(f"/commerce/library/{order['id']}/download", headers=stranger["h"]).status_code == 404)
+      c.post(f"/commerce/library/{order['id']}/download", headers=stranger["h"], json={"acknowledge_final": True, "policy_version": "2026-10-27"}).status_code == 404)
 check("the stranger's library is empty", c.get("/commerce/library", headers=stranger["h"]).json()["items"] == [])
 d = c.get(f"/commerce/products/{pid}", headers=buyer["h"]).json()
 check("the page says it is already purchased", d["ebook"]["purchased_order_id"] == order["id"], d["ebook"])
-check("buying it again is refused", c.post("/commerce/orders", headers=buyer["h"], json={"product_id": pid}).status_code == 409)
+check("buying it again is refused", c.post("/commerce/orders", headers=buyer["h"], json={"acknowledge_policy": True, "policy_version": "2026-10-27", "product_id": pid}).status_code == 409)
 
 print()
 print("Retries, limits, versions")
 c.patch(f"/commerce/products/{pid}", headers=seller["h"], json={"ebook": {"download_limit": 1}})
-r = c.post(f"/commerce/library/{order['id']}/download", headers=buyer["h"]).json()
+r = c.post(f"/commerce/library/{order['id']}/download", headers=buyer["h"], json={"acknowledge_final": True, "policy_version": "2026-10-27"}).json()
 check("asking again at once is a retry, not counted", r.get("counted") is False, r)
 v2 = upload(seller, "book-v2.pdf", pdf_bytes("full book v2"), "ebook").json()
 r = c.post(f"/commerce/products/{pid}/ebook/file", headers=seller["h"], json={"asset_id": v2["id"], "note": "Typos fixed"})
 check("the seller uploads a new version", r.status_code == 200 and r.json()["version"] == 2, r.text[:200])
 item = next(i for i in c.get("/commerce/library", headers=buyer["h"]).json()["items"] if i["order_id"] == order["id"])
 check("the buyer sees an update", item["update_available"] is True and item["file"]["version"] == 2, item)
-r = c.post(f"/commerce/library/{order['id']}/download", headers=buyer["h"])
+r = c.post(f"/commerce/library/{order['id']}/download", headers=buyer["h"], json={"acknowledge_final": True, "policy_version": "2026-10-27"})
 check("with one download allowed and used, a new download is refused clearly",
       r.status_code == 403 and "used all" in r.text, r.text[:200])
 versions = c.get(f"/commerce/products/{pid}/ebook/files", headers=seller["h"]).json()["items"]
@@ -216,7 +216,7 @@ login = c.post("/auth/login", json={"email": admin["email"], "password": "Sup3rS
 admin["h"] = {"Authorization": f"Bearer {login['tokens']['access_token'] if 'tokens' in login else login['access_token']}"}
 r = c.post(f"/admin/commerce/orders/{order['id']}/reset-downloads", headers=admin["h"], json={"reason": "Damaged file reported"})
 check("an admin resets the allowance", r.status_code == 200, r.text[:200])
-r = c.post(f"/commerce/library/{order['id']}/download", headers=buyer["h"])
+r = c.post(f"/commerce/library/{order['id']}/download", headers=buyer["h"], json={"acknowledge_final": True, "policy_version": "2026-10-27"})
 link2 = r.json()
 url2 = link2.get("url", "")
 url2 = url2 if url2.startswith("http") else "http://localhost:8200" + url2
@@ -225,7 +225,7 @@ check("and the buyer gets version 2", r.status_code == 200 and link2["version"] 
 check("members cannot use admin routes", c.post(f"/admin/commerce/orders/{order['id']}/revoke-access", headers=buyer["h"],
                                                 json={"reason": "nope"}).status_code in (401, 403))
 c.post(f"/admin/commerce/orders/{order['id']}/revoke-access", headers=admin["h"], json={"reason": "Chargeback"})
-check("revoked: no download", c.post(f"/commerce/library/{order['id']}/download", headers=buyer["h"]).status_code == 403)
+check("revoked: no download", c.post(f"/commerce/library/{order['id']}/download", headers=buyer["h"], json={"acknowledge_final": True, "policy_version": "2026-10-27"}).status_code == 403)
 c.post(f"/admin/commerce/orders/{order['id']}/restore-access", headers=admin["h"], json={"reason": "Resolved"})
 acc = c.get(f"/admin/commerce/orders/{order['id']}/access", headers=admin["h"]).json()
 check("every admin action is in the audit log",
@@ -235,15 +235,15 @@ print()
 print("Unpublished, suspended, refunded")
 c.patch(f"/commerce/products/{pid}", headers=seller["h"], json={"status": "paused", "ebook": {"download_limit": 50}})
 check("unpublished: the buyer still downloads",
-      c.post(f"/commerce/library/{order['id']}/download", headers=buyer["h"]).status_code == 200)
-check("and nobody new can buy it", c.post("/commerce/orders", headers=stranger["h"], json={"product_id": pid}).status_code == 404)
+      c.post(f"/commerce/library/{order['id']}/download", headers=buyer["h"], json={"acknowledge_final": True, "policy_version": "2026-10-27"}).status_code == 200)
+check("and nobody new can buy it", c.post("/commerce/orders", headers=stranger["h"], json={"acknowledge_policy": True, "policy_version": "2026-10-27", "product_id": pid}).status_code == 404)
 c.patch(f"/commerce/products/{pid}", headers=seller["h"], json={"status": "active"})
 c.post(f"/admin/commerce/products/{pid}/suspend", headers=admin["h"], json={"reason": "Copyright complaint"})
 check("suspended: off the public page", c.get(f"/commerce/products/{pid}", headers=stranger["h"]).status_code == 404)
 check("and the seller cannot republish it",
       c.patch(f"/commerce/products/{pid}", headers=seller["h"], json={"status": "active"}).status_code == 409)
 psql(f"update commerce.orders set status='refunded' where id='{order['id']}'")
-r = c.post(f"/commerce/library/{order['id']}/download", headers=buyer["h"])
+r = c.post(f"/commerce/library/{order['id']}/download", headers=buyer["h"], json={"acknowledge_final": True, "policy_version": "2026-10-27"})
 check("refunded: access ends, and says why", r.status_code == 403 and "refunded" in r.text, r.text[:200])
 
 print()
@@ -251,10 +251,11 @@ print("Physical products and services as before")
 phys = c.post("/commerce/products", headers=seller["h"], json={"title": f"Demo cloth {tag()}", "vendor_price": "20",
                                                                 "kind": "product", "stock": 3, "country": "US"}).json()["id"]
 check("a physical product still needs an address",
-      c.post("/commerce/orders", headers=buyer["h"], json={"product_id": phys}).status_code == 422)
+      c.post("/commerce/orders", headers=buyer["h"], json={"acknowledge_policy": True, "policy_version": "2026-10-27", "product_id": phys}).status_code == 422)
 serv = c.post("/commerce/products", headers=seller["h"], json={"title": f"Demo service {tag()}", "vendor_price": "20",
-                                                                "kind": "service"}).json()["id"]
-check("a service does not", c.post("/commerce/orders", headers=buyer["h"], json={"product_id": serv}).status_code == 201)
+                                                                "kind": "service",
+                                                                    "service_terms": "Delivered as described"}).json()["id"]
+check("a service does not", c.post("/commerce/orders", headers=buyer["h"], json={"acknowledge_policy": True, "policy_version": "2026-10-27", "product_id": serv}).status_code == 201)
 old_digital = c.post("/commerce/products", headers=seller["h"], json={"title": f"Demo file {tag()}", "vendor_price": "5",
                                                                        "kind": "digital"})
 check("a digital listing without ebook details still works the old way", old_digital.status_code == 201)

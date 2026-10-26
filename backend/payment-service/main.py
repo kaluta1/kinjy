@@ -15,7 +15,7 @@ from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 
 import httpx
-from fastapi import Depends, Header, HTTPException, Request
+from fastapi import Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session as OrmSession
@@ -31,6 +31,7 @@ from common.service import create_app
 import kaluta
 import kalutapay
 import models
+import orderfunds
 import payouts
 import rails
 import sonco
@@ -107,7 +108,9 @@ class CheckoutIn(BaseModel):
     purpose: str = Field(pattern="^(order|subscription|ad_credit|kyc_fee|tribute|referral_pool|community)$")
     amount: Decimal = Field(gt=0)
     reference: str | None = None
-    rail: str | None = Field(default=None, pattern="^(soncopay|nowpayments|mangopay|mock)$")
+    # Ignored when Kaluta Pay or Sonco Pay is configured (they take every
+    # payment); "mock" is the test rail of a development machine.
+    rail: str | None = Field(default=None, pattern="^(kalutapay|soncopay|mock)$")
     pay_currency: str = "usdtbsc"
     # Where the member lands back on Kinjy after paying on Sonco Pay's page.
     # A path on this site only - an open redirect is a phishing tool.
@@ -127,32 +130,18 @@ PURPOSE_LABELS = {
 }
 
 
-class DestinationIn(BaseModel):
-    rail: str = Field(default="nowpayments", pattern="^(nowpayments|mangopay)$")
-    address: str = Field(min_length=6, max_length=255)
-    currency: str = "usdtbsc"
-    label: str | None = None
-
-
 @app.get("/payments/rails", tags=["payments"])
 def available_rails():
+    """Which payment rail is live. Sonco Pay takes the payments; Kaluta Pay,
+    when configured, sits in front of it and carries the accounting split."""
+    live = "kalutapay" if kalutapay.enabled() else "soncopay" if sonco.enabled() else None
     return {
-        "nowpayments": {
-            "enabled": rails.nowpayments_enabled(),
-            "mode": "live" if rails.nowpayments_enabled() else "mock",
-            "payout_currency": settings.NOWPAYMENTS_PAYOUT_CURRENCY,
-        },
-        "mangopay": {
-            "enabled": rails.mangopay_enabled(),
-            "mode": "live" if rails.mangopay_enabled() else "mock",
-        },
+        "live": live,
+        "kalutapay": {"enabled": kalutapay.enabled()},
+        "soncopay": {"enabled": sonco.enabled()},
+        "test_rail": live is None and rails.test_rail_allowed(),
         "payout_threshold_usd": str(settings.PAYOUT_THRESHOLD_USD),
-        "custody_withdrawal_floor_usd": "50.00",
-        "note": (
-            "Member payouts clear at $1 because they are batched off-chain from the "
-            "custody balance; the $50 floor applies only to sweeping custody to the "
-            "company's own wallet."
-        ),
+        "removed": list(rails.REMOVED_RAILS),
     }
 
 
@@ -224,11 +213,10 @@ def checkout(payload: CheckoutIn, principal: CurrentUser, db: OrmSession = Depen
     # Kaluta Pay, once configured, takes every payment (and splits it); else
     # Sonco Pay directly. A client asking for another rail does not get to
     # pick a different door.
-    rail = (
-        "kalutapay" if kalutapay.enabled()
-        else "soncopay" if sonco.enabled()
-        else rails.choose_rail(payload.rail if payload.rail not in ("soncopay", "kalutapay") else None, "USD")
-    )
+    try:
+        rail = "kalutapay" if kalutapay.enabled() else "soncopay" if sonco.enabled() else rails.choose_rail()
+    except rails.RailError as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
     intent = models.PaymentIntent(
         id=new_id("pmt"),
         user_id=principal.user_id,
@@ -241,7 +229,6 @@ def checkout(payload: CheckoutIn, principal: CurrentUser, db: OrmSession = Depen
     db.add(intent)
     db.flush()
 
-    callback = f"{settings.GATEWAY_URL}/api/payments/ipn/nowpayments"
     try:
         if rail == "kalutapay":
             identity = payouts._identity(principal.user_id)
@@ -272,18 +259,8 @@ def checkout(payload: CheckoutIn, principal: CurrentUser, db: OrmSession = Depen
                 "checkout_url": created.get("checkout_url") or created.get("payment_url"),
                 "raw": created,
             }
-        elif rail == "mangopay":
-            result = rails.create_fiat_payment(
-                amount=intent.amount, currency="USD", user_id=principal.user_id, reference=intent.id
-            )
         else:
-            result = rails.create_crypto_payment(
-                amount=intent.amount,
-                currency="USD",
-                pay_currency=payload.pay_currency,
-                order_id=intent.id,
-                callback_url=callback,
-            )
+            result = rails.create_test_payment(reference=intent.id)
     except rails.RailError as exc:
         db.rollback()
         raise HTTPException(status_code=503, detail=str(exc))
@@ -313,33 +290,6 @@ def checkout(payload: CheckoutIn, principal: CurrentUser, db: OrmSession = Depen
     }
 
 
-@app.post("/payments/ipn/nowpayments", tags=["payments"])
-async def nowpayments_ipn(
-    request: Request,
-    x_nowpayments_sig: str | None = Header(default=None, alias="x-nowpayments-sig"),
-    db: OrmSession = Depends(get_db),
-):
-    """Provider callback. Rejects anything that is not correctly signed."""
-    raw = await request.body()
-    if not rails.verify_ipn_signature(raw, x_nowpayments_sig):
-        raise HTTPException(status_code=401, detail="Invalid IPN signature")
-
-    payload = json.loads(raw)
-    intent = db.scalar(
-        select(models.PaymentIntent).where(models.PaymentIntent.id == payload.get("order_id"))
-    )
-    if intent is None:
-        raise HTTPException(status_code=404, detail="Unknown order_id")
-
-    intent.status = payload.get("payment_status", intent.status)
-    intent.raw_payload = raw.decode()
-    if intent.status == "finished" and intent.settled_at is None:
-        intent.settled_at = datetime.now(timezone.utc)
-        await _on_settled(intent, db)
-    db.commit()
-    return {"ok": True}
-
-
 @app.post("/payments/{payment_id}/mock-settle", tags=["payments"])
 async def mock_settle(payment_id: str, principal: CurrentUser, db: OrmSession = Depends(get_db)):
     """Dev-only shortcut so the full flow is testable without a provider.
@@ -347,11 +297,11 @@ async def mock_settle(payment_id: str, principal: CurrentUser, db: OrmSession = 
     Refuses to run once a real rail is configured — otherwise it would be a way
     to mint settled payments in production.
     """
-    if kalutapay.enabled() or sonco.enabled() or rails.nowpayments_enabled() or rails.mangopay_enabled():
-        raise HTTPException(status_code=403, detail="A live payment rail is configured; mock settlement is disabled")
+    if kalutapay.enabled() or sonco.enabled() or not rails.test_rail_allowed():
+        raise HTTPException(status_code=403, detail="Test settlement exists only on a development machine with no provider")
 
     intent = db.get(models.PaymentIntent, payment_id)
-    if intent is None or intent.user_id != principal.user_id:
+    if intent is None or intent.user_id != principal.user_id or intent.rail != "mock":
         raise HTTPException(status_code=404, detail="Payment not found")
     intent.status = "finished"
     intent.settled_at = datetime.now(timezone.utc)
@@ -383,9 +333,11 @@ def _escrow_lines(intent: models.PaymentIntent) -> list[dict] | None:
     purpose with no programme) gets an empty split - all of it to Kinjy.
     """
     if intent.purpose == "order":
+        # Held whole in the marketplace pool until the purchase is final; then
+        # orderfunds distributes it to the seller (and sponsor) or the buyer.
         return [{
-            "reference": f"order-{intent.id}", "kind": "other", "amount": str(intent.amount),
-            "label": "Marketplace order held until the buyer confirms delivery",
+            "reference": f"order-{intent.id}", "kind": orderfunds.POOL, "amount": str(intent.amount),
+            "label": "Marketplace order held until the purchase is final",
             "source": {"external_id": intent.user_id},
         }]
     if intent.purpose not in ("kyc_fee", "referral_pool", "ad_credit", "community"):
@@ -433,8 +385,13 @@ def _split(intent: models.PaymentIntent, db: OrmSession) -> None:
         db.commit()
         return
     try:
+        if intent.purpose == "order":
+            orderfunds.ensure_categories()
         kalutapay.put_escrow(intent.external_id, lines)
         intent.split_status = "done"
+    except (orderfunds.Retry, orderfunds.Refused) as exc:
+        log.error("kaluta pay categories for %s: %s", intent.id, exc)
+        intent.split_status = "pending"
     except kalutapay.KalutaPayError as exc:
         log.error("kaluta pay split of %s failed: %s", intent.id, exc)
         intent.split_status = "pending"
@@ -779,7 +736,7 @@ async def _on_settled(intent: models.PaymentIntent, db: OrmSession) -> None:
                 f"{COMMERCE_URL}/internal/orders/{intent.reference}/funded",
                 # The amount actually paid: commerce opens the escrow only if
                 # it is the order's total.
-                params={"custody_ref": intent.id, "amount": str(intent.amount)},
+                params={"custody_ref": intent.id, "amount": str(intent.amount), "rail": intent.rail},
                 timeout=8,
             ).raise_for_status()
         except Exception as exc:
@@ -1221,53 +1178,55 @@ def admin_kyc(
 
 # --- escrow ----------------------------------------------------------------
 
-class EscrowRefundIn(BaseModel):
-    order_id: str
-    buyer_id: str
+class AllocationIn(BaseModel):
+    member_id: str = Field(min_length=1, max_length=40)
     amount: Decimal = Field(gt=0)
+    kind: str = Field(pattern="^(seller|commission|refund)$")
+
+
+class OrderFundsIn(BaseModel):
+    order_id: str = Field(min_length=1, max_length=40)
     custody_ref: str | None = None
-    reason: str = ""
+    purpose: str = Field(pattern="^(settlement|refund)$")
+    reference: str = Field(min_length=1, max_length=100)
+    allocations: list[AllocationIn] = Field(min_length=1, max_length=20)
 
 
-@app.post("/internal/escrow/refund", tags=["internal"])
-def escrow_refund(payload: EscrowRefundIn, db: OrmSession = Depends(get_db)):
-    """Instruct the custodian to return money to the buyer.
+@app.post("/internal/order-funds/allocate", tags=["internal"])
+def allocate_order_funds(payload: OrderFundsIn, db: OrmSession = Depends(get_db)):
+    """Allocate a marketplace order's held money: to the seller and sponsor once
+    the purchase is final, or back to the buyer. Called by commerce-service.
 
-    Called by commerce-service once a dispute resolves in the buyer's favour.
-    Recorded as a row of its own so a refund that the rail never confirmed is
-    visible rather than inferred from an absence.
+    200 only when the allocation is confirmed. 503: try again later. 409: it
+    cannot be done automatically; the order needs a person.
     """
-    refund = models.Refund(
-        id=new_id("rfd"),
-        order_id=payload.order_id,
-        user_id=payload.buyer_id,
-        amount=economy.money(payload.amount),
-        custody_ref=payload.custody_ref,
-        reason=payload.reason[:500],
-        rail=rails.choose_rail(None, "USD"),
-    )
-    db.add(refund)
-    db.flush()
-
     try:
-        result = rails.refund_from_custody(
-            amount=refund.amount,
-            user_id=payload.buyer_id,
-            custody_ref=payload.custody_ref,
-            reference=refund.id,
+        row = orderfunds.allocate(
+            db, order_id=payload.order_id, custody_ref=payload.custody_ref, purpose=payload.purpose,
+            reference=payload.reference, allocations=[a.model_dump() for a in payload.allocations],
         )
-        refund.status = result.get("status", "submitted")
-        refund.external_id = result.get("id")
-        refund.settled_at = datetime.now(timezone.utc) if refund.status == "finished" else None
-    except Exception as exc:
-        refund.status = "failed"
-        refund.failure_reason = str(exc)[:200]
-        db.commit()
-        log.error("custodial refund failed for order %s: %s", payload.order_id, exc)
-        raise HTTPException(status_code=502, detail="The custodian refused the refund instruction")
+    except orderfunds.Retry as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+    except orderfunds.Refused as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    return {"status": row.status, "backing": row.backing, "reference": row.reference,
+            "provider_refs": row.provider_refs, "confirmed_at": row.confirmed_at}
 
-    db.commit()
-    return {"refund_id": refund.id, "status": refund.status, "amount": str(refund.amount)}
+
+@app.get("/admin/payments/order-funds", tags=["admin"])
+def list_order_funds(_: AdminUser, status: str | None = None, limit: int = 100, db: OrmSession = Depends(get_db)):
+    """Every allocation of marketplace order money, newest first: what was asked,
+    on which rail, and what the provider answered."""
+    stmt = select(models.FundAllocation).order_by(models.FundAllocation.created_at.desc())
+    if status:
+        stmt = stmt.where(models.FundAllocation.status == status)
+    rows = db.scalars(stmt.limit(min(limit, 500))).all()
+    return {"items": [
+        {"reference": r.reference, "order_id": r.order_id, "purpose": r.purpose, "rail": r.rail,
+         "amount": str(r.amount), "status": r.status, "backing": r.backing, "provider_refs": r.provider_refs,
+         "attempts": r.attempts, "error": r.error, "created_at": r.created_at, "confirmed_at": r.confirmed_at}
+        for r in rows
+    ]}
 
 
 @app.get("/admin/refunds", tags=["admin"])
@@ -1294,40 +1253,6 @@ def list_refunds(_: AdminUser, status: str | None = None, limit: int = 100, db: 
 
 
 # --- payout destinations ---------------------------------------------------
-
-@app.post("/payments/destinations", status_code=201, tags=["payouts"])
-def add_destination(payload: DestinationIn, principal: CurrentUser, db: OrmSession = Depends(get_db)):
-    # Where money would be sent. A payout destination on a minor's account is
-    # the step before a minor being paid, so it is gated at the same age.
-    agefeatures.require(principal.user_id, "monetization")
-    if sonco.enabled():
-        raise HTTPException(status_code=410, detail="Use PUT /payments/payout-wallet: it is confirmed by e-mail, then by an admin")
-
-    existing = db.scalar(
-        select(models.PayoutDestination).where(
-            models.PayoutDestination.user_id == principal.user_id,
-            models.PayoutDestination.rail == payload.rail,
-        )
-    )
-    if existing:
-        existing.address = payload.address
-        existing.currency = payload.currency
-        existing.label = payload.label
-        # Changing the address drops the whitelist flag: a freshly-typed address
-        # must be re-whitelisted with the provider before it can receive funds.
-        existing.whitelisted = False
-        destination = existing
-    else:
-        destination = models.PayoutDestination(user_id=principal.user_id, **payload.model_dump())
-        db.add(destination)
-    db.commit()
-    return {
-        "rail": destination.rail,
-        "address": destination.address,
-        "whitelisted": destination.whitelisted,
-        "note": "The address must be whitelisted with the provider before the first payout.",
-    }
-
 
 @app.get("/payments/eligibility", tags=["payouts"])
 def eligibility(principal: CurrentUser, db: OrmSession = Depends(get_db)):
@@ -1365,63 +1290,6 @@ def eligibility(principal: CurrentUser, db: OrmSession = Depends(get_db)):
             "wallet_required": "Add a payout wallet address",
             "below_threshold": f"Reach ${settings.PAYOUT_THRESHOLD_USD} in accrued commissions",
         }.get(blocker or ""),
-    }
-
-
-@app.post("/admin/payouts/batch", tags=["payouts"])
-def build_batch(admin: AdminUser, db: OrmSession = Depends(get_db)):
-    """Build and submit a payout batch from everyone who clears all three gates."""
-    if sonco.enabled():
-        # Members withdraw themselves now, through a reserve in the ledger.
-        # This batch never debited the ledger, so running it as well would pay
-        # the same commissions twice.
-        raise HTTPException(status_code=410, detail="Payouts are member withdrawals through Sonco Pay now")
-    try:
-        response = httpx.get(f"{LEDGER_URL}/internal/payout-candidates", timeout=15)
-        response.raise_for_status()
-        candidates = response.json()["items"]
-    except Exception as exc:
-        raise HTTPException(status_code=503, detail=f"Could not load payout candidates: {exc}")
-
-    included, skipped = [], []
-    for candidate in candidates:
-        member_id = candidate["member_id"]
-        destination = db.scalar(
-            select(models.PayoutDestination).where(models.PayoutDestination.user_id == member_id)
-        )
-        try:
-            user = httpx.get(f"{AUTH_URL}/internal/users/{member_id}", timeout=5).json()
-            kyc_ok = bool(user.get("kyc_verified"))
-        except Exception:
-            kyc_ok = False
-
-        ok, blocker = economy.is_payout_eligible(
-            accrued_usd=Decimal(candidate["amount"]),
-            kyc_verified=kyc_ok,
-            wallet_on_file=destination is not None,
-        )
-        if ok:
-            included.append(
-                {"address": destination.address, "currency": destination.currency, "amount": candidate["amount"]}
-            )
-        else:
-            skipped.append({"member_id": member_id, "reason": blocker})
-
-    if not included:
-        return {"submitted": False, "included": 0, "skipped": skipped}
-
-    try:
-        result = rails.mass_payout(included)
-    except rails.RailError as exc:
-        raise HTTPException(status_code=503, detail=str(exc))
-
-    return {
-        "submitted": True,
-        "payout_id": result.get("payout_id"),
-        "mock": result.get("mock", False),
-        "included": len(included),
-        "skipped": skipped,
-        "next_step": "Verify the payout with 2FA at the provider before funds move.",
     }
 
 

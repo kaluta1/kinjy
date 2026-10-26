@@ -28,6 +28,11 @@ STATE = {
     "kp_invoices": {},     # Kaluta Pay invoices
     "kp_escrow": {},       # invoice id -> lines
     "payout_calls": 0,
+    # Kaluta Pay escrow categories and distributions (marketplace settlement).
+    "kp_categories": {"commission": "member", "kyc_fee": "fee", "merchant_fee": "fee", "other": "fee"},
+    "kp_distributions": {},  # reference -> distribution
+    "kp_dist_mode": "ok",    # ok | refuse | unreachable
+    "kp_dist_calls": 0,
 }
 LOCK = threading.Lock()
 
@@ -60,6 +65,9 @@ class Handler(BaseHTTPRequestHandler):
                 inv = STATE["kp_invoices"][m.group(1)]
                 if inv["status"] != "paid":
                     return self._send(409, {"detail": "no paid payment on this invoice yet"})
+                for line in body.get("lines", []):
+                    if line.get("kind", "commission") not in STATE["kp_categories"]:
+                        return self._send(422, {"detail": f"unknown or inactive escrow category: {line.get('kind')}"})
                 STATE["kp_escrow"][inv["id"]] = body.get("lines", [])
                 return self._send(200, {"lines": body.get("lines", [])})
         self._send(404, {"detail": "not found"})
@@ -77,6 +85,9 @@ class Handler(BaseHTTPRequestHandler):
             m = re.fullmatch(r"/kp/v1/invoices/([^/]+)", p)
             if m and m.group(1) in STATE["kp_invoices"]:
                 return self._send(200, STATE["kp_invoices"][m.group(1)])
+            if p == "/kp/v1/escrow/categories":
+                return self._send(200, {"items": [{"code": c, "holding": h, "active": True}
+                                                  for c, h in STATE["kp_categories"].items()]})
             if p == "/v1/payout-fees":
                 return self._send(200, {"fees": {"USDT:BSC": "0.50", "USDT:TRON": "1"}, "min_payout_usd": "5"})
             m = re.fullmatch(r"/v1/payments/([^/]+)/methods", p)
@@ -190,6 +201,36 @@ class Handler(BaseHTTPRequestHandler):
                        "next_action": na, "request": body}
                 inv["checkouts"].insert(0, chk)
                 return self._send(201, {"checkout": chk, "invoice": inv})
+            if p == "/kp/v1/escrow/categories":
+                if body["code"] in STATE["kp_categories"]:
+                    return self._send(409, {"detail": "this code already exists"})
+                STATE["kp_categories"][body["code"]] = body["holding"]
+                return self._send(201, {"code": body["code"], "holding": body["holding"]})
+            if p == "/kp/v1/escrow/distributions":
+                STATE["kp_dist_calls"] += 1
+                mode = STATE["kp_dist_mode"]
+                if mode == "unreachable":
+                    return self._send(503, {"detail": "down"})
+                if mode == "refuse":
+                    # What Kaluta Pay answers when a distribution cannot be made (escrow.distribute).
+                    return self._send(422, {"detail": "the pool marketplace_orders holds 0.00 USD, more requested"})
+                if body["reference"] in STATE["kp_distributions"]:
+                    return self._send(201, STATE["kp_distributions"][body["reference"]])
+                if STATE["kp_categories"].get(body["pool"]) != "pool":
+                    return self._send(422, {"detail": f"{body['pool']} is not a pool category"})
+                held = sum(float(line["amount"]) for lines in STATE["kp_escrow"].values()
+                           for line in lines if line.get("kind") == body["pool"])
+                used = sum(float(d["total_due"]) for d in STATE["kp_distributions"].values() if d["pool"] == body["pool"])
+                total = sum(float(a["amount"]) for a in body["allocations"])
+                if total > held - used + 1e-9:
+                    return self._send(422, {"detail": f"the pool {body['pool']} holds {held - used:.2f}, {total:.2f} requested"})
+                d = {"id": len(STATE["kp_distributions"]) + 1, "reference": body["reference"], "pool": body["pool"],
+                     "category": body["category"], "total_due": f"{total:.2f}", "allocations": body["allocations"]}
+                STATE["kp_distributions"][body["reference"]] = d
+                return self._send(201, d)
+            if p == "/_ctl/kp_dist_mode":
+                STATE["kp_dist_mode"] = body["mode"]
+                return self._send(200, {"ok": True})
             if p == "/_ctl/kp_paid":
                 inv = STATE["kp_invoices"][body["id"]]
                 inv.update({"status": "paid", "amount_paid": body.get("amount_paid", inv["amount"])})

@@ -54,9 +54,9 @@ http://localhost:8210/docs.
 | memorial-service | 8206 | `memorial` | Digital Graveyard, tributes, QR codes |
 | messaging-service | 8207 | `messaging` | E2E messenger, WebSocket delivery, notifications |
 | creator-service | 8208 | `creator` | creator studio, publishing engine, subscriptions |
-| commerce-service | 8209 | `commerce` | marketplace with escrow, ad platform |
-| ledger-service | 8210 | `ledger` | immutable ledger, wallets, commissions, escrow, Kinjy Leaders |
-| payment-service | 8211 | `payment` | NowPayments/Mangopay rails, KYC, payout batches |
+| commerce-service | 8209 | `commerce` | marketplace (payment held until the purchase is final), ad platform |
+| ledger-service | 8210 | `ledger` | immutable ledger, wallets, commissions, held funds, Kinjy Leaders |
+| payment-service | 8211 | `payment` | Sonco Pay payments and withdrawals, Kaluta Pay accounting integration, KYC |
 | ai-service | 8212 | `ai` | AI gateway, translation, the Kaluta Assistant |
 | media-service | 8213 | `media` | uploads, provenance labels |
 
@@ -136,12 +136,13 @@ Deliberately explicit, because a half-wired money path is worse than an obvious 
 - **Real:** account lifecycle, JWT + sessions, the direct sponsor lookup, all
   split maths with exact-sum guarantees, double-entry posting with idempotency
   and reversals, the family graph and its derived relationships, feed ranking
-  and the honest "why am I seeing this", escrowed orders, ad floor enforcement.
-- **Mocked, clearly labelled:** payment rails run in mock mode until
-  `NOWPAYMENTS_API_KEY` / Mangopay credentials are set; the AI gateway routes
+  and the honest "why am I seeing this", marketplace orders held until final, ad floor enforcement.
+- **Mocked, clearly labelled:** in development, payments run on a test-only
+  mock path until `SONCOPAY_API_KEY` / `KALUTAPAY_API_KEY` are set (the mock
+  is refused in production); the AI gateway routes
   and meters for real but every provider currently returns mock output.
 - **Not started:** WebAuthn registration/assertion ceremonies (the tables and
-  endpoints exist, the ceremony does not), C2PA signing, Mangopay live calls,
+  endpoints exist, the ceremony does not), C2PA signing,
   live-streaming, the developer app marketplace.
 
 ## Frontend ↔ backend

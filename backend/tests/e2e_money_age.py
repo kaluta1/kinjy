@@ -63,7 +63,7 @@ for tok, who, expect in ((teen14_tok, "14", 403), (teen17_tok, "17", 403), (adul
 
 print("\n== buying ==")
 for tok, who, expect in ((teen14_tok, "14", 403), (teen17_tok, "17", 403), (adult_tok, "adult", 400)):
-    r = c.post("/commerce/orders", headers=auth(tok), json={"product_id": product_id})
+    r = c.post("/commerce/orders", headers=auth(tok), json={"acknowledge_policy": True, "policy_version": "2026-10-27", "product_id": product_id})
     # The adult is refused for a different reason - you cannot buy your own
     # listing - which is exactly the point: they got past the age gate.
     check(f"a {who}-year-old ordering -> {expect}", r.status_code == expect,
@@ -77,11 +77,11 @@ for tok, who, expect in ((teen14_tok, "14", 403), (teen17_tok, "17", 403), (adul
           f"{r.status_code} {r.text[:110]}")
 
 print("\n== being paid ==")
-for tok, who, expect in ((teen17_tok, "17", 403), (adult_tok, "adult", 201)):
-    r = c.post("/payments/destinations", headers=auth(tok),
-               json={"address": "0x" + "a" * 40, "currency": "usdtbsc"})
-    check(f"a {who} adding a payout destination -> {expect}", r.status_code == expect,
-          f"{r.status_code} {r.text[:110]}")
+# The payout wallet (Sonco Pay) since the NowPayments destinations were removed
+# on 27/10. Only the refusal is exercised: an accepted wallet sends a
+# confirmation e-mail.
+r = c.put("/payments/payout-wallet", headers=auth(teen17_tok), json={"address": "0x" + "a" * 40})
+check("a 17 adding a payout wallet -> 403", r.status_code == 403, f"{r.status_code} {r.text[:110]}")
 
 print("\n== becoming a creator ==")
 for tok, who, expect in ((teen17_tok, "17", 403), (adult_tok, "adult", 200)):

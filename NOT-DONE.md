@@ -21,7 +21,7 @@ Last reviewed: 2026-10-26 (One-to-Many pipeline)
 | **Live video broadcasting** | Chat is real, camera preview is local-only. **Nothing is transmitted.** `/live` says so on screen. | An ingest server, a transcoder and a CDN — or WebRTC peer-to-peer plus a TURN server (viewer-count limited). |
 | **End-to-end encrypted messages** | Messages and chat attachments are **encrypted at rest** (`MESSAGES_ENCRYPTION_KEY`), so a stolen database or backup reveals nothing — but the server holds the key and can read them. No key exchange exists, so nothing is end-to-end; the thread header says “Encrypted on our servers”, not “end-to-end”. | Per-device keys, a key agreement (Signal/MLS via a vetted library), multi-device and key backup. |
 | **Voice and video calls** | *Signalling* is built: offer/answer/ICE relay over the existing socket, payload never inspected. **No TURN server**, so peers behind symmetric NATs will fail to connect, and **no group calls** (an offer to 3+ is refused rather than left to fail mysteriously). | A TURN relay, and an SFU for groups. |
-| **Real payment rails** | **Sonco Pay** takes every payment and pays withdrawals once `SONCOPAY_API_KEY` is set (18/10, see the section at the end). Without it, the old rails stay in mock mode. NowPayments and Mangopay themselves are still not wired. | Sonco Pay: the server IP declared in its dashboard, and a funded Sonco Pay balance for withdrawals. |
+| **Real payment rails** | **Sonco Pay** takes every payment and pays withdrawals, through **Kaluta Pay** when it is configured (18-19/10). Mangopay and NowPayments were **removed** on 27/10: no code path, setting or page uses them; old rows keep their rail name for history. Without a provider, production refuses payments; only a development machine has the test rail. | Sonco Pay: the server IP declared in its dashboard, and a funded Sonco Pay balance for withdrawals. |
 | **Machine translation (One-to-Many "Translate ×4")** | The pipeline is real and calls Anthropic through its SDK, but **no `ANTHROPIC_API_KEY` is set on the server**, so the composer shows the chip greyed out with the reason. Short videos cannot draw Arabic or Chinese title cards (no CJK font, no Arabic shaping), so the chip is greyed out for posts in those languages. | `ANTHROPIC_API_KEY` in `/opt/kaluta/.env` (model: `AI_ANTHROPIC_MODEL`, default `claude-opus-5-5`); for ar/zh videos, Noto fonts and libraqm in the media-service image. |
 | **WebAuthn off localhost** | Passkeys work on `http://localhost`. From another machine over plain HTTP the ceremony **will fail**. | HTTPS. |
 
@@ -201,12 +201,8 @@ Checked on production 2026-08-20, promise by promise.
 - **Referral-pool refund when the pool fills mid-payment** — if the last seat is
   sold between checkout and settlement, the payment is flagged `refund_due` and
   logged loudly, but nothing refunds it automatically yet.
-- **Dispute evidence uploads** — the API accepts a list of media URLs per
-  message and stores them; the dispute screen has no file picker, so evidence
-  can only be described in words today.
-- **Admin arbitration screen** — `/admin/disputes` and
-  `/admin/disputes/{id}/resolve` exist and work; there is no console page that
-  calls them, so arbitration is an API call right now.
+- ~~Dispute evidence uploads / admin arbitration screen~~ — marketplace
+  disputes were retired on 27/10 (see "Marketplace: final acceptance").
 - **Family Heritage AI** — `/family/heritage` and `/family/timeline` exist and
   answer; no screen calls them. The marketing page promises an archive, an
   interactive timeline, a narrated documentary and biographies. None of that
@@ -298,8 +294,8 @@ Checked on production 2026-08-20, promise by promise.
   - link previews for /market/products/* are client-side (title + JSON-LD); a
     crawler without JavaScript sees the generic Kinjy card. Sharing the listing
     through a short link (/s/) is not wired for products yet;
-  - refunds go through the existing dispute flow; a full refund ends access,
-    a partial one keeps it.
+  - since 27/10 an ebook is final at its first successful download; before
+    that, a cancelled order is refunded to the buyer's Kinjy balance and access ends.
 
 ## 6. Unverified in this environment
 
@@ -1025,10 +1021,8 @@ What came from where: replies, the composer's emoji/sticker panel, the redesign 
   second payment in the same year is a 409.
 - ~~The Verification tab said "Pay the fee" with nothing to press.~~ It has a
   pay button now.
-- **In production the fee is not real money yet.** No NowPayments or
-  Mangopay key is set on kinjy.com, so payments run in test mode and "Complete
-  the test payment" marks the fee paid. Until a rail is configured, the
-  fourth pin is effectively free - as are marketplace orders.
+- ~~In production the fee is not real money yet.~~ Payments go through Kaluta
+  Pay / Sonco Pay (19/10); the test rail cannot exist in production (27/10).
 - **No reordering of pins**, oldest pin first. **The fee is per calendar
   year**: on 1 January pins above three stay, but no new one can be added
   until the new year's fee is paid.
@@ -1493,3 +1487,46 @@ Every section reads live data. Limits of that data:
 - **System** shows real service health, reconciliation, feature flags and
   ai-service observability; the demo's eval harness, performance budgets and
   visual CI had no data source and were dropped, not faked.
+
+
+## Marketplace: final acceptance, settlement, Sonco Pay / Kaluta Pay only (27/10)
+
+- A buyer's payment is held until the purchase is final: the buyer's own
+  confirmation in their account (products, services - a service only after the
+  seller marked it performed), or an ebook's first successful download (media
+  sent the last byte on a receipt link). Nothing else releases money: no
+  deadline, courier or seller declaration. No automatic release; the sweep is gone.
+- Acceptance is recorded once (reference ACC-..., server time, policy version)
+  and shown in both back offices; settlement is a separate status
+  (pending / confirmed / action_required), retried by a worker in
+  commerce-service, each step idempotent.
+- Settlement: ledger posting with the seller and sponsor credited as *pending*,
+  then the held money allocated at the provider (Kaluta Pay: a distribution from
+  the `marketplace_orders` pool to `marketplace_sales` / `commission`), then the
+  credits made withdrawable. Refunds before acceptance: a distribution to
+  `marketplace_refunds` and the buyer's Kinjy balance.
+- Ordinary disputes retired (410 on every write route); history kept read-only.
+  Operational support cases replace them (payment problem, duplicate charge,
+  not handed over, file problem, fraud, legal) - no money moves from a case.
+- Buyer acknowledges the policy (version 2026-10-27) before paying, before
+  confirming and before the first ebook download; stored per order.
+- Listings disclose the seller guarantee and insurance (or that there is none);
+  a service must state its completion terms.
+- **Not done / to decide:**
+  - Sonco Pay direct (without Kaluta Pay): nothing is held at the provider; the
+    money is in Kinjy's Sonco Pay merchant balance, which withdrawals are paid
+    from. Allocation is confirmed against that balance (`backing:
+    soncopay_merchant_balance`) - say so if that is not acceptable.
+  - Kaluta Pay: Kinjy's tenant must have escrow on (the code documents "escrow
+    on"; not verified on the live tenant). Kinjy's markup and the Leaders share
+    stay in the `marketplace_orders` pool after settlement; nothing distributes them yet.
+  - Members' withdrawals are paid by Sonco Pay from Kinjy's balance, while the
+    allocated money sits in Kaluta Pay's escrow: moving it between the two is
+    an operator task (as for commissions since 19/10).
+  - Overdue orders, a buyer who never confirms, a buyer who refuses at handover
+    but does not answer: no automatic rule (no forfeiture, no deadline) - the
+    seller can cancel (refund to the buyer); a policy on long-unconfirmed orders
+    is still to decide.
+  - Chargebacks / reversals from the provider are not received or handled.
+  - Courier access: none; the seller checks the order on their own account.
+  - Legal review of the policy wording (finality, no arbitration, consumer rights).

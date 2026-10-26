@@ -1,8 +1,11 @@
 import { useState } from 'react'
-import { ShieldCheck } from 'lucide-react'
+import { RefreshCw } from 'lucide-react'
+import { ghostBtn } from '@/components/commerce/ActionSheet'
 import OrderCard, { OrderCardSkeleton } from '@/components/commerce/OrderCard'
+import { timeSecondsLabel, useOrdersLive } from '@/components/commerce/orderStatus'
 import { useApi } from '@/hooks/useApi'
-import { kaluta, type EscrowTerms, type Order } from '@/lib/api'
+import { kaluta, type Order } from '@/lib/api'
+import { cn } from '@/lib/utils'
 
 /**
  * A member's orders (as buyer and as seller) with the actions that fit each status.
@@ -10,10 +13,11 @@ import { kaluta, type EscrowTerms, type Order } from '@/lib/api'
  */
 export default function EscrowOrders() {
   const orders = useApi<{ items: Order[] }>(() => kaluta.market.myOrders(), [])
-  const terms = useApi<EscrowTerms>(() => kaluta.market.escrowTerms(), [])
   const [note, setNote] = useState<string | null>(null)
 
   const items = orders.data?.items ?? []
+  const live = useOrdersLive(orders.data, items, orders.reload)
+
   if (orders.loading && !orders.data) {
     return (
       <ul className="space-y-3" aria-busy="true" role="status">
@@ -27,16 +31,15 @@ export default function EscrowOrders() {
 
   return (
     <section>
-      {terms.data && (
-        <p className="mb-4 flex items-start gap-2.5 text-sm leading-relaxed text-text-low">
-          <ShieldCheck size={16} className="mt-0.5 shrink-0 text-gold" aria-hidden="true" />
-          <span>
-            Your money is held by {terms.data.custodian} — {terms.data.licence} — not by Kinjy. It reaches the seller
-            when you confirm receipt, or {terms.data.auto_release_days} days after payment if you neither confirm nor
-            dispute.
-          </span>
+      <div className="mb-4 flex flex-wrap items-center gap-2">
+        <p className="caption flex-1">
+          Last checked <span className="mono-data">{timeSecondsLabel(live.lastChecked)}</span>
         </p>
-      )}
+        <button type="button" onClick={live.refresh} disabled={orders.loading} className={ghostBtn}>
+          <RefreshCw size={13} className={cn(orders.loading && 'animate-spin')} aria-hidden="true" />
+          Refresh
+        </button>
+      </div>
       {note && <p className="mb-4 rounded-2xl bg-gold/10 px-5 py-3 text-sm text-text-hi">{note}</p>}
       <ul className="space-y-3">
         {items.map((order) => (

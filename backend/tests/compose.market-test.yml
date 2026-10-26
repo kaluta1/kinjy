@@ -1,0 +1,19 @@
+# Local only: quick settlement retries for e2e_market_acceptance.py, and
+# payment-service through Kaluta Pay (fake, tests/fake_sonco_kaluta.py).
+#   docker compose -f docker-compose.yml -f backend/tests/compose.market-test.yml up -d --no-deps commerce-service payment-service
+# Without this file the services are back to the .env values. Never on a server.
+services:
+  commerce-service:
+    environment:
+      SETTLEMENT_POLL_S: "2"
+      SETTLEMENT_RETRY_BASE_S: "2"
+      SETTLEMENT_MAX_ATTEMPTS: "4"
+  payment-service:
+    environment:
+      SONCOPAY_API_KEY: sp_test_fake_for_e2e
+      SONCOPAY_WEBHOOK_SECRET: whsec_fake_for_e2e
+      SONCOPAY_BASE_URL: http://host.docker.internal:8790
+      KALUTAPAY_API_KEY: kpk_test_fake_for_e2e
+      KALUTAPAY_WEBHOOK_SECRET: whs_fake_for_e2e
+      KALUTAPAY_BASE_URL: http://host.docker.internal:8790/kp
+    extra_hosts: ["host.docker.internal:host-gateway"]

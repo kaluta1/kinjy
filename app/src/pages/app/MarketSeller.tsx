@@ -9,8 +9,8 @@ import { cn } from '@/lib/utils'
 
 const TABS = [
   { id: 'listings', label: 'My listings' },
-  { id: 'ship', label: 'To ship' },
-  { id: 'money', label: 'Escrow & earnings' },
+  { id: 'ship', label: 'Orders' },
+  { id: 'money', label: 'Earnings' },
 ] as const
 
 type Tab = (typeof TABS)[number]['id']
@@ -21,7 +21,7 @@ export default function MarketSeller() {
   return (
     <AppShell
       title="My shop"
-      subtitle="Manage your listings, ship your orders and follow your earnings."
+      subtitle="Manage your listings, hand over your orders and follow your earnings."
       action={
         <Link
           to="/market/sell"

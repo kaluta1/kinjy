@@ -1,12 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { AnimatePresence, animate, motion } from 'framer-motion'
-import { Check, Lock, LockOpen, Play, RotateCcw, Send, ShieldCheck, Users } from 'lucide-react'
-import { LedgerRow } from '@/components/ui-kit'
+import { AnimatePresence, motion } from 'framer-motion'
+import { Check, Play, RotateCcw, Send, ShieldCheck, Users, Wallet } from 'lucide-react'
 import { FEATURES } from '@/lib/features'
 import { cn } from '@/lib/utils'
 import { EASE, useReducedMotion } from '@/components/creators/motion-utils'
-import { Eyebrow, KlButton } from '@/components/landing/PageKit'
-import { KL_CARD, KL_CARD_GOLD, KL_LABEL } from '@/components/landing/kl-classes'
+import { KlButton } from '@/components/landing/PageKit'
+import { KL_CARD, KL_CARD_GOLD } from '@/components/landing/kl-classes'
 
 /* ------------------------------------------------------------------ */
 /* The direct split: a $120 agency purchase                            */
@@ -25,7 +24,7 @@ const SELLER = { label: 'Seller', amount: 100, note: 'their own asking price, un
 const PURCHASE = FEATURES.marketplace
   ? {
       title: 'Service purchase · photography session',
-      caption: 'seller asks $100 · Kinjy adds a 20% markup · held in escrow until confirmed',
+      caption: 'seller asks $100 · Kinjy adds a 20% markup · held until the purchase is final',
       total: 120,
       seller: SELLER,
       revenue: 'the $20 markup — Kinjy’s revenue — splits three ways',
@@ -62,7 +61,7 @@ const SPLIT = [
     label: 'Kinjy platform',
     pct: 75,
     amount: 15,
-    note: 'custody, moderation, infrastructure — and it funds the pool',
+    note: 'moderation, infrastructure — and it funds the pool',
     tone: 'muted' as const,
   },
 ]
@@ -101,10 +100,7 @@ function LevelSplit() {
   return (
     <div className={cn(KL_CARD, 'p-6 sm:p-8')}>
       <div className="flex flex-wrap items-center justify-between gap-4">
-        <div>
-          <p className={KL_LABEL}>The ${PURCHASE.total} split</p>
-          <h3 className="mt-2 text-[22px] font-bold tracking-[-0.02em]">One purchase. One commission.</h3>
-        </div>
+        <h3 className="text-[22px] font-bold tracking-[-0.02em]">One purchase. One commission.</h3>
         <KlButton size="sm" variant={stage >= 4 ? 'ghost' : 'gold'} onClick={run} disabled={running}>
           {stage >= 4 ? (
             <>
@@ -229,256 +225,61 @@ function LevelSplit() {
 }
 
 /* ------------------------------------------------------------------ */
-/* $1 escrow accumulator + Mass Payouts batch                          */
+/* Withdrawals: on request, from $10                                   */
 /* ------------------------------------------------------------------ */
-const COMMISSION_EVENTS = [
-  { from: 0.62, to: 0.88, chip: FEATURES.marketplace ? '+$0.26 · marketplace sale' : '+$0.26 · ad purchase' },
-  { from: 0.88, to: 1.04, chip: '+$0.16 · subscription renewal' },
+
+const CONDITIONS = [
+  { icon: Wallet, title: 'Available balance of $10 or more', text: 'network fee included — below that, it stays in your balance' },
+  { icon: ShieldCheck, title: 'Identity verified', text: 'through KinjyKYC, once a year' },
+  { icon: Check, title: 'Wallet added and confirmed', text: 'the wallet you want to be paid to, on BSC' },
 ]
 
-const PAYOUT_STEPS = [
-  { mono: 'POST /v1/payout', label: 'batch created — withdrawals queued (1000+ per call)' },
-  { mono: 'POST /v1/payout/verify', label: '2FA code verified — batch authorized' },
-  { mono: 'GET /v1/payout/:id', label: 'tracked to settled · avg ≈ 5 min · 0% service fee' },
-]
-
-function EscrowAccumulator() {
-  const reduced = useReducedMotion()
-  const [balance, setBalance] = useState(0.62)
-  const [eventIdx, setEventIdx] = useState(-1) // which commission chip is visible
-  const [released, setReleased] = useState(false)
-  const [payoutStage, setPayoutStage] = useState(0) // 0 none · 1..3 steps
-  const [running, setRunning] = useState(false)
-  const timers = useRef<number[]>([])
-  const controls = useRef<{ stop: () => void } | null>(null)
-
-  const clearAll = () => {
-    timers.current.forEach((t) => window.clearTimeout(t))
-    timers.current = []
-    controls.current?.stop()
-    controls.current = null
-  }
-  useEffect(() => clearAll, [])
-
-  const tweenTo = useCallback(
-    (from: number, to: number, done: () => void) => {
-      if (reduced) {
-        setBalance(to)
-        done()
-        return
-      }
-      controls.current = animate(from, to, {
-        duration: 0.9,
-        ease: [0.22, 1, 0.36, 1],
-        onUpdate: (v) => setBalance(v),
-        onComplete: done,
-      })
-    },
-    [reduced],
-  )
-
-  const run = useCallback(() => {
-    clearAll()
-    setRunning(true)
-    setBalance(0.62)
-    setEventIdx(-1)
-    setReleased(false)
-    setPayoutStage(0)
-    const step = reduced ? 120 : 1400
-
-    timers.current.push(window.setTimeout(() => setEventIdx(0), step * 0.5))
-    timers.current.push(
-      window.setTimeout(() => {
-        tweenTo(COMMISSION_EVENTS[0].from, COMMISSION_EVENTS[0].to, () => {
-          timers.current.push(window.setTimeout(() => setEventIdx(1), step * 0.5))
-          timers.current.push(
-            window.setTimeout(() => {
-              tweenTo(COMMISSION_EVENTS[1].from, COMMISSION_EVENTS[1].to, () => {
-                setReleased(true)
-                for (let s = 1; s <= 3; s += 1) {
-                  timers.current.push(
-                    window.setTimeout(() => {
-                      setPayoutStage(s)
-                      if (s === 3) setRunning(false)
-                    }, (reduced ? 100 : 1100) * s),
-                  )
-                }
-              })
-            }, step),
-          )
-        })
-      }, step),
-    )
-  }, [reduced, tweenTo])
-
-  const pct = Math.min(balance / 1, 1) * 100
-
+/** Right: how a balance leaves Kinjy. */
+function WithdrawalPanel() {
   return (
-    <div className="flex flex-col gap-6">
-      {/* member escrow card */}
-      <div className={cn(KL_CARD_GOLD, 'p-6 sm:p-8')}>
-        <div className="flex flex-wrap items-center justify-between gap-4">
-          <div className="flex items-center gap-4">
-            <span className="flex h-12 w-12 items-center justify-center rounded-full font-display text-lg" style={{ background: 'var(--grad-orb)' }}>
-              <span className="text-ink">A</span>
+    <div className={cn(KL_CARD_GOLD, 'p-6 sm:p-8')}>
+      <h3 className="text-[22px] font-bold tracking-[-0.02em]">Withdraw when you choose.</h3>
+      <p className="caption mt-2">Nothing leaves automatically: you press Withdraw in Payments.</p>
+      <ul className="mt-6 space-y-3">
+        {CONDITIONS.map((c) => (
+          <li key={c.title} className="flex items-start gap-4 rounded-card-md border border-white/10 bg-white/[0.02] px-4 py-3">
+            <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-gold/15 text-gold-soft">
+              <c.icon size={15} aria-hidden="true" />
             </span>
-            <div>
-              <p className="font-semibold text-text-hi">Demo K. — commission escrow</p>
-              <p className="caption">verified · BSC wallet whitelisted</p>
+            <div className="min-w-0">
+              <p className="text-sm font-semibold text-text-hi">{c.title}</p>
+              <p className="caption mt-0.5">{c.text}</p>
             </div>
-          </div>
-          <KlButton size="sm" variant={released ? 'ghost' : 'gold'} onClick={run} disabled={running}>
-            {released ? (
-              <>
-                <RotateCcw size={14} aria-hidden="true" /> Replay
-              </>
-            ) : (
-              'Simulate commissions'
-            )}
-          </KlButton>
+          </li>
+        ))}
+      </ul>
+      <div className="mt-6 flex items-center gap-4 rounded-card-md border border-gold/30 bg-gold/[0.06] px-4 py-3">
+        <span className="flex h-10 w-10 items-center justify-center rounded-full" style={{ background: 'var(--grad-gold-sheen)' }}>
+          <Send size={16} className="text-ink" aria-hidden="true" />
+        </span>
+        <div className="min-w-0 flex-1">
+          <p className="text-sm font-semibold text-text-hi">Sent by Sonco Pay in USDT on BSC</p>
+          <p className="caption">The network fee is shown before you confirm and taken from the amount sent.</p>
         </div>
-
-        {/* balance + progress to $1 */}
-        <div className="mt-6">
-          <div className="flex items-end justify-between">
-            <span className="mono-data text-4xl font-semibold text-gold-soft">${balance.toFixed(2)}</span>
-            <span className="mono-data text-xs text-text-low">threshold $1.00</span>
-          </div>
-          <div className="mt-3 h-2 overflow-hidden rounded-full bg-white/10">
-            <motion.div
-              className="h-full rounded-full"
-              style={{ width: `${pct}%`, background: released ? 'var(--success)' : 'var(--grad-arc)' }}
-              transition={{ duration: 0.3 }}
-            />
-          </div>
-
-          {/* incoming commission chips */}
-          <div className="mt-4 min-h-[30px] space-y-2">
-            <AnimatePresence>
-              {eventIdx >= 0 &&
-                COMMISSION_EVENTS.slice(0, eventIdx + 1).map((e) => (
-                  <motion.p
-                    key={e.chip}
-                    className="mono-data inline-block rounded-full border border-success/40 bg-success/10 px-3 py-1 text-xs text-success"
-                    initial={reduced ? false : { opacity: 0, y: -8, scale: 0.9 }}
-                    animate={{ opacity: 1, y: 0, scale: 1 }}
-                    transition={{ duration: 0.35, ease: [0.34, 1.56, 0.64, 1] }}
-                  >
-                    {e.chip}
-                  </motion.p>
-                ))}
-            </AnimatePresence>
-          </div>
-
-          {/* escrow lock */}
-          <div
-            className={cn(
-              'mt-5 flex items-center gap-4 rounded-card-md border p-4 transition-colors duration-500',
-              released ? 'border-success/40 bg-success/[0.07]' : 'border-white/10 bg-white/[0.02]',
-            )}
-          >
-            <motion.span
-              key={released ? 'open' : 'closed'}
-              initial={reduced ? false : { scale: 0.5, rotate: released ? -14 : 0 }}
-              animate={{ scale: 1, rotate: 0 }}
-              transition={{ duration: 0.45, ease: [0.34, 1.56, 0.64, 1] }}
-              className={cn(
-                'flex h-10 w-10 items-center justify-center rounded-full',
-                released ? 'bg-success/20 text-success' : 'bg-white/[0.06] text-text-mid',
-              )}
-            >
-              {released ? <LockOpen size={17} aria-hidden="true" /> : <Lock size={17} aria-hidden="true" />}
-            </motion.span>
-            <div className="min-w-0 flex-1">
-              <p className={cn('text-sm font-semibold', released ? 'text-success' : 'text-text-hi')}>
-                {released ? 'Escrow released — $1 threshold reached' : 'Held in custody escrow'}
-              </p>
-              <p className="caption">
-                {released
-                  ? 'Demo joins the next Mass Payouts batch to her whitelisted BSC wallet.'
-                  : 'Your commissions are held securely in the NowPayments custody balance until you reach $1.'}
-              </p>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      {/* Mass Payouts batch */}
-      <div className={cn(KL_CARD, 'p-6 sm:p-8')}>
-        <p className={cn(KL_LABEL, 'inline-flex items-center gap-2')}>
-          <Users size={14} aria-hidden="true" /> Mass Payouts batch · money out
-        </p>
-        <ul className="mt-5 space-y-3">
-          {PAYOUT_STEPS.map((s, i) => {
-            const on = payoutStage > i
-            return (
-              <li
-                key={s.mono}
-                className={cn(
-                  'flex items-start gap-3 rounded-card-md border p-3.5 transition-colors duration-300',
-                  on ? 'border-gold/30 bg-gold/[0.04]' : 'border-white/8 bg-white/[0.02] opacity-55',
-                )}
-              >
-                <span
-                  className={cn(
-                    'mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full border text-[0.65rem]',
-                    on ? 'border-success bg-success/15 text-success' : 'border-white/15 text-text-low',
-                  )}
-                >
-                  {on ? <Check size={11} aria-hidden="true" /> : i + 1}
-                </span>
-                <div className="min-w-0">
-                  <p className="mono-data text-xs text-sky">{s.mono}</p>
-                  <p className="caption mt-0.5">{s.label}</p>
-                </div>
-              </li>
-            )
-          })}
-        </ul>
-        <AnimatePresence>
-          {payoutStage >= 3 && (
-            <motion.div
-              key="paid"
-              initial={reduced ? false : { opacity: 0, y: 10 }}
-              animate={{ opacity: 1, y: 0 }}
-              transition={{ duration: 0.4, ease: EASE }}
-              className="mt-4"
-            >
-              <LedgerRow
-                id="po-55231"
-                label="Mass Payout — Demo K. · 0xSAF3…4d6A (whitelisted)"
-                amount="-$1.04 USDT·BSC"
-                reconciled
-                timestamp="settled"
-              />
-            </motion.div>
-          )}
-        </AnimatePresence>
-        <p className="mono-data mt-5 flex items-start gap-2 text-[0.7rem] leading-relaxed text-text-low">
-          <ShieldCheck size={13} className="mt-0.5 shrink-0 text-gold" aria-hidden="true" />
-          The $1 rule works because payouts are batched off-chain from custody. Treasury custody
-          withdrawals carry a $50 floor; per-coin on-chain network minimums apply.
-        </p>
       </div>
     </div>
   )
 }
 
-/** Section 4 — Commission cashout engine: 10-level split + $1 escrow + Mass Payouts. */
+/** Section 4 — one commission level, and withdrawals on request. */
 export default function CashoutEngine() {
   const reduced = useReducedMotion()
   return (
     <section className="kl-pad-x scroll-mt-24 border-t border-[var(--kl-paper-2)] py-[clamp(72px,9vw,120px)]">
       <div>
-        <Eyebrow>Money out — Commission cashout engine</Eyebrow>
-        <h2 className="kl-h2 mt-5 max-w-[900px]">
+        <h2 className="kl-h2 max-w-[900px]">
           One sponsor, paid from our own margin.{' '}
-          <span className="text-[var(--kl-gold-deep)]">One dollar out the door.</span>
+          <span className="text-[var(--kl-gold-deep)]">Withdraw from $10.</span>
         </h2>
         <p className="kl-lead mt-6 !max-w-[680px]">
-          Every purchase allocates commissions across ten inviter levels in the immutable ledger.
-          Balances under $1 rest in NowPayments custody escrow; the moment they cross a dollar, the
-          member is swept into the next Mass Payouts batch — automatically.
+          Every purchase pays one commission: 20% of Kinjy’s revenue to the buyer’s sponsor, recorded in
+          the ledger as it is earned. Once your available balance reaches $10, network fee included, you
+          withdraw it on request.
         </p>
         <motion.div
           className="mt-12 grid items-start gap-8 grid-cols-[minmax(0,1fr)] lg:grid-cols-2"
@@ -488,7 +289,7 @@ export default function CashoutEngine() {
           transition={{ duration: 0.7, ease: EASE }}
         >
           <LevelSplit />
-          <EscrowAccumulator />
+          <WithdrawalPanel />
         </motion.div>
       </div>
     </section>

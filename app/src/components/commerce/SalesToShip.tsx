@@ -1,15 +1,21 @@
 import { useState } from 'react'
 import { Link } from 'react-router'
-import { Check, Copy, Gavel, MapPin, Truck } from 'lucide-react'
-import DeliverySheet from '@/components/commerce/DeliverySheet'
+import { Check, ChevronDown, ChevronRight, Copy, MapPin, RefreshCw } from 'lucide-react'
 import { ghostBtn } from '@/components/commerce/ActionSheet'
+import OrderActions from '@/components/commerce/OrderActions'
+import { AcceptanceRecord } from '@/components/commerce/OrderCard'
+import OrderStatusChip from '@/components/commerce/OrderStatusChip'
+import { dateLabel, isService, timeSecondsLabel, useOrdersLive } from '@/components/commerce/orderStatus'
 import { addressLines } from '@/components/commerce/shippingText'
 import { useApi } from '@/hooks/useApi'
-import { kaluta, type Dispute, type Sale } from '@/lib/api'
+import { kaluta, type Order } from '@/lib/api'
+import { cn } from '@/lib/utils'
 
-function SaleCard({ sale, disputed, onShip }: { sale: Sale; disputed: boolean; onShip?: () => void }) {
+function SaleCard({ order, onChanged, onNote }: { order: Order; onChanged: () => void; onNote: (m: string) => void }) {
   const [copied, setCopied] = useState(false)
-  const lines = sale.shipping ? addressLines(sale.shipping) : []
+  const ebook = Boolean(order.product?.ebook)
+  const lines = order.shipping && !ebook ? addressLines(order.shipping) : []
+  const buyer = order.counterpart
 
   const copy = async () => {
     try {
@@ -25,15 +31,27 @@ function SaleCard({ sale, disputed, onShip }: { sale: Sale; disputed: boolean; o
     <li className="cloud-card p-4">
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
-          <p className="line-clamp-2 text-sm font-semibold text-text-hi">{sale.product_title ?? 'Listing'}</p>
+          <p className="line-clamp-2 text-sm font-semibold text-text-hi">{order.product?.title ?? 'Listing'}</p>
           <p className="caption mt-1">
-            {sale.buyer.display_name ?? 'Buyer'} · qty {sale.quantity}
+            Order <span className="mono-data select-all">{order.id.slice(0, 8)}</span> · {dateLabel(order.created_at)} ·
+            qty {order.quantity}
+          </p>
+          <p className="mt-1 text-sm text-text-mid">
+            Buyer: {buyer?.display_name || 'Buyer'}
+            {buyer?.handle && <span className="text-text-low"> @{buyer.handle}</span>}
           </p>
         </div>
-        <p className="mono-data shrink-0 text-sm text-text-hi">${sale.vendor_price}</p>
+        <div className="shrink-0 text-right">
+          <p className="mono-data text-sm text-text-hi">${order.vendor_price}</p>
+          <OrderStatusChip status={order.status} service={isService(order)} className="mt-1" />
+        </div>
       </div>
 
-      {lines.length > 0 && (
+      <div className="mt-3 empty:hidden">
+        <AcceptanceRecord order={order} compact />
+      </div>
+
+      {lines.length > 0 && !order.cancellation && (
         <div className="mt-3 rounded-2xl bg-ink-2/60 p-3">
           <p className="caption mb-1 flex items-center gap-1.5">
             <MapPin size={12} className="text-gold" aria-hidden="true" />
@@ -53,91 +71,129 @@ function SaleCard({ sale, disputed, onShip }: { sale: Sale; disputed: boolean; o
         </div>
       )}
 
-      {sale.delivered_at && (sale.carrier || sale.tracking_number) && (
+      {order.delivered_at && (order.carrier || order.tracking_number) && (
         <p className="caption mt-2">
-          {sale.carrier} {sale.tracking_number && <span className="mono-data">{sale.tracking_number}</span>}
+          {order.carrier} {order.tracking_number && <span className="mono-data">{order.tracking_number}</span>}
         </p>
       )}
 
-      {onShip && (
-        <button
-          type="button"
-          onClick={onShip}
-          className="mt-3 inline-flex min-h-[48px] w-full items-center justify-center gap-1.5 rounded-full bg-gradient-to-br from-gold-soft to-gold px-6 text-sm font-bold text-ink"
-        >
-          <Truck size={15} aria-hidden="true" />
-          Mark as delivered
-        </button>
-      )}
+      <div className="mt-3 empty:hidden">
+        <OrderActions order={order} onChanged={onChanged} onNote={onNote} />
+      </div>
 
       <Link
-        to={`/market/orders/${sale.id}/dispute`}
-        className="mt-3 inline-flex min-h-11 items-center gap-1.5 text-sm font-semibold text-text-mid hover:text-gold-soft"
+        to={`/market/orders/${order.id}`}
+        className="mt-2 inline-flex min-h-11 items-center gap-1 text-sm font-semibold text-text-mid hover:text-gold-soft"
       >
-        <Gavel size={14} aria-hidden="true" />
-        {disputed ? 'View dispute' : 'Open dispute'}
+        Open the order
+        <ChevronRight size={14} aria-hidden="true" />
       </Link>
     </li>
   )
 }
 
+function Group({
+  title,
+  orders,
+  empty,
+  folded = false,
+  onChanged,
+  onNote,
+}: {
+  title: string
+  orders: Order[]
+  empty?: string
+  folded?: boolean
+  onChanged: () => void
+  onNote: (m: string) => void
+}) {
+  if (orders.length === 0 && !empty) return null
+  const list =
+    orders.length === 0 ? (
+      <p className="text-sm text-text-low">{empty}</p>
+    ) : (
+      <ul className="space-y-3">
+        {orders.map((o) => (
+          <SaleCard key={o.id} order={o} onChanged={onChanged} onNote={onNote} />
+        ))}
+      </ul>
+    )
+  if (folded) {
+    return (
+      <details className="group">
+        <summary className="mb-2 flex min-h-11 cursor-pointer list-none items-center gap-2 text-sm font-semibold text-text-hi [&::-webkit-details-marker]:hidden">
+          <span className="flex-1">
+            {title} ({orders.length})
+          </span>
+          <ChevronDown size={16} className="text-text-low transition-transform group-open:rotate-180" aria-hidden="true" />
+        </summary>
+        {list}
+      </details>
+    )
+  }
+  return (
+    <div>
+      <h2 className="mb-2 text-sm font-semibold text-text-hi">
+        {title} ({orders.length})
+      </h2>
+      {list}
+    </div>
+  )
+}
+
+/** The seller's back office: what to hand over, what is awaited, what is final and how settlement stands. */
 export default function SalesToShip() {
-  const inEscrow = useApi<{ items: Sale[] }>(() => kaluta.market.sales('in_escrow'), [])
-  const delivered = useApi<{ items: Sale[] }>(() => kaluta.market.sales('delivered'), [])
-  // /commerce/sales carries no dispute_id; one call for the whole list beats one per card.
-  const disputes = useApi<{ items: Dispute[] }>(() => kaluta.market.myDisputes(), [])
-  const [shipping, setShipping] = useState<Sale | null>(null)
+  const orders = useApi<{ items: Order[] }>(() => kaluta.market.myOrders({ role: 'seller' }), [])
   const [note, setNote] = useState<string | null>(null)
+  const items = orders.data?.items ?? []
+  const live = useOrdersLive(orders.data, items, orders.reload)
 
-  if (inEscrow.loading && !inEscrow.data) return <p className="text-sm text-text-low">Loading your sales…</p>
-  if (inEscrow.error) return <p role="alert" className="text-sm text-red-200">{inEscrow.error}</p>
+  if (orders.loading && !orders.data) return <p className="text-sm text-text-low">Loading your orders…</p>
+  if (orders.error && !orders.data) return <p role="alert" className="text-sm text-red-200">{orders.error}</p>
 
-  const toShip = (inEscrow.data?.items ?? []).filter((s) => s.to_ship)
-  const waiting = delivered.data?.items ?? []
-  const disputedOrders = new Set((disputes.data?.items ?? []).map((d) => d.order_id))
+  const open = items.filter((o) => !o.cancellation && !o.acceptance?.accepted)
+  const toHandOver = open.filter((o) => o.status === 'in_escrow' && !o.delivered_at && !o.product?.ebook)
+  const awaiting = open.filter((o) => o.status === 'delivered' || (o.status === 'in_escrow' && o.product?.ebook))
+  const unpaid = open.filter((o) => o.status === 'pending')
+  const final = items.filter((o) => o.acceptance?.accepted && o.settlement?.status !== 'confirmed')
+  const settled = items.filter((o) => o.acceptance?.accepted && o.settlement?.status === 'confirmed')
+  const cancelled = items.filter((o) => o.cancellation || ['refunded', 'refund_pending', 'cancelled'].includes(o.status))
+  const legacy = items.filter((o) => ['disputed', 'part_refunded'].includes(o.status) && !o.acceptance?.accepted)
+
+  const groupProps = { onChanged: orders.reload, onNote: setNote }
 
   return (
     <section className="space-y-6">
-      {note && <p className="text-sm text-gold-soft">{note}</p>}
-
-      <div>
-        <h2 className="mb-2 text-sm font-semibold text-text-hi">To ship ({toShip.length})</h2>
-        {toShip.length === 0 ? (
-          <p className="text-sm text-text-low">Nothing to ship right now.</p>
-        ) : (
-          <ul className="space-y-3">
-            {toShip.map((sale) => (
-              <SaleCard key={sale.id} sale={sale} disputed={disputedOrders.has(sale.id)} onShip={() => setShipping(sale)} />
-            ))}
-          </ul>
-        )}
+      <div className="flex flex-wrap items-center gap-2">
+        <p className="caption flex-1">
+          Last checked <span className="mono-data">{timeSecondsLabel(live.lastChecked)}</span>
+          {live.polling && ' · checking every 15 s'}
+        </p>
+        <button
+          type="button"
+          onClick={live.refresh}
+          disabled={orders.loading}
+          className={ghostBtn}
+        >
+          <RefreshCw size={13} className={cn(orders.loading && 'animate-spin')} aria-hidden="true" />
+          Refresh
+        </button>
       </div>
+      <p className="caption">Couriers: check this order on your own account before telling the courier to hand over.</p>
 
-      {waiting.length > 0 && (
-        <div>
-          <h2 className="mb-2 text-sm font-semibold text-text-hi">Delivered — waiting for the buyer ({waiting.length})</h2>
-          <ul className="space-y-3">
-            {waiting.map((sale) => (
-              <SaleCard key={sale.id} sale={sale} disputed={disputedOrders.has(sale.id)} />
-            ))}
-          </ul>
-        </div>
+      {note && (
+        <p role="status" className="text-sm text-gold-soft">
+          {note}
+        </p>
       )}
 
-      {shipping && (
-        <DeliverySheet
-          open
-          orderId={shipping.id}
-          productId={shipping.product_id}
-          onClose={() => setShipping(null)}
-          onDone={() => {
-            setShipping(null)
-            setNote('Marked as delivered. The money is released when the buyer confirms receipt.')
-            inEscrow.reload()
-            delivered.reload()
-          }}
-        />
-      )}
+      <Group title="To ship or perform" orders={toHandOver} empty="Nothing to ship right now." {...groupProps} />
+      <Group title="Awaiting buyer confirmation" orders={awaiting} {...groupProps} />
+      <Group title="Final — settlement" orders={final} {...groupProps} />
+      <Group title="Awaiting payment" orders={unpaid} folded {...groupProps} />
+      <Group title="Settled" orders={settled} folded {...groupProps} />
+      <Group title="Cancelled or refunded" orders={cancelled} folded {...groupProps} />
+      <Group title="Older orders" orders={legacy} folded {...groupProps} />
     </section>
   )
 }

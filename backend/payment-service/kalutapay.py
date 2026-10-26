@@ -170,6 +170,25 @@ def put_escrow(invoice_id: str, lines: list[dict]) -> dict:
     return _request("PUT", f"/v1/invoices/{invoice_id}/escrow", {"lines": lines})
 
 
+def list_categories() -> list[dict]:
+    return _request("GET", "/v1/escrow/categories").get("items", [])
+
+
+def create_category(code: str, label: str, holding: str, description: str | None = None) -> dict:
+    return _request("POST", "/v1/escrow/categories",
+                    {"code": code, "label": label, "holding": holding, "description": description})
+
+
+def create_distribution(*, pool: str, category: str, reference: str, allocations: list[dict],
+                        label: str | None = None, currency: str = "USD") -> dict:
+    """Move part of an escrow pool to named members. Idempotent on ``reference``:
+    the same reference again returns the same distribution."""
+    return _request("POST", "/v1/escrow/distributions", {
+        "pool": pool, "category": category, "reference": reference, "label": label,
+        "currency": currency, "allocations": allocations,
+    })
+
+
 # --- webhooks -------------------------------------------------------------------------
 
 def signature_ok(raw: bytes, header: str | None) -> bool:

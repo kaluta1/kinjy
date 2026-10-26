@@ -3,7 +3,15 @@ import { Link } from 'react-router'
 import { ExternalLink, RefreshCw, Search } from 'lucide-react'
 import { Badge, Panel, PanelState, Stat } from '@/components/dashboard/primitives'
 import { useApi } from '@/hooks/useApi'
-import { ApiError, kaluta, type AdminJournal, type AdminMemberBrief, type AdminPaymentBrief } from '@/lib/api'
+import {
+  ApiError,
+  kaluta,
+  type AdminJournal,
+  type AdminMemberBrief,
+  type AdminPaymentBrief,
+  type Order,
+  type SupportCase,
+} from '@/lib/api'
 import { FEATURES } from '@/lib/features'
 import { cn } from '@/lib/utils'
 import PayoutWallets from '@/pages/app/PayoutWallets'
@@ -650,7 +658,7 @@ function Refunds() {
   const rows = useApi(() => kaluta.adminConsole.refunds(), [])
   const refundMembers = useMembers((rows.data?.items ?? []).map((r) => r.user_id))
   return (
-    <Panel title="Refunds" subtitle="Marketplace refunds out of escrow, and pool refunds credited to members' balances.">
+    <Panel title="Refunds" subtitle="Marketplace refunds of held payments, and pool refunds credited to members' balances.">
       <PanelState loading={rows.loading} error={rows.error} empty={rows.data?.items.length === 0}>
         <ul className="space-y-2">
           {rows.data?.items.map((r) => (
@@ -672,7 +680,214 @@ function Refunds() {
   )
 }
 
-/* ------------------------------------------------------------------ disputes */
+/* ------------------------------------------------------------------ marketplace */
+
+/**
+ * Marketplace operations. Kinjy does not arbitrate ordinary disputes: a
+ * purchase is final when the buyer confirms receipt (or, for an ebook, at the
+ * first successful download). Admins only fix stuck money and handle
+ * operational support.
+ */
+export function Marketplace() {
+  const [tab, setTab] = useState<'attention' | 'support' | 'funds' | 'disputes'>('attention')
+  return (
+    <div className="space-y-4">
+      <Chips
+        options={[
+          { id: 'attention', label: 'Orders needing attention' },
+          { id: 'support', label: 'Support requests' },
+          { id: 'funds', label: 'Order funds' },
+          { id: 'disputes', label: 'Dispute history' },
+        ]}
+        value={tab}
+        onChange={setTab}
+      />
+      {tab === 'attention' && <OrdersNeedingAttention />}
+      {tab === 'support' && <SupportRequests />}
+      {tab === 'funds' && <OrderFunds />}
+      {tab === 'disputes' && <Disputes />}
+    </div>
+  )
+}
+
+const moneyTone = (status: string): 'good' | 'bad' | 'neutral' =>
+  status === 'confirmed' ? 'good' : status === 'action_required' ? 'bad' : 'neutral'
+
+function OrdersNeedingAttention() {
+  const rows = useApi(() => kaluta.adminConsole.marketOrders(true), [])
+  const [msg, setMsg] = useState<Msg>(null)
+  const items = rows.data?.items ?? []
+  return (
+    <Panel
+      title="Marketplace orders needing attention"
+      subtitle="A seller payment or a refund that is pending or waiting for a person. Retry asks the payment rail again; it never pays twice."
+      action={<button type="button" className={BTN} onClick={rows.reload}><RefreshCw size={13} aria-hidden="true" /> Refresh</button>}
+    >
+      <Message msg={msg} />
+      <PanelState loading={rows.loading} error={rows.error} empty={items.length === 0} emptyLabel="Nothing is stuck.">
+        <ul className="space-y-2">
+          {items.map((o) => (
+            <MarketOrderRow key={o.id} o={o} onDone={(t) => { setMsg({ ok: true, text: t }); rows.reload() }}
+              onError={(t) => setMsg({ ok: false, text: t })} />
+          ))}
+        </ul>
+      </PanelState>
+    </Panel>
+  )
+}
+
+function MarketOrderRow({ o, onDone, onError }: { o: Order; onDone: (t: string) => void; onError: (t: string) => void }) {
+  const [cancelling, setCancelling] = useState(false)
+  const [note, setNote] = useState('')
+  const settlement = o.settlement?.status ?? 'none'
+  const refund = o.cancellation?.refund_status ?? 'none'
+  const retryable = settlement === 'action_required' || refund === 'action_required'
+  const final = Boolean(o.acceptance?.accepted)
+  const cancellable = !final && !o.cancellation
+  return (
+    <Row>
+      <div className="flex flex-wrap items-start justify-between gap-2">
+        <div className="min-w-0">
+          <p className="font-semibold text-text-hi">
+            {usd(o.customer_price)} <span className="caption">· {o.status}{o.payment_rail ? ` · ${o.payment_rail}` : ''}</span>
+          </p>
+          <p className="caption mt-1 break-all">order {o.id} · {when(o.created_at)}</p>
+          <p className="mt-1 text-xs text-text-mid">
+            {final
+              ? `Final (${o.acceptance.status === 'first_download' ? 'first download' : 'buyer confirmed'}) ${when(o.acceptance.accepted_at)}`
+              : 'Not final yet'}
+          </p>
+          {o.settlement?.error && <p className="mt-1 text-xs text-red-300">Seller payment: {o.settlement.error}</p>}
+          {o.cancellation && (
+            <p className="mt-1 text-xs text-text-mid">
+              Cancelled ({o.cancellation.reason}) {when(o.cancellation.cancelled_at)}
+              {o.cancellation.refund_error ? ` · refund: ${o.cancellation.refund_error}` : ''}
+            </p>
+          )}
+        </div>
+        <div className="flex flex-wrap items-center gap-2">
+          {settlement !== 'none' && <Badge tone={moneyTone(settlement)}>seller payment {settlement}</Badge>}
+          {refund !== 'none' && <Badge tone={moneyTone(refund)}>refund {refund}</Badge>}
+          {retryable && (
+            <ConfirmButton label="Retry" question="Ask the payment rail again for this order?"
+              onConfirm={async () => {
+                try { await kaluta.adminConsole.retryMarketOrder(o.id); onDone('Retried. Check the status again shortly.') }
+                catch (err) { onError(errorText(err)) }
+              }} />
+          )}
+          {cancellable && (
+            <button type="button" className={BTN} onClick={() => setCancelling(!cancelling)}>Operational cancel</button>
+          )}
+        </div>
+      </div>
+      {cancelling && cancellable && (
+        <div className="mt-3 flex flex-wrap items-center gap-2">
+          <input value={note} onChange={(e) => setNote(e.target.value)} placeholder="Why (kept on the order, shown to both parties)"
+            aria-label="Reason for the cancellation" className={cn(INPUT, 'min-w-0 flex-1')} />
+          <ConfirmButton label="Cancel order" danger disabled={note.trim().length < 3}
+            question="Cancel this order and refund the buyer if it was paid?"
+            onConfirm={async () => {
+              try { await kaluta.adminConsole.cancelMarketOrder(o.id, note.trim()); onDone('Cancelled.') }
+              catch (err) { onError(errorText(err)) }
+            }} />
+        </div>
+      )}
+    </Row>
+  )
+}
+
+const SUPPORT_LABELS: Record<SupportCase['kind'], string> = {
+  payment_problem: 'Payment problem',
+  duplicate_charge: 'Charged twice',
+  not_handed_over: 'Not handed over',
+  file_problem: 'Missing or damaged file',
+  fraud: 'Suspected fraud',
+  legal: 'Legal request',
+}
+
+function SupportRequests() {
+  const [status, setStatus] = useState<'open' | 'closed'>('open')
+  const rows = useApi(() => kaluta.adminConsole.supportCases(status), [status])
+  const [msg, setMsg] = useState<Msg>(null)
+  const items = rows.data?.items ?? []
+  return (
+    <Panel title="Support requests" subtitle="Operational help on an order: payments, files, fraud. Not arbitration of the deal itself."
+      action={<Chips options={[{ id: 'open', label: 'Open' }, { id: 'closed', label: 'Closed' }]} value={status} onChange={setStatus} />}>
+      <Message msg={msg} />
+      <PanelState loading={rows.loading} error={rows.error} empty={items.length === 0}
+        emptyLabel={status === 'open' ? 'No open request.' : 'No closed request.'}>
+        <ul className="space-y-2">
+          {items.map((c) => (
+            <SupportRow key={c.id} c={c} onDone={(t) => { setMsg({ ok: true, text: t }); rows.reload() }}
+              onError={(t) => setMsg({ ok: false, text: t })} />
+          ))}
+        </ul>
+      </PanelState>
+    </Panel>
+  )
+}
+
+function SupportRow({ c, onDone, onError }: { c: SupportCase; onDone: (t: string) => void; onError: (t: string) => void }) {
+  const [note, setNote] = useState('')
+  return (
+    <Row>
+      <div className="flex flex-wrap items-start justify-between gap-2">
+        <div className="min-w-0">
+          <p className="font-semibold text-text-hi">{SUPPORT_LABELS[c.kind] ?? c.kind} <span className="caption">· from the {c.role}</span></p>
+          <p className="mt-1 whitespace-pre-line text-sm text-text-mid">{c.message}</p>
+          <p className="caption mt-1 break-all">order {c.order_id} · {when(c.created_at)}</p>
+          {c.resolution_note && <p className="mt-1 text-xs text-text-mid">Closed {when(c.closed_at)}: {c.resolution_note}</p>}
+        </div>
+        <Badge tone={c.status === 'open' ? 'warn' : 'neutral'}>{c.status}</Badge>
+      </div>
+      {c.status === 'open' && (
+        <div className="mt-3 flex flex-wrap items-center gap-2">
+          <input value={note} onChange={(e) => setNote(e.target.value)} placeholder="What was done (shown to the member)"
+            aria-label="Closing note" className={cn(INPUT, 'min-w-0 flex-1')} />
+          <ConfirmButton label="Close" disabled={note.trim().length < 3} question="Close this request with this note?"
+            onConfirm={async () => {
+              try { await kaluta.adminConsole.closeSupportCase(c.id, note.trim()); onDone('Closed.') }
+              catch (err) { onError(errorText(err)) }
+            }} />
+        </div>
+      )}
+    </Row>
+  )
+}
+
+function OrderFunds() {
+  const [status, setStatus] = useState<'' | 'pending' | 'action_required' | 'confirmed'>('')
+  const rows = useApi(() => kaluta.adminConsole.orderFunds(status || undefined), [status])
+  const items = rows.data?.items ?? []
+  return (
+    <Panel title="Order funds" subtitle="Every payment to a seller and every refund of marketplace order money, with what the provider answered."
+      action={<Chips options={[{ id: '', label: 'All' }, { id: 'pending', label: 'Pending' }, { id: 'action_required', label: 'Needs a person' }, { id: 'confirmed', label: 'Confirmed' }]}
+        value={status} onChange={setStatus} />}>
+      <PanelState loading={rows.loading} error={rows.error} empty={items.length === 0} emptyLabel="Nothing here.">
+        <ul className="space-y-2">
+          {items.map((f) => (
+            <Row key={f.reference}>
+              <div className="flex flex-wrap items-start justify-between gap-2">
+                <div className="min-w-0">
+                  <p className="font-semibold text-text-hi">
+                    {usd(f.amount)} <span className="caption">· {f.purpose === 'refund' ? 'refund to the buyer' : 'payment to the seller'}{f.rail ? ` · ${f.rail}` : ''}</span>
+                  </p>
+                  <p className="caption mt-1 break-all">order {f.order_id} · ref {f.reference} · {when(f.created_at)}</p>
+                  <p className="caption mt-1 break-all">
+                    {f.attempts} attempt{f.attempts === 1 ? '' : 's'}{f.backing ? ` · backed by ${f.backing}` : ''}
+                    {f.provider_refs ? ` · provider ${f.provider_refs}` : ''}{f.confirmed_at ? ` · confirmed ${when(f.confirmed_at)}` : ''}
+                  </p>
+                  {f.error && <p className="mt-1 text-xs text-red-300">{f.error}</p>}
+                </div>
+                <Badge tone={moneyTone(f.status)}>{f.status}</Badge>
+              </div>
+            </Row>
+          ))}
+        </ul>
+      </PanelState>
+    </Panel>
+  )
+}
 
 type Dispute = {
   id: string
@@ -682,70 +897,32 @@ type Dispute = {
   amount_claimed: string
   status: string
   outcome: string | null
-  respond_by: string | null
-  arbitrate_by: string | null
   created_at: string
 }
 
+/** Disputes opened before 27/10. Kept for the record; nothing can be decided any more. */
 export function Disputes() {
   const rows = useApi(() => kaluta.adminConsole.disputes(), [])
-  const [msg, setMsg] = useState<Msg>(null)
   const items = (Array.isArray(rows.data) ? rows.data : rows.data?.items ?? []) as unknown as Dispute[]
   return (
-    <Panel title="Marketplace disputes" subtitle="Kinjy arbitrates. The note is shown to both buyer and seller.">
-      <Message msg={msg} />
-      <PanelState loading={rows.loading} error={rows.error} empty={items.length === 0} emptyLabel="No dispute.">
+    <Panel title="Dispute history" subtitle="Read only. Marketplace disputes are no longer arbitrated by Kinjy since 27/10.">
+      <PanelState loading={rows.loading} error={rows.error} empty={items.length === 0} emptyLabel="No dispute on record.">
         <ul className="space-y-2">
           {items.map((d) => (
-            <DisputeRow key={d.id} d={d} onDone={(t) => { setMsg({ ok: true, text: t }); rows.reload() }}
-              onError={(t) => setMsg({ ok: false, text: t })} />
+            <Row key={d.id}>
+              <div className="flex flex-wrap items-start justify-between gap-2">
+                <div className="min-w-0">
+                  <p className="font-semibold text-text-hi">{usd(d.amount_claimed)} <span className="caption">· {d.category}</span></p>
+                  <p className="mt-1 text-sm text-text-mid">{d.reason}</p>
+                  <p className="caption mt-1 break-all">order {d.order_id} · opened {when(d.created_at)}</p>
+                </div>
+                <Badge tone="neutral">{d.outcome ?? d.status}</Badge>
+              </div>
+            </Row>
           ))}
         </ul>
       </PanelState>
     </Panel>
-  )
-}
-
-function DisputeRow({ d, onDone, onError }: { d: Dispute; onDone: (t: string) => void; onError: (t: string) => void }) {
-  const [open, setOpen] = useState(false)
-  const [outcome, setOutcome] = useState<'release_to_seller' | 'refund_buyer' | 'split'>('refund_buyer')
-  const [refund, setRefund] = useState('')
-  const [note, setNote] = useState('')
-  const settled = d.status === 'resolved' || d.outcome != null
-  return (
-    <Row>
-      <div className="flex flex-wrap items-start justify-between gap-2">
-        <div className="min-w-0">
-          <p className="font-semibold text-text-hi">{usd(d.amount_claimed)} <span className="caption">· {d.category}</span></p>
-          <p className="mt-1 text-sm text-text-mid">{d.reason}</p>
-          <p className="caption mt-1 break-all">order {d.order_id} · opened {when(d.created_at)}{d.arbitrate_by ? ` · arbitrate by ${when(d.arbitrate_by)}` : ''}</p>
-        </div>
-        <div className="flex items-center gap-2">
-          <Badge tone={settled ? 'neutral' : 'warn'}>{d.outcome ?? d.status}</Badge>
-          {!settled && <button type="button" className={BTN} onClick={() => setOpen(!open)}>Resolve</button>}
-        </div>
-      </div>
-      {open && !settled && (
-        <div className="mt-3 flex flex-wrap items-center gap-2">
-          <select value={outcome} onChange={(e) => setOutcome(e.target.value as typeof outcome)} className={INPUT} aria-label="Outcome">
-            <option value="refund_buyer">Refund the buyer</option>
-            <option value="release_to_seller">Release to the seller</option>
-            <option value="split">Split</option>
-          </select>
-          {outcome === 'split' && (
-            <input value={refund} onChange={(e) => setRefund(e.target.value)} placeholder="Refund amount" inputMode="decimal"
-              className={cn(INPUT, 'w-32')} />
-          )}
-          <input value={note} onChange={(e) => setNote(e.target.value)} placeholder="Note to both parties" className={cn(INPUT, 'min-w-0 flex-1')} />
-          <ConfirmButton label="Decide" danger disabled={note.trim().length < 3 || (outcome === 'split' && !refund)}
-            question="This moves the escrowed money. Confirm?"
-            onConfirm={async () => {
-              try { await kaluta.adminConsole.resolveDispute(d.id, outcome, note.trim(), refund || undefined); onDone('Decided.') }
-              catch (err) { onError(errorText(err)) }
-            }} />
-        </div>
-      )}
-    </Row>
   )
 }
 

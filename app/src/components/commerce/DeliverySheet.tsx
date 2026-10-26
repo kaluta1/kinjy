@@ -10,6 +10,8 @@ interface Props {
   productId: string
   onClose: () => void
   onDone: () => void
+  /** Known by the caller: a service is "performed", not shipped. */
+  service?: boolean
 }
 
 function isHttpUrl(value: string): boolean {
@@ -21,10 +23,11 @@ function isHttpUrl(value: string): boolean {
   }
 }
 
-export default function DeliverySheet({ open, orderId, productId, onClose, onDone }: Props) {
+export default function DeliverySheet({ open, orderId, productId, onClose, onDone, service: serviceHint = false }: Props) {
   // The order does not say what was sold; the product does. Unknown counts as physical,
   // which only asks for a bit more proof, never less.
   const [physical, setPhysical] = useState(true)
+  const [service, setService] = useState(serviceHint)
   const [carrier, setCarrier] = useState('')
   const [tracking, setTracking] = useState('')
   const [url, setUrl] = useState('')
@@ -38,7 +41,11 @@ export default function DeliverySheet({ open, orderId, productId, onClose, onDon
     setError(null)
     kaluta.market
       .product(productId)
-      .then((product) => live && setPhysical(product.kind === 'product'))
+      .then((product) => {
+        if (!live) return
+        setPhysical(product.kind === 'product')
+        setService(product.kind === 'service')
+      })
       .catch(() => undefined)
     return () => {
       live = false
@@ -77,8 +84,8 @@ export default function DeliverySheet({ open, orderId, productId, onClose, onDon
     <ActionSheet
       open={open}
       onClose={onClose}
-      title="Mark as delivered"
-      description="The buyer is told and has to confirm before the money is released."
+      title={service ? 'Mark the service as performed' : 'Mark as shipped / ready'}
+      description="The buyer is told. Release the goods or final deliverables only once the buyer has confirmed receipt on Kinjy."
     >
       <form onSubmit={send} className="space-y-3">
         {physical && (

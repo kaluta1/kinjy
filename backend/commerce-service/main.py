@@ -1,12 +1,11 @@
-"""Kinjy · commerce-service — the agency marketplace, custodial escrow, disputes
-and the ad platform.
+"""Kinjy · commerce-service — the agency marketplace and the ad platform.
 
-Kinjy does not hold buyer money. Payment goes to an authorised financial
-institution acting as custodian; it reaches the seller only once the buyer
-confirms receipt, or once the confirmation window closes with nothing contested.
-A dispute freezes that clock at both ends: the seller cannot wait out a buyer
-raising a problem, and a buyer cannot keep the goods and the money by opening a
-case and going quiet.
+A buyer's payment is held until the purchase is final: the buyer confirms
+receipt in their own Kinjy account (a product or a service), or downloads an
+ebook for the first time. That, and only that, starts settlement to the seller
+(acceptance.py). Kinjy does not arbitrate ordinary marketplace disputes; it
+keeps operational support (payment problems, duplicate charges, an item not
+handed over after confirmation, fraud, legal requests).
 """
 from __future__ import annotations
 
@@ -24,6 +23,7 @@ from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session as OrmSession
+from starlette.concurrency import run_in_threadpool
 
 from common import crypto, economy, events, mediasign, settings
 from common.article_html import sanitize_article
@@ -34,6 +34,7 @@ from common.database import get_db
 from common.ids import new_id
 from common.service import create_app
 
+import acceptance
 import models
 
 log = logging.getLogger("commerce-service")
@@ -80,11 +81,38 @@ MIGRATIONS.extend([
     f"ALTER TABLE {models.SCHEMA}.orders ADD COLUMN IF NOT EXISTS access_revoked_at TIMESTAMPTZ",
 ])
 
+# Final acceptance and settlement (27/10): additive columns; the new tables
+# (policy_acks, support_cases) are created by create_all.
+MIGRATIONS.extend([
+    *[
+        f"ALTER TABLE {models.SCHEMA}.orders ADD COLUMN IF NOT EXISTS {column}"
+        for column in (
+            "payment_rail VARCHAR(20)", "accepted_at TIMESTAMPTZ", "accepted_by VARCHAR(40)",
+            "acceptance_ref VARCHAR(40)", "acceptance_kind VARCHAR(20)", "acceptance_policy VARCHAR(20)",
+            "settlement_status VARCHAR(20) NOT NULL DEFAULT 'none'", "settlement_attempts INTEGER NOT NULL DEFAULT 0",
+            "settlement_next_at TIMESTAMPTZ", "settlement_error VARCHAR(300)", "settlement_backing VARCHAR(40)",
+            "cancelled_at TIMESTAMPTZ", "cancelled_by VARCHAR(40)", "cancel_reason VARCHAR(40)",
+            "cancel_note VARCHAR(500)", "refund_status VARCHAR(20) NOT NULL DEFAULT 'none'",
+            "refund_attempts INTEGER NOT NULL DEFAULT 0", "refund_next_at TIMESTAMPTZ", "refund_error VARCHAR(300)",
+        )
+    ],
+    f"CREATE UNIQUE INDEX IF NOT EXISTS uq_orders_acceptance_ref ON {models.SCHEMA}.orders (acceptance_ref) "
+    "WHERE acceptance_ref IS NOT NULL",
+    f"CREATE INDEX IF NOT EXISTS ix_orders_settlement_due ON {models.SCHEMA}.orders (settlement_status, settlement_next_at)",
+    f"CREATE INDEX IF NOT EXISTS ix_orders_refund_due ON {models.SCHEMA}.orders (refund_status, refund_next_at)",
+    *[
+        f"ALTER TABLE {models.SCHEMA}.products ADD COLUMN IF NOT EXISTS {column}"
+        for column in ("guarantee TEXT", "insurance TEXT", "service_terms TEXT")
+    ],
+    f"ALTER TABLE {models.SCHEMA}.ebook_downloads ADD COLUMN IF NOT EXISTS completed_at TIMESTAMPTZ",
+])
+
 app = create_app(
     name="commerce-service",
     schema=models.SCHEMA,
-    description="Agency marketplace, custodial escrow, dispute resolution, advertising.",
+    description="Agency marketplace (held payments, final acceptance, settlement), advertising.",
     migrations=MIGRATIONS,
+    on_startup=[acceptance.start_worker],
 )
 
 
@@ -143,6 +171,25 @@ class EbookIn(BaseModel):
         return value.replace(" ", "").upper()
 
 
+class GuaranteeIn(BaseModel):
+    """A seller's guarantee or warranty, as they state it."""
+
+    scope: str = Field(min_length=3, max_length=1000)
+    duration: str = Field(min_length=1, max_length=120)
+    exclusions: str = Field(default="", max_length=1000)
+    claim_contact: str = Field(min_length=3, max_length=300)
+
+
+class InsuranceIn(BaseModel):
+    """Insurance included with the purchase, as the seller states it."""
+
+    insurer: str = Field(min_length=2, max_length=200)
+    coverage: str = Field(min_length=3, max_length=1000)
+    exclusions: str = Field(default="", max_length=1000)
+    claim_process: str = Field(min_length=3, max_length=1000)
+    premium_included: bool = True
+
+
 class ProductIn(BaseModel):
     title: str = Field(min_length=2, max_length=200)
     description: str = ""
@@ -158,6 +205,11 @@ class ProductIn(BaseModel):
     country: str | None = None
     city: str | None = Field(default=None, max_length=120)
     images: list[str] = Field(default_factory=list, max_length=5)
+    # Disclosed to the buyer before they pay. None means none, and is said so.
+    guarantee: GuaranteeIn | None = None
+    insurance: InsuranceIn | None = None
+    # A service: what "completed" means and how the buyer can assess it.
+    service_terms: str | None = Field(default=None, max_length=3000)
 
     @field_validator("images")
     @classmethod
@@ -217,6 +269,9 @@ class OrderIn(BaseModel):
     product_id: str
     quantity: int = Field(default=1, ge=1)
     shipping: ShippingIn | None = None
+    # The buyer read the marketplace policy before paying (acceptance.POLICY).
+    acknowledge_policy: bool = False
+    policy_version: str | None = None
 
 
 class CampaignIn(BaseModel):
@@ -259,11 +314,19 @@ def create_product(payload: ProductIn, principal: CurrentUser, db: OrmSession = 
     if payload.ebook is not None and payload.kind != "digital":
         raise HTTPException(status_code=422, detail="Only a digital listing can be an ebook")
 
-    data = payload.model_dump(exclude={"images", "ebook"})
+    if payload.kind == "service" and not (payload.service_terms or "").strip():
+        raise HTTPException(
+            status_code=422,
+            detail="Describe what completing this service means and how the buyer can check it before confirming",
+        )
+    data = payload.model_dump(exclude={"images", "ebook", "guarantee", "insurance", "service_terms"})
     product = models.Product(
         id=new_id("prd"),
         vendor_id=principal.user_id,
         images=",".join(payload.images) or None,
+        guarantee=payload.guarantee.model_dump_json() if payload.guarantee else None,
+        insurance=payload.insurance.model_dump_json() if payload.insurance else None,
+        service_terms=(payload.service_terms or "").strip() or None,
         **data,
     )
     if payload.ebook is not None:
@@ -459,10 +522,12 @@ USER_URL = "http://user-service:8000"
 PRODUCT_KINDS = ("product", "service", "digital")
 PRODUCT_SORTS = ("recent", "price_asc", "price_desc")
 ORDER_STATUSES = (
-    "pending", "in_escrow", "delivered", "settled", "disputed", "refunded", "part_refunded", "cancelled",
+    "pending", "in_escrow", "delivered", "accepted", "settled", "refund_pending", "refunded", "cancelled",
+    # Orders from before 27/10 only:
+    "disputed", "part_refunded",
 )
 # While an order is in one of these the money or the goods are still in motion.
-OPEN_ORDER_STATUSES = ("pending", "in_escrow", "delivered", "disputed")
+OPEN_ORDER_STATUSES = ("pending", "in_escrow", "delivered", "accepted", "refund_pending", "disputed")
 SETTLED_STATUSES = ("settled", "part_refunded")
 CENT = Decimal("0.01")
 
@@ -593,6 +658,27 @@ def _product_item(product: models.Product, profiles: dict[str, dict]) -> dict:
     }
 
 
+def _json_or_none(value: str | None) -> dict | None:
+    try:
+        return json.loads(value) if value else None
+    except ValueError:
+        return None
+
+
+def _protection_out(product: models.Product) -> dict:
+    """What the buyer is told before paying: the seller's guarantee, any
+    insurance, a service's completion terms, and that Kinjy does not arbitrate.
+    ``None`` is stated as none - nothing is implied."""
+    return {
+        "guarantee": _json_or_none(product.guarantee),
+        "insurance": _json_or_none(product.insurance),
+        "service_terms": product.service_terms,
+        "final_when": "first_download" if product.ebook else "buyer_confirmation",
+        "kinjy_arbitrates": False,
+        "policy_version": acceptance.POLICY_VERSION,
+    }
+
+
 def _vendor_stats(db: OrmSession, vendor_id: str) -> dict:
     active = db.scalar(
         select(func.count()).select_from(models.Product).where(
@@ -689,6 +775,7 @@ def get_product(product_id: str, principal: MaybeUser, db: OrmSession = Depends(
         "vendor_since": (profiles.get(product.vendor_id) or {}).get("created_at"),
         "vendor_stats": _vendor_stats(db, product.vendor_id),
         "is_owner": owner,
+        "protection": _protection_out(product),
     }
     if owner:
         out.update(_pricing_out(product))
@@ -751,6 +838,10 @@ class ProductPatch(BaseModel):
     images: list[str] | None = Field(default=None, max_length=5)
     status: str | None = Field(default=None, pattern="^(active|paused|draft)$")
     ebook: EbookIn | None = None
+    # Sent as null to state there is none.
+    guarantee: GuaranteeIn | None = None
+    insurance: InsuranceIn | None = None
+    service_terms: str | None = Field(default=None, max_length=3000)
 
     @field_validator("images")
     @classmethod
@@ -774,6 +865,16 @@ def update_product(
             raise HTTPException(status_code=422, detail=f"{required} cannot be cleared")
     if product.status == "suspended" and "status" in changes:
         raise HTTPException(status_code=409, detail="This listing was suspended by Kinjy; contact support")
+    for disclosed in ("guarantee", "insurance"):
+        if disclosed in changes:
+            changes.pop(disclosed)
+            value = getattr(payload, disclosed)
+            setattr(product, disclosed, value.model_dump_json() if value else None)
+    if "service_terms" in changes:
+        terms = (changes.pop("service_terms") or "").strip()
+        if product.kind == "service" and not terms:
+            raise HTTPException(status_code=422, detail="A service needs its completion terms")
+        product.service_terms = terms or None
     ebook_changes = changes.pop("ebook", None)
     if ebook_changes is not None:
         if not product.ebook:
@@ -943,7 +1044,7 @@ def _check_evidence(urls: list[str]) -> list[str]:
     return urls
 
 
-class DisputeIn(BaseModel):
+class _RetiredDisputeIn(BaseModel):
     category: str = Field(pattern="^(not_received|not_as_described|damaged|unauthorised|other)$")
     reason: str = Field(min_length=10, max_length=4000)
     amount_claimed: Decimal | None = None
@@ -965,14 +1066,6 @@ class DisputeMessageIn(BaseModel):
         return _check_evidence(value)
 
 
-class ResolveIn(BaseModel):
-    outcome: str = Field(pattern="^(release_to_seller|refund_buyer|split)$")
-    refund_amount: Decimal | None = None
-    note: str = Field(min_length=3, max_length=4000)
-
-
-def _custody_window() -> datetime:
-    return datetime.now(timezone.utc) + timedelta(days=settings.ESCROW_AUTO_RELEASE_DAYS)
 
 
 def _ledger_escrow(
@@ -995,66 +1088,6 @@ def _ledger_escrow(
         timeout=10,
     )
     response.raise_for_status()
-
-
-def _settle(db: OrmSession, order: models.Order, *, vendor_price: Decimal) -> dict:
-    """Release custody and post the settlement that recognises the revenue.
-
-    ``vendor_price`` may be below the order's own price when a dispute ended in
-    a partial refund: the seller is paid for what the buyer kept, and Kinjy's
-    markup — and therefore the sponsor's commission — shrinks with it.
-    """
-    _ledger_escrow(order, "release", order.customer_price - order.refunded_amount, "buyer confirmed receipt")
-    response = httpx.post(
-        f"{LEDGER_URL}/internal/post/marketplace-order",
-        json={
-            "buyer_id": order.buyer_id,
-            "vendor_id": order.vendor_id,
-            "vendor_price": str(vendor_price),
-            "order_id": order.id,
-            "idempotency_key": f"order:{order.id}",
-        },
-        timeout=10,
-    )
-    response.raise_for_status()
-    result = response.json()
-
-    order.status = "part_refunded" if order.refunded_amount > 0 else "settled"
-    order.escrow_released_at = datetime.now(timezone.utc)
-    order.ledger_journal_id = result["journal"]["id"]
-    return result
-
-
-def _refund(db: OrmSession, order: models.Order, amount: Decimal, reason: str, key: str) -> None:
-    """Send money back to the buyer out of custody. Raises on ledger failure.
-
-    ``key`` makes the posting idempotent *per refund*, not per order: keying it
-    on the order alone would make a second partial refund a silent no-op that
-    still told the buyer their money was on its way.
-    """
-    _ledger_escrow(order, "refund", amount, reason, key=f"escrow:refund:{key}")
-    order.refunded_amount = Decimal(order.refunded_amount or 0) + amount
-    try:
-        httpx.post(
-            f"{PAYMENT_URL}/internal/escrow/refund",
-            json={
-                "order_id": order.id,
-                "buyer_id": order.buyer_id,
-                "amount": str(amount),
-                "custody_ref": order.custody_ref,
-                "reason": reason,
-            },
-            timeout=10,
-        ).raise_for_status()
-    except Exception as exc:
-        # The ledger already records the refund as owed to the buyer, so the
-        # money is not lost — but the rail did not move it, and somebody has to
-        # know. Loud, and the order stays disputed until it is chased.
-        log.error("refund rail failed for order %s: %s", order.id, exc)
-        raise HTTPException(
-            status_code=503,
-            detail="The refund is recorded but the payment rail did not confirm it. Support has been alerted.",
-        )
 
 
 def _shipping_of(order: models.Order) -> dict | None:
@@ -1084,34 +1117,65 @@ def _order_out(order: models.Order, viewer_id: str | None = None, *, admin: bool
         "margin": str(order.margin),
         "refunded_amount": str(order.refunded_amount or 0),
         "status": order.status,
-        "custodian": order.custodian,
+        "payment_rail": order.payment_rail,
         "escrow_funded_at": order.escrow_funded_at,
         "delivered_at": order.delivered_at,
         "delivery_note": order.delivery_note,
-        "dispute_window_ends": order.dispute_window_ends,
+        # The purchase made final: by whom, when (the server's clock), how,
+        # and under which policy. The one record both back offices show.
+        "acceptance": {
+            "accepted": order.accepted_at is not None,
+            "status": "buyer_confirmed" if order.acceptance_kind == "buyer_confirmation"
+            else "first_download" if order.acceptance_kind == "first_download"
+            else "awaiting",
+            "accepted_at": order.accepted_at,
+            "reference": order.acceptance_ref,
+            "kind": order.acceptance_kind,
+            "policy_version": order.acceptance_policy,
+        },
+        # For the seller (and the courier they authorise): what to do with the goods.
+        "handover": None if viewer_id != order.vendor_id and not admin else (
+            acceptance.POLICY["handover_verified"] if order.accepted_at is not None
+            else acceptance.POLICY["handover_awaiting"]
+        ),
+        # Separate from acceptance: "seller paid" only when this is confirmed.
+        "settlement": {
+            "status": order.settlement_status,
+            "error": order.settlement_error if admin else None,
+            "confirmed_at": order.escrow_released_at if order.settlement_status == "confirmed" else None,
+        },
+        "cancellation": None if order.cancelled_at is None else {
+            "cancelled_at": order.cancelled_at,
+            "reason": order.cancel_reason,
+            "note": order.cancel_note,
+            "refund_status": order.refund_status,
+            "refund_error": order.refund_error if admin else None,
+        },
         "escrow_released_at": order.escrow_released_at,
         "created_at": order.created_at,
     }
 
 
-@app.get("/commerce/escrow/terms", tags=["escrow"])
-def escrow_terms():
-    """Who holds the money, under what licence, and for how long.
+@app.get("/commerce/marketplace/policy", tags=["marketplace"])
+def marketplace_policy():
+    """The marketplace policy a buyer acknowledges, in the words they are shown.
 
-    Public on purpose: a buyer deciding whether to pay a stranger should be able
-    to read the custody arrangement without an account.
+    Public: somebody deciding whether to pay a stranger should be able to read
+    it without an account.
     """
     return {
-        "custodian": settings.CUSTODIAN_NAME,
-        "provider": settings.CUSTODIAN_PROVIDER,
-        "licence": settings.CUSTODIAN_LICENCE,
-        "holds_funds": "the custodian, in a segregated client-money account — not Kinjy",
-        "released_when": "the buyer confirms receipt",
-        "auto_release_days": settings.ESCROW_AUTO_RELEASE_DAYS,
-        "dispute_response_days": settings.DISPUTE_RESPONSE_DAYS,
-        "arbitration_days": settings.DISPUTE_ARBITRATION_DAYS,
-        "outcomes": ["release_to_seller", "refund_buyer", "split"],
+        **acceptance.POLICY,
+        "payments": "Payments are processed by Sonco Pay through Kaluta Pay. The buyer's payment is held "
+                    "until the purchase is final; the seller is paid only after that.",
+        "automatic_release": False,
+        "kinjy_arbitrates": False,
     }
+
+
+# Kept for clients written against the old address; it now says what is true.
+@app.get("/commerce/escrow/terms", tags=["marketplace"])
+def escrow_terms():
+    return marketplace_policy()
 
 
 @app.post("/commerce/orders", status_code=201, tags=["marketplace"])
@@ -1119,6 +1183,12 @@ async def create_order(payload: OrderIn, principal: CurrentUser, db: OrmSession 
     """Places an order. Nothing is posted to the ledger and nothing reaches the
     seller yet — the next step is payment into the custodian's hands."""
     agefeatures.require(principal.user_id, "marketplace_buy")
+    if not payload.acknowledge_policy or payload.policy_version != acceptance.POLICY_VERSION:
+        raise HTTPException(
+            status_code=422,
+            detail="Read and accept the marketplace policy before paying: your confirmation (or an ebook's first "
+                   "download) makes the purchase final, and Kinjy does not arbitrate ordinary disputes.",
+        )
 
     product = db.get(models.Product, payload.product_id)
     if product is None or product.status != "active":
@@ -1142,11 +1212,13 @@ async def create_order(payload: OrderIn, principal: CurrentUser, db: OrmSession 
             ).order_by(models.Order.created_at.desc())
         )
         if waiting is not None:
+            acceptance.record_ack(db, waiting, "checkout", principal.user_id)
+            db.commit()
             return {
                 "id": waiting.id,
                 "status": waiting.status,
                 "customer_price": str(waiting.customer_price),
-                "custodian": settings.CUSTODIAN_NAME,
+                "policy_version": acceptance.POLICY_VERSION,
                 "pay_at": "/api/payments/checkout",
             }
     if product.stock is not None and product.stock < payload.quantity:
@@ -1169,11 +1241,12 @@ async def create_order(payload: OrderIn, principal: CurrentUser, db: OrmSession 
         vendor_price=pricing["vendor_price"],
         margin=pricing["margin"],
         customer_price=pricing["customer_price"],
-        custodian=settings.CUSTODIAN_PROVIDER,
         status="pending",
         shipping_address=json.dumps(shipping) if shipping else None,
     )
     db.add(order)
+    db.flush()
+    acceptance.record_ack(db, order, "checkout", principal.user_id)
     if product.stock is not None:
         product.stock -= payload.quantity
     db.commit()
@@ -1183,7 +1256,7 @@ async def create_order(payload: OrderIn, principal: CurrentUser, db: OrmSession 
         "id": order.id,
         "status": order.status,
         "customer_price": str(order.customer_price),
-        "custodian": settings.CUSTODIAN_NAME,
+        "policy_version": acceptance.POLICY_VERSION,
         "pay_at": "/api/payments/checkout",
     }
 
@@ -1201,9 +1274,13 @@ def order_quote(order_id: str, db: OrmSession = Depends(get_db)):
 
 @app.post("/internal/orders/{order_id}/funded", tags=["internal"])
 def mark_funded(
-    order_id: str, custody_ref: str | None = None, amount: Decimal | None = None, db: OrmSession = Depends(get_db)
+    order_id: str,
+    custody_ref: str | None = None,
+    amount: Decimal | None = None,
+    rail: str | None = None,
+    db: OrmSession = Depends(get_db),
 ):
-    """payment-service calls this when the buyer's money reaches the custodian.
+    """payment-service calls this once the buyer's payment is confirmed.
 
     Idempotent: a second confirmation of the same payment changes nothing, so
     a retried or duplicated payment event cannot fulfil, deliver or post twice.
@@ -1226,17 +1303,14 @@ def mark_funded(
 
     order.status = "in_escrow"
     order.custody_ref = custody_ref
+    order.payment_rail = (rail or "")[:20] or None
     order.escrow_funded_at = datetime.now(timezone.utc)
-    order.dispute_window_ends = _custody_window()
     product = db.get(models.Product, order.product_id)
     ebook = product is not None and product.ebook
     if ebook:
-        # Delivered by being paid: the file is in the buyer's library now. The
-        # escrow and its window are unchanged - the seller is paid exactly as
-        # for any other order, and the buyer can still report a bad file.
-        order.status = "delivered"
-        order.delivered_at = order.escrow_funded_at
-        order.delivery_note = "Delivered as a download in the buyer's library."
+        # Available in the buyer's library now. Not final: that is the first
+        # successful download, and nothing before it pays the seller.
+        order.delivery_note = "Available to download in the buyer's library."
     db.commit()
 
     if ebook:
@@ -1251,24 +1325,24 @@ def mark_funded(
             order.vendor_id,
             "order_funded",
             "An ebook was sold",
-            body="The buyer has it in their library. The payment is released after the confirmation window.",
-            link="/market/seller",
+            body="It is in the buyer's library. The sale becomes final at their first successful download.",
+            link=f"/market/orders/{order.id}",
         )
         return _order_out(order)
 
     notify(
         order.vendor_id,
         "order_funded",
-        "An order is paid and in escrow",
-        body="Deliver it, then the buyer confirms and the money is released to you.",
-        link="/market/seller",
+        "An order is paid and its payment held",
+        body="Present the product to the buyer. Hand it over only after their confirmation shows on this order.",
+        link=f"/market/orders/{order.id}",
     )
     notify(
         order.buyer_id,
         "order_funded",
-        "Your payment is held in escrow",
-        body=f"{settings.CUSTODIAN_NAME} is holding it. Confirm receipt to release it to the seller.",
-        link="/market#orders",
+        "Your payment is held",
+        body="The seller is paid only when you confirm receipt in your Kinjy account, after inspecting the product.",
+        link=f"/market/orders/{order.id}",
     )
     return _order_out(order)
 
@@ -1279,17 +1353,16 @@ def mark_funded(
 # without paying.
 @app.post("/internal/orders/{order_id}/paid", tags=["internal"])
 def mark_paid(order_id: str, db: OrmSession = Depends(get_db)):
-    return mark_funded(order_id, None, None, db)
+    return mark_funded(order_id, None, None, None, db)
 
 
 @app.post("/commerce/orders/{order_id}/delivered", tags=["marketplace"])
 def mark_delivered(
     order_id: str, payload: DeliveryIn, principal: CurrentUser, db: OrmSession = Depends(get_db)
 ):
-    """The seller says they have delivered. This does **not** release the money.
-
-    Only the buyer's confirmation, or the window expiring, does — otherwise a
-    seller could release their own escrow by ticking a box.
+    """The seller says the product is on its way or ready for handover, or the
+    service is performed and ready for the buyer to assess. Information only:
+    it never releases the money - only the buyer's own confirmation does.
     """
     order = db.get(models.Order, order_id)
     if order is None or order.vendor_id != principal.user_id:
@@ -1317,42 +1390,250 @@ def mark_delivered(
     notify(
         order.buyer_id,
         "order_delivered",
-        "Your order has been marked delivered",
-        body="Confirm receipt to release the payment, or open a dispute if something is wrong.",
-        link="/market#orders",
+        "The seller says your order is ready",
+        body="Inspect it when it is in front of you. Confirm receipt in your Kinjy account only then.",
+        link=f"/market/orders/{order.id}",
     )
     return _order_out(order, principal.user_id)
 
 
+class ConfirmIn(BaseModel):
+    """The buyer's final confirmation, with the policy they were shown again."""
+
+    acknowledge_final: bool = False
+    policy_version: str | None = None
+
+
 @app.post("/commerce/orders/{order_id}/confirm-delivery", tags=["marketplace"])
-async def confirm_delivery(order_id: str, principal: CurrentUser, db: OrmSession = Depends(get_db)):
-    """Buyer confirms receipt -> custody clears -> the ledger settles the split."""
-    order = db.get(models.Order, order_id)
+async def confirm_delivery(
+    order_id: str, payload: ConfirmIn, principal: CurrentUser, db: OrmSession = Depends(get_db)
+):
+    """The buyer confirms receipt: the purchase is final and settlement starts.
+
+    Only the buyer, through their own account - never the seller, a courier or
+    an admin on their behalf. The order is locked, so a double tap or two tabs
+    confirm once; a repeat returns the same acceptance. An ebook is not
+    confirmed here: its first successful download makes it final. A service is
+    confirmed only after the seller marked it performed.
+    """
+    order = db.scalar(select(models.Order).where(models.Order.id == order_id).with_for_update())
     if order is None or order.buyer_id != principal.user_id:
         raise HTTPException(status_code=404, detail="Order not found")
-    if order.status == "disputed":
-        raise HTTPException(status_code=409, detail="This order is in dispute; resolve the dispute first")
+    if order.accepted_at is not None:
+        db.rollback()
+        return _order_out(order, principal.user_id)
+    if not payload.acknowledge_final or payload.policy_version != acceptance.POLICY_VERSION:
+        raise HTTPException(status_code=422, detail="Confirm that you have read what confirming means")
+    product = db.get(models.Product, order.product_id)
+    if product is not None and product.ebook:
+        raise HTTPException(status_code=409, detail="An ebook becomes final at its first successful download")
     if order.status not in ("in_escrow", "delivered"):
-        raise HTTPException(status_code=409, detail=f"Order is {order.status}, not in escrow")
+        raise HTTPException(status_code=409, detail=f"This order cannot be confirmed (it is {order.status})")
+    if product is not None and product.kind == "service" and order.status != "delivered":
+        raise HTTPException(status_code=409,
+                            detail="The seller has not marked the service as performed yet: there is nothing to confirm")
 
-    try:
-        result = _settle(db, order, vendor_price=order.vendor_price)
-    except httpx.HTTPError as exc:
-        # Leave the order in escrow rather than marking it settled without the
-        # ledger entry — a settled order with no journal is unrecoverable.
-        log.error("ledger posting failed for order %s: %s", order_id, exc)
-        raise HTTPException(status_code=503, detail="Settlement failed; the order stays in escrow. Retry shortly.")
+    acceptance.record_ack(db, order, "acceptance", principal.user_id)
+    acceptance.accept(db, order, by=principal.user_id, kind="buyer_confirmation")
     db.commit()
 
     notify(
         order.vendor_id,
-        "order_settled",
-        "Payment released to you",
-        body=f"{order.vendor_price} for order {order.id} is now in your wallet.",
-        link="/market/seller",
+        "order_accepted",
+        "Buyer confirmed receipt",
+        body=f"Order {order.id}, ref {order.acceptance_ref}. Verify it on the order, then hand over.",
+        link=f"/market/orders/{order.id}",
     )
-    await events.publish("order.settled", {"order_id": order.id, "journal_id": order.ledger_journal_id})
-    return {"id": order.id, "status": order.status, "settlement": result}
+    await events.publish("order.accepted", {"order_id": order.id, "acceptance_ref": order.acceptance_ref})
+    # Settlement starts now. One attempt inline; the worker carries on if a
+    # service is slow, and the acceptance stands either way.
+    await run_in_threadpool(acceptance.run_settlement, order.id)
+    db.refresh(order)
+    return _order_out(order, principal.user_id)
+
+
+# --- cancellation before the purchase is final ------------------------------------------
+
+class CancelIn(BaseModel):
+    reason: str = Field(pattern="^(cannot_supply|refused_at_handover|delivery_failed|unpaid)$")
+    note: str = Field(default="", max_length=500)
+
+
+def _cancel(db: OrmSession, order: models.Order, *, by: str, reason: str, note: str) -> None:
+    """Cancel a locked order that is not final. Paid: its money goes back to the
+    buyer's balance (refund queued). Unpaid: nothing to return; stock comes back."""
+    if order.accepted_at is not None or order.status not in ("pending", "in_escrow", "delivered"):
+        raise HTTPException(status_code=409, detail=f"This order can no longer be cancelled (it is {order.status})")
+    order.cancelled_at = datetime.now(timezone.utc)
+    order.cancelled_by = by
+    order.cancel_reason = reason
+    order.cancel_note = note.strip() or None
+    product = db.get(models.Product, order.product_id)
+    if product is not None and product.stock is not None:
+        product.stock += order.quantity
+    if order.status == "pending":
+        order.status = "cancelled"
+        return
+    order.status = "refund_pending"
+    order.refund_status = "pending"
+    order.refund_attempts = 0
+    order.refund_next_at = order.cancelled_at
+
+
+@app.post("/commerce/orders/{order_id}/cancel", tags=["marketplace"])
+async def cancel_order(order_id: str, payload: CancelIn, principal: CurrentUser, db: OrmSession = Depends(get_db)):
+    """Cancel an order before it is final.
+
+    The seller: they cannot supply it, the buyer refused it at handover, or
+    delivery failed - the buyer's payment goes back to their Kinjy balance.
+    The buyer: only an order not paid yet. Nothing here charges a fee.
+    """
+    order = db.scalar(select(models.Order).where(models.Order.id == order_id).with_for_update())
+    if order is None or principal.user_id not in (order.buyer_id, order.vendor_id):
+        raise HTTPException(status_code=404, detail="Order not found")
+    role = "buyer" if principal.user_id == order.buyer_id else "seller"
+    allowed_role = acceptance.CANCEL_REASONS[payload.reason][0]
+    if role != allowed_role:
+        raise HTTPException(status_code=403, detail="That reason is not yours to give on this order")
+    if role == "buyer" and order.status != "pending":
+        raise HTTPException(status_code=409, detail="A paid order is cancelled by the seller or by Kinjy support")
+    _cancel(db, order, by=principal.user_id, reason=payload.reason, note=payload.note)
+    db.commit()
+    other = order.buyer_id if role == "seller" else order.vendor_id
+    notify(other, "order_cancelled", "An order was cancelled",
+           body=acceptance.CANCEL_REASONS[payload.reason][1], link=f"/market/orders/{order.id}")
+    if order.refund_status == "pending":
+        await run_in_threadpool(acceptance.run_refund, order.id)
+        db.refresh(order)
+    return _order_out(order, principal.user_id)
+
+
+class AdminCancelIn(BaseModel):
+    note: str = Field(min_length=3, max_length=500)
+
+
+@app.post("/admin/commerce/orders/{order_id}/cancel", tags=["admin"])
+async def admin_cancel_order(order_id: str, payload: AdminCancelIn, admin: AdminUser, db: OrmSession = Depends(get_db)):
+    """An operational correction by Kinjy - a payment problem, a duplicate
+    charge, fraud, a legal requirement - on an order that is not final yet."""
+    order = db.scalar(select(models.Order).where(models.Order.id == order_id).with_for_update())
+    if order is None:
+        raise HTTPException(status_code=404, detail="Order not found")
+    _cancel(db, order, by=admin.user_id, reason="operational", note=payload.note)
+    _audit(db, admin.user_id, "order_cancel", "order", order.id, payload.note)
+    db.commit()
+    notify_many([order.buyer_id, order.vendor_id], "order_cancelled", "An order was cancelled by Kinjy",
+                body=payload.note, link=f"/market/orders/{order.id}")
+    if order.refund_status == "pending":
+        await run_in_threadpool(acceptance.run_refund, order.id)
+        db.refresh(order)
+    return _order_out(order, admin=True)
+
+
+@app.post("/admin/commerce/orders/{order_id}/retry", tags=["admin"])
+async def admin_retry_order(order_id: str, admin: AdminUser, db: OrmSession = Depends(get_db)):
+    """Try a settlement or refund that needed a person again, once the cause
+    (a provider setting, a missing account) is fixed. Every step is idempotent."""
+    order = db.scalar(select(models.Order).where(models.Order.id == order_id).with_for_update())
+    if order is None:
+        raise HTTPException(status_code=404, detail="Order not found")
+    retried = None
+    if order.settlement_status == "action_required":
+        order.settlement_status, order.settlement_attempts, order.settlement_next_at = "pending", 0, None
+        retried = "settlement"
+    elif order.refund_status == "action_required":
+        order.refund_status, order.refund_attempts, order.refund_next_at = "pending", 0, None
+        retried = "refund"
+    else:
+        raise HTTPException(status_code=409, detail="Nothing on this order is waiting for a person")
+    _audit(db, admin.user_id, f"order_retry_{retried}", "order", order.id, None)
+    db.commit()
+    runner = acceptance.run_settlement if retried == "settlement" else acceptance.run_refund
+    await run_in_threadpool(runner, order.id)
+    db.refresh(order)
+    return _order_out(order, admin=True)
+
+
+@app.get("/admin/commerce/orders", tags=["admin"])
+def admin_orders(_: AdminUser, attention: bool = False, limit: int = 100, db: OrmSession = Depends(get_db)):
+    """Orders, newest first. ``attention``: a settlement or refund waiting for a
+    person, or still pending."""
+    stmt = select(models.Order).order_by(models.Order.created_at.desc())
+    if attention:
+        stmt = stmt.where(
+            models.Order.settlement_status.in_(("pending", "action_required"))
+            | models.Order.refund_status.in_(("pending", "action_required"))
+        )
+    rows = db.scalars(stmt.limit(min(limit, 300))).all()
+    return {"items": [_order_out(o, admin=True) for o in rows]}
+
+
+# --- operational support (not arbitration) --------------------------------------------
+
+class SupportIn(BaseModel):
+    kind: str = Field(pattern="^(payment_problem|duplicate_charge|not_handed_over|file_problem|fraud|legal)$")
+    message: str = Field(min_length=10, max_length=4000)
+
+
+def _support_out(case: models.SupportCase) -> dict:
+    return {
+        "id": case.id, "order_id": case.order_id, "role": case.role, "kind": case.kind,
+        "message": case.message, "status": case.status, "resolution_note": case.resolution_note,
+        "created_at": case.created_at, "closed_at": case.closed_at,
+    }
+
+
+@app.post("/commerce/orders/{order_id}/support", status_code=201, tags=["marketplace"])
+def open_support_case(order_id: str, payload: SupportIn, principal: CurrentUser, db: OrmSession = Depends(get_db)):
+    """Ask Kinjy support for help with an order: a payment problem, a duplicate
+    charge, an item not handed over after confirmation, a file problem, fraud,
+    a legal request. Not a dispute: no money moves because a case is opened."""
+    order = db.get(models.Order, order_id)
+    if order is None or principal.user_id not in (order.buyer_id, order.vendor_id):
+        raise HTTPException(status_code=404, detail="Order not found")
+    case = models.SupportCase(
+        order_id=order.id, opened_by=principal.user_id,
+        role="buyer" if principal.user_id == order.buyer_id else "seller",
+        kind=payload.kind, message=payload.message.strip(),
+    )
+    db.add(case)
+    db.commit()
+    return _support_out(case)
+
+
+@app.get("/commerce/support/me", tags=["marketplace"])
+def my_support_cases(principal: CurrentUser, db: OrmSession = Depends(get_db)):
+    rows = db.scalars(select(models.SupportCase).where(models.SupportCase.opened_by == principal.user_id)
+                      .order_by(models.SupportCase.created_at.desc()).limit(100)).all()
+    return {"items": [_support_out(c) for c in rows]}
+
+
+@app.get("/admin/commerce/support", tags=["admin"])
+def admin_support_cases(_: AdminUser, status: str | None = "open", db: OrmSession = Depends(get_db)):
+    stmt = select(models.SupportCase).order_by(models.SupportCase.created_at)
+    if status:
+        stmt = stmt.where(models.SupportCase.status == status)
+    return {"items": [_support_out(c) for c in db.scalars(stmt.limit(300)).all()]}
+
+
+class CloseCaseIn(BaseModel):
+    note: str = Field(min_length=3, max_length=4000)
+
+
+@app.post("/admin/commerce/support/{case_id}/close", tags=["admin"])
+def close_support_case(case_id: str, payload: CloseCaseIn, admin: AdminUser, db: OrmSession = Depends(get_db)):
+    case = db.get(models.SupportCase, case_id)
+    if case is None:
+        raise HTTPException(status_code=404, detail="Case not found")
+    if case.status == "closed":
+        raise HTTPException(status_code=409, detail="This case is already closed")
+    case.status, case.resolution_note = "closed", payload.note
+    case.closed_by, case.closed_at = admin.user_id, datetime.now(timezone.utc)
+    _audit(db, admin.user_id, "support_close", "order", case.order_id, payload.note[:500])
+    db.commit()
+    notify(case.opened_by, "support_closed", "Kinjy support answered your request", body=payload.note[:300],
+           link=f"/market/orders/{case.order_id}")
+    return _support_out(case)
 
 
 def _order_extras(db: OrmSession, orders: list[models.Order], viewer_id: str) -> dict[str, dict]:
@@ -1412,7 +1693,6 @@ def _order_extras(db: OrmSession, orders: list[models.Order], viewer_id: str) ->
     return extras
 
 
-ORDER_STATUSES = ("pending", "in_escrow", "delivered", "settled", "part_refunded", "refunded", "disputed", "cancelled")
 
 
 @app.get("/commerce/orders/me", tags=["marketplace"])
@@ -1441,21 +1721,7 @@ def my_orders(
         stmt = stmt.where(models.Order.status == status)
     rows = db.scalars(stmt.order_by(models.Order.created_at.desc())).all()
     extras = _order_extras(db, rows, principal.user_id)
-    open_disputes = {
-        d.order_id: d.id
-        for d in db.scalars(
-            select(models.Dispute).where(
-                models.Dispute.order_id.in_([r.id for r in rows] or [""]),
-                models.Dispute.status != "withdrawn",
-            )
-        ).all()
-    }
-    return {
-        "items": [
-            {**_order_out(r, principal.user_id), "dispute_id": open_disputes.get(r.id), **extras.get(r.id, {})}
-            for r in rows
-        ]
-    }
+    return {"items": [{**_order_out(r, principal.user_id), **extras.get(r.id, {})} for r in rows]}
 
 
 @app.get("/commerce/orders/{order_id}", tags=["marketplace"])
@@ -1463,11 +1729,16 @@ def get_order(order_id: str, principal: CurrentUser, db: OrmSession = Depends(ge
     order = db.get(models.Order, order_id)
     if order is None or principal.user_id not in (order.buyer_id, order.vendor_id):
         raise HTTPException(status_code=404, detail="Order not found")
-    dispute = db.scalar(select(models.Dispute).where(models.Dispute.order_id == order_id))
+    product = db.get(models.Product, order.product_id)
     return {
         **_order_out(order, principal.user_id),
-        "custodian_name": settings.CUSTODIAN_NAME,
-        "dispute_id": dispute.id if dispute else None,
+        "protection": _protection_out(product) if product else None,
+        "final_when": "first_download" if product is not None and product.ebook else "buyer_confirmation",
+        "can_confirm": (
+            principal.user_id == order.buyer_id and order.accepted_at is None
+            and product is not None and not product.ebook
+            and (order.status == "delivered" if product.kind == "service" else order.status in ("in_escrow", "delivered"))
+        ),
         **_order_extras(db, [order], principal.user_id).get(order.id, {}),
     }
 
@@ -1519,80 +1790,16 @@ def _load_dispute(db: OrmSession, dispute_id: str, user_id: str) -> tuple[models
     return dispute, order, "buyer" if order.buyer_id == user_id else "seller"
 
 
-@app.post("/commerce/orders/{order_id}/dispute", status_code=201, tags=["disputes"])
-def open_dispute(
-    order_id: str, payload: DisputeIn, principal: CurrentUser, db: OrmSession = Depends(get_db)
-):
-    """Open a case. Either side may; the escrow freezes either way.
-
-    Refused once the money has left custody: after settlement there is nothing
-    to hold back, and pretending otherwise would promise a protection that does
-    not exist.
-    """
-    order = db.get(models.Order, order_id)
-    if order is None or principal.user_id not in (order.buyer_id, order.vendor_id):
-        raise HTTPException(status_code=404, detail="Order not found")
-    if order.status in ("settled", "part_refunded", "refunded", "cancelled"):
-        raise HTTPException(
-            status_code=409,
-            detail="This order has already been settled — the funds are no longer in escrow.",
-        )
-    existing = db.scalar(
-        select(models.Dispute).where(
-            models.Dispute.order_id == order_id,
-            models.Dispute.status.in_(("open", "answered", "arbitration")),
-        )
+# Retired 27/10: Kinjy does not arbitrate ordinary marketplace disputes. The
+# history (and the GET routes below) stays; nothing new can be opened or moved.
+@app.post("/commerce/orders/{order_id}/dispute", tags=["disputes"])
+def open_dispute(order_id: str):
+    raise HTTPException(
+        status_code=410,
+        detail="Kinjy no longer arbitrates marketplace disputes. Before the purchase is final, talk to the "
+               "seller; after it, use the seller's guarantee or insurance. For payment problems, an item not "
+               "handed over after confirmation or fraud, contact Kinjy support from the order.",
     )
-    if existing is not None:
-        raise HTTPException(status_code=409, detail="A dispute is already open on this order")
-
-    role = "buyer" if order.buyer_id == principal.user_id else "seller"
-    against = order.vendor_id if role == "buyer" else order.buyer_id
-    claimed = payload.amount_claimed
-    if claimed is None:
-        claimed = order.customer_price if role == "buyer" else Decimal("0")
-    if claimed > order.customer_price:
-        raise HTTPException(status_code=400, detail="You cannot claim more than the order is worth")
-
-    now = datetime.now(timezone.utc)
-    dispute = models.Dispute(
-        id=new_id("dsp"),
-        order_id=order.id,
-        opened_by=principal.user_id,
-        against=against,
-        role=role,
-        category=payload.category,
-        reason=payload.reason,
-        amount_claimed=claimed,
-        status="open",
-        respond_by=now + timedelta(days=settings.DISPUTE_RESPONSE_DAYS),
-        arbitrate_by=now + timedelta(days=settings.DISPUTE_ARBITRATION_DAYS),
-    )
-    db.add(dispute)
-    db.add(
-        models.DisputeMessage(
-            dispute_id=dispute.id,
-            author_id=principal.user_id,
-            author_role=role,
-            body=payload.reason,
-            evidence="\n".join(payload.evidence) or None,
-        )
-    )
-    # Freezing the window is the whole point: the auto-release must not fire
-    # while a case is open, or the dispute would resolve itself in the seller's
-    # favour by running out the clock.
-    order.status = "disputed"
-    order.dispute_window_ends = None
-    db.commit()
-
-    notify(
-        against,
-        "dispute_opened",
-        "A dispute was opened on your order",
-        body=f"You have {settings.DISPUTE_RESPONSE_DAYS} days to respond before it goes to arbitration.",
-        link=f"/app/disputes/{dispute.id}",
-    )
-    return _dispute_out(dispute)
 
 
 @app.get("/commerce/disputes/me", tags=["disputes"])
@@ -1626,147 +1833,15 @@ def get_dispute(dispute_id: str, principal: CurrentUser, db: OrmSession = Depend
     return _dispute_detail(db, dispute, order, messages, viewer_role, principal.user_id)
 
 
-@app.post("/commerce/disputes/{dispute_id}/messages", status_code=201, tags=["disputes"])
-def add_dispute_message(
-    dispute_id: str,
-    payload: DisputeMessageIn,
-    principal: CurrentUser,
-    db: OrmSession = Depends(get_db),
-):
-    dispute, _order, role = _load_dispute(db, dispute_id, principal.user_id)
-    if dispute.status in ("resolved", "withdrawn"):
-        raise HTTPException(status_code=409, detail="This dispute is closed")
-
-    db.add(
-        models.DisputeMessage(
-            dispute_id=dispute.id,
-            author_id=principal.user_id,
-            author_role=role,
-            body=payload.body,
-            evidence="\n".join(payload.evidence) or None,
-        )
-    )
-    # The first answer from the other side moves the case out of "waiting".
-    if dispute.status == "open" and principal.user_id == dispute.against:
-        dispute.status = "answered"
-    db.commit()
-
-    other = dispute.against if principal.user_id == dispute.opened_by else dispute.opened_by
-    notify(
-        other,
-        "dispute_message",
-        "New message on your dispute",
-        link=f"/app/disputes/{dispute.id}",
-    )
-    return {"ok": True, "status": dispute.status}
-
-
+@app.post("/commerce/disputes/{dispute_id}/messages", tags=["disputes"])
 @app.post("/commerce/disputes/{dispute_id}/withdraw", tags=["disputes"])
-def withdraw_dispute(dispute_id: str, principal: CurrentUser, db: OrmSession = Depends(get_db)):
-    """The opener drops the case; the escrow clock restarts."""
-    dispute, order, _role = _load_dispute(db, dispute_id, principal.user_id)
-    if dispute.opened_by != principal.user_id:
-        raise HTTPException(status_code=403, detail="Only the member who opened it can withdraw it")
-    if dispute.status in ("resolved", "withdrawn"):
-        raise HTTPException(status_code=409, detail="This dispute is closed")
-
-    dispute.status = "withdrawn"
-    dispute.outcome = "withdrawn"
-    dispute.resolved_at = datetime.now(timezone.utc)
-    order.status = "delivered" if order.delivered_at else "in_escrow"
-    order.dispute_window_ends = _custody_window()
-    db.commit()
-
-    notify(dispute.against, "dispute_withdrawn", "A dispute against you was withdrawn",
-           link=f"/market/orders/{order.id}/dispute")
-    return _dispute_out(dispute)
-
-
 @app.post("/commerce/disputes/{dispute_id}/concede", tags=["disputes"])
-def concede_dispute(dispute_id: str, principal: CurrentUser, db: OrmSession = Depends(get_db)):
-    """The other side accepts the claim, and it is settled without arbitration.
-
-    A seller conceding refunds the buyer what was claimed; a buyer conceding
-    releases the money to the seller. Either way it resolves in minutes rather
-    than days, which is what most cases actually need.
-    """
-    dispute, order, _role = _load_dispute(db, dispute_id, principal.user_id)
-    if principal.user_id != dispute.against:
-        raise HTTPException(status_code=403, detail="Only the member the dispute is against can concede")
-    if dispute.status in ("resolved", "withdrawn"):
-        raise HTTPException(status_code=409, detail="This dispute is closed")
-
-    if dispute.role == "buyer":
-        _resolve(db, dispute, order, outcome="refund_buyer" if dispute.amount_claimed >= order.customer_price
-                 else "split", refund_amount=dispute.amount_claimed,
-                 note="Conceded by the seller.", resolved_by=principal.user_id)
-    else:
-        _resolve(db, dispute, order, outcome="release_to_seller", refund_amount=Decimal("0"),
-                 note="Conceded by the buyer.", resolved_by=principal.user_id)
-    db.commit()
-    return _dispute_out(dispute)
-
-
-def _resolve(
-    db: OrmSession,
-    dispute: models.Dispute,
-    order: models.Order,
-    *,
-    outcome: str,
-    refund_amount: Decimal,
-    note: str,
-    resolved_by: str,
-) -> None:
-    """Apply an outcome to the money, then close the case.
-
-    The money moves first. Marking a dispute resolved and *then* failing to move
-    the funds would leave a closed case over an unsettled escrow, which is the
-    one state nobody can recover from the outside.
-    """
-    refund_amount = Decimal(refund_amount or 0)
-    if outcome == "release_to_seller":
-        refund_amount = Decimal("0")
-    elif outcome == "refund_buyer":
-        refund_amount = order.customer_price - Decimal(order.refunded_amount or 0)
-    if refund_amount < 0 or refund_amount > order.customer_price - Decimal(order.refunded_amount or 0):
-        raise HTTPException(status_code=400, detail="The refund cannot exceed what is still held in escrow")
-
-    if refund_amount > 0:
-        _refund(db, order, refund_amount, f"dispute {dispute.id}: {outcome}", key=dispute.id)
-
-    if outcome == "refund_buyer":
-        # The refund above already cleared custody. Nothing reaches the seller,
-        # so no revenue is recognised and no commission accrues: there was no
-        # completed sale to earn one on.
-        order.status = "refunded"
-        order.escrow_released_at = datetime.now(timezone.utc)
-    else:
-        # What the buyer kept still carries the markup, so the seller's price
-        # and Kinjy's revenue shrink together — the sponsor's commission with
-        # them. Paying a full commission on a partly refunded order would pay
-        # out of money that went back to the buyer.
-        kept = order.customer_price - Decimal(order.refunded_amount or 0)
-        markup = Decimal("1") + settings.MARKETPLACE_MARKUP_PCT / Decimal("100")
-        vendor_price = economy.money(kept / markup)
-        try:
-            _settle(db, order, vendor_price=vendor_price)
-        except httpx.HTTPError as exc:
-            log.error("settlement after dispute %s failed: %s", dispute.id, exc)
-            raise HTTPException(status_code=503, detail="Could not settle the order; the case stays open")
-
-    dispute.status = "resolved"
-    dispute.outcome = outcome
-    dispute.refund_amount = refund_amount
-    dispute.resolution_note = note
-    dispute.resolved_by = resolved_by
-    dispute.resolved_at = datetime.now(timezone.utc)
-
-    notify_many(
-        [order.buyer_id, order.vendor_id],
-        "dispute_resolved",
-        "Your dispute has been resolved",
-        body=note,
-        link=f"/market/orders/{order.id}/dispute",
+def retired_dispute_action(dispute_id: str):
+    raise HTTPException(
+        status_code=410,
+        detail="Kinjy no longer arbitrates marketplace disputes. Before the purchase is final, talk to the "
+               "seller; after it, use the seller's guarantee or insurance. For payment problems, an item not "
+               "handed over after confirmation or fraud, contact Kinjy support from the order.",
     )
 
 
@@ -1799,94 +1874,20 @@ def admin_dispute(dispute_id: str, _: AdminUser, db: OrmSession = Depends(get_db
 
 
 @app.post("/admin/disputes/{dispute_id}/resolve", tags=["disputes"])
-def resolve_dispute(
-    dispute_id: str, payload: ResolveIn, admin: AdminUser, db: OrmSession = Depends(get_db)
-):
-    """Kinjy arbitrates. The note is mandatory and is shown to both parties."""
-    dispute = db.get(models.Dispute, dispute_id)
-    if dispute is None:
-        raise HTTPException(status_code=404, detail="Dispute not found")
-    if dispute.status in ("resolved", "withdrawn"):
-        raise HTTPException(status_code=409, detail="This dispute is closed")
-    order = db.get(models.Order, dispute.order_id)
-    if order is None:
-        raise HTTPException(status_code=404, detail="Order not found")
-    if payload.outcome == "split" and payload.refund_amount is None:
-        raise HTTPException(status_code=400, detail="A split outcome needs a refund amount")
-
-    _resolve(
-        db,
-        dispute,
-        order,
-        outcome=payload.outcome,
-        refund_amount=payload.refund_amount or Decimal("0"),
-        note=payload.note,
-        resolved_by=admin.user_id,
+def retired_resolution(dispute_id: str, _: AdminUser):
+    raise HTTPException(
+        status_code=410,
+        detail="Kinjy no longer arbitrates marketplace disputes. Before the purchase is final, talk to the "
+               "seller; after it, use the seller's guarantee or insurance. For payment problems, an item not "
+               "handed over after confirmation or fraud, contact Kinjy support from the order.",
     )
-    db.commit()
-    return _dispute_out(dispute)
 
 
+# Retired 27/10 with the automatic release: nothing pays a seller because time
+# passed. Settlement and refunds run in acceptance.worker_loop.
 @app.post("/internal/escrow/sweep", tags=["internal"])
-def escrow_sweep(db: OrmSession = Depends(get_db)):
-    """Release escrows whose window closed, and escalate silent disputes.
-
-    Idempotent and safe to run on a schedule. A buyer who neither confirms nor
-    disputes must not strand the seller's money forever, and a seller who never
-    answers a dispute must not stall it forever either.
-    """
-    now = datetime.now(timezone.utc)
-    released, escalated, failed = [], [], []
-
-    due = db.scalars(
-        select(models.Order).where(
-            models.Order.status.in_(("in_escrow", "delivered")),
-            models.Order.dispute_window_ends.is_not(None),
-            models.Order.dispute_window_ends <= now,
-        )
-    ).all()
-    for order in due:
-        try:
-            _settle(db, order, vendor_price=order.vendor_price)
-            db.commit()
-            released.append(order.id)
-            notify(
-                order.vendor_id,
-                "order_settled",
-                "Payment released to you",
-                body="The buyer's confirmation window closed with no dispute.",
-                link="/market/seller",
-            )
-        except Exception as exc:
-            db.rollback()
-            log.error("auto-release failed for %s: %s", order.id, exc)
-            failed.append(order.id)
-
-    stale = db.scalars(
-        select(models.Dispute).where(
-            models.Dispute.status == "open",
-            models.Dispute.respond_by.is_not(None),
-            models.Dispute.respond_by <= now,
-        )
-    ).all()
-    for dispute in stale:
-        dispute.status = "arbitration"
-        escalated.append(dispute.id)
-        notify_many(
-            [dispute.opened_by, dispute.against],
-            "dispute_arbitration",
-            "A dispute has gone to Kinjy arbitration",
-            body="The response deadline passed. Kinjy will decide the outcome.",
-            link=f"/app/disputes/{dispute.id}",
-        )
-    db.commit()
-
-    return {
-        "released": released,
-        "escalated": escalated,
-        "failed": failed,
-        "checked_at": now,
-    }
+def escrow_sweep():
+    raise HTTPException(status_code=410, detail="There is no automatic release any more")
 
 
 # --- advertising -----------------------------------------------------------
@@ -2202,7 +2203,7 @@ def vendor_rating(vendor_id: str, db: OrmSession = Depends(get_db)):
 # - limits (a number of downloads, a number of days) are the seller's choice
 #   per ebook, and there are none unless they set them.
 
-ENTITLED_STATUSES = ("in_escrow", "delivered", "settled", "part_refunded", "disputed")
+ENTITLED_STATUSES = ("in_escrow", "delivered", "accepted", "settled", "part_refunded", "disputed")
 _download_requests: dict[str, list[float]] = {}
 _download_lock = threading.Lock()
 
@@ -2314,8 +2315,16 @@ def _download_allowed(buyer_id: str) -> bool:
         return True
 
 
+class DownloadIn(BaseModel):
+    # Required before the first successful download: it makes the purchase final.
+    acknowledge_final: bool = False
+    policy_version: str | None = None
+
+
 @app.post("/commerce/library/{order_id}/download", tags=["ebooks"])
-def download_ebook(order_id: str, principal: CurrentUser, db: OrmSession = Depends(get_db)):
+def download_ebook(
+    order_id: str, principal: CurrentUser, payload: DownloadIn | None = None, db: OrmSession = Depends(get_db)
+):
     """A short-lived link to the ebook, for its buyer, checked every time.
 
     The order must be the caller's, paid as confirmed by the server, not
@@ -2356,11 +2365,24 @@ def download_ebook(order_id: str, principal: CurrentUser, db: OrmSession = Depen
     }
     if access["state"] != "active":
         raise HTTPException(status_code=403, detail=messages[access["state"]])
+    if order.accepted_at is None:
+        if payload is None or not payload.acknowledge_final or payload.policy_version != acceptance.POLICY_VERSION:
+            raise HTTPException(
+                status_code=428,
+                detail="Your first successful download makes this purchase final. Confirm that you have read this.",
+            )
+        acceptance.record_ack(db, order, "download", principal.user_id)
 
-    db.add(models.EbookDownload(order_id=order.id, buyer_id=principal.user_id, file_id=file.id, counted=not retry))
+    download = models.EbookDownload(order_id=order.id, buyer_id=principal.user_id, file_id=file.id, counted=not retry)
+    db.add(download)
+    db.flush()
+    signed = crypto.sign_media_url(file.url, file.asset_id, ttl_s=settings.EBOOK_LINK_TTL_S)
+    expires = int(signed.split("exp=", 1)[1].split("&", 1)[0])
+    receipt = crypto.download_receipt(file.asset_id, download.id, expires)
     db.commit()
     return {
-        "url": crypto.sign_media_url(file.url, file.asset_id, ttl_s=settings.EBOOK_LINK_TTL_S) + "&dl=1",
+        # dlr/dls: media-service reports the last byte sent on this link, and only then is it a download.
+        "url": f"{signed}&dl=1&dlr={download.id}&dls={receipt}",
         "expires_in": settings.EBOOK_LINK_TTL_S,
         "filename": file.filename,
         "format": file.file_format,
@@ -2370,6 +2392,34 @@ def download_ebook(order_id: str, principal: CurrentUser, db: OrmSession = Depen
         "downloads_used": used + (0 if retry else 1),
         "download_limit": product.download_limit,
     }
+
+
+@app.post("/internal/ebook-downloads/{download_id}/completed", tags=["internal"])
+async def ebook_download_completed(download_id: int, asset_id: str, db: OrmSession = Depends(get_db)):
+    """media-service sent the last byte of the file on this download's link.
+
+    The first time it happens on an order that is not final, the purchase
+    becomes final and settlement starts. Later completions, or a second report
+    of the same one, change nothing.
+    """
+    download = db.get(models.EbookDownload, download_id)
+    file = db.get(models.EbookFile, download.file_id) if download else None
+    if download is None or file is None or file.asset_id != asset_id:
+        raise HTTPException(status_code=404, detail="Download not found")
+    order = db.scalar(select(models.Order).where(models.Order.id == download.order_id).with_for_update())
+    if download.completed_at is None:
+        download.completed_at = datetime.now(timezone.utc)
+    finalised = False
+    if (order is not None and order.accepted_at is None and order.status in ("in_escrow", "delivered")
+            and acceptance.has_ack(db, order.id, "download")):
+        finalised = acceptance.accept(db, order, by=order.buyer_id, kind="first_download")
+    db.commit()
+    if finalised:
+        notify(order.vendor_id, "order_accepted", "Ebook downloaded: sale final",
+               body=f"Order {order.id}, ref {order.acceptance_ref}. Settlement has started.",
+               link=f"/market/orders/{order.id}")
+        await run_in_threadpool(acceptance.run_settlement, order.id)
+    return {"completed": True, "finalised": finalised}
 
 
 # --- seller: file versions and sales ------------------------------------------------

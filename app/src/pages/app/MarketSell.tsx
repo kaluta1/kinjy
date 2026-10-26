@@ -6,6 +6,8 @@ import { useAppTheme } from '@/components/appdemo/theme'
 import EbookFileField, { type EbookFileValue } from '@/components/commerce/EbookFileField'
 import ImageUploader from '@/components/commerce/ImageUploader'
 import MarginCalculator, { parseCents } from '@/components/commerce/MarginCalculator'
+import ProtectionFields from '@/components/commerce/ProtectionFields'
+import { protectionDraft, protectionPayload, protectionProblems } from '@/components/commerce/protectionDraft'
 import RichTextEditor from '@/components/social/RichTextEditor'
 import { useApi } from '@/hooks/useApi'
 import { ApiError, kaluta, type EbookInput } from '@/lib/api'
@@ -53,6 +55,8 @@ export default function MarketSell() {
   const [fileBusy, setFileBusy] = useState(false)
   const [sampleBusy, setSampleBusy] = useState(false)
   const [details, setDetails] = useState<EbookInput>({ license: 'personal' })
+  // What the buyer is told before paying: guarantee, insurance, service terms.
+  const [protection, setProtection] = useState(protectionDraft)
   const [submitting, setSubmitting] = useState<null | 'active' | 'draft'>(null)
   const [attempted, setAttempted] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -82,6 +86,7 @@ export default function MarketSell() {
   if (ebook && !book) problems.push({ field: 'sell-file', message: 'The ebook file (PDF or EPUB)', short: 'the ebook file' })
   if (ebook && !(details.author ?? '').trim())
     problems.push({ field: 'sell-author', message: 'The author or publisher', short: 'the author' })
+  if (!ebook) problems.push(...protectionProblems(protection, kind === 'service', 'sell'))
   const draftProblems = problems.filter((p) => p.field === 'sell-title' || p.field === 'sell-price')
   const problemFor = (id: string) => (attempted ? problems.find((p) => p.field === id) : undefined)
 
@@ -108,6 +113,7 @@ export default function MarketSell() {
         country: country || undefined,
         city: ebook ? undefined : city.trim() || undefined,
         images: photos.urls,
+        ...(ebook ? {} : protectionPayload(protection, kind === 'service')),
         ...(ebook
           ? {
               status,
@@ -489,6 +495,27 @@ export default function MarketSell() {
             </div>
           )}
         </div>
+
+        {!ebook && (
+          <section aria-labelledby="sell-protection" className="space-y-3">
+            <h2 id="sell-protection" className="text-base font-semibold text-text-hi">
+              What buyers are told before paying
+            </h2>
+            <p className="text-xs text-text-low">
+              Shown on the listing and at checkout. The purchase becomes final when the buyer confirms receipt in
+              their own account; Kinjy does not arbitrate disputes, so state clearly what you offer.
+            </p>
+            <ProtectionFields
+              draft={protection}
+              onChange={setProtection}
+              isService={kind === 'service'}
+              prefix="sell"
+              fieldClass={field}
+              invalidClass={invalidField}
+              problemFor={problemFor}
+            />
+          </section>
+        )}
 
         {/* Sticks above the bottom tab bar on a phone so the price stays in view while typing. */}
         <div className="sticky bottom-20 z-10 space-y-2 lg:bottom-4">

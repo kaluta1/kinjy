@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import date, datetime, timezone
 from decimal import Decimal
 
-from sqlalchemy import Boolean, Date, DateTime, Integer, Numeric, String, Text
+from sqlalchemy import Boolean, Date, DateTime, Integer, Numeric, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from common.database import Base
@@ -63,6 +63,18 @@ class Product(Base):
     access_days: Mapped[int | None] = mapped_column(Integer)
     suspended_reason: Mapped[str | None] = mapped_column(String(300))
 
+    # --- what the buyer is told before paying (27/10) -------------------------
+    # JSON, as the seller declared them; null means "none", and the listing and
+    # the checkout say so. Kinjy does not arbitrate ordinary disputes, so these
+    # are where a buyer turns after a purchase is final.
+    # guarantee: {scope, duration, exclusions, claim_contact}
+    guarantee: Mapped[str | None] = mapped_column(Text)
+    # insurance: {insurer, coverage, exclusions, claim_process, premium_included}
+    insurance: Mapped[str | None] = mapped_column(Text)
+    # A service: what "done" means, and how the buyer can assess it before
+    # confirming (acceptance criteria and completion process).
+    service_terms: Mapped[str | None] = mapped_column(Text)
+
 
 class EbookFile(Base):
     """One version of an ebook's complete file. Never deleted or overwritten.
@@ -103,6 +115,10 @@ class EbookDownload(Base):
     # asked for again does not use up an allowance.
     counted: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, index=True)
+    # When media-service finished sending the file's last byte on this link -
+    # the server-observable "successful download". Not proof that the buyer's
+    # device saved it, still less that anyone read it.
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class CommerceAudit(Base):
@@ -162,6 +178,39 @@ class Order(Base):
     downloads_reset_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     access_revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+    # --- the rail the buyer paid through (kalutapay|soncopay|mock) ----------
+    payment_rail: Mapped[str | None] = mapped_column(String(20))
+
+    # --- acceptance: the purchase becomes final (27/10) -------------------------
+    # The buyer's own confirmation in their back office (physical products and
+    # services), or an ebook's first successful download. Recorded once, on the
+    # server, and never undone by anything that happens to the payment later.
+    accepted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    accepted_by: Mapped[str | None] = mapped_column(String(40))
+    acceptance_ref: Mapped[str | None] = mapped_column(String(40), unique=True)
+    acceptance_kind: Mapped[str | None] = mapped_column(String(20))  # buyer_confirmation|first_download
+    acceptance_policy: Mapped[str | None] = mapped_column(String(20))
+
+    # --- settlement, separate from acceptance --------------------------------
+    # none | pending | confirmed | action_required. "Seller paid" is said only
+    # at confirmed: the money allocated at the provider and on their balance.
+    settlement_status: Mapped[str] = mapped_column(String(20), default="none")
+    settlement_attempts: Mapped[int] = mapped_column(Integer, default=0)
+    settlement_next_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    settlement_error: Mapped[str | None] = mapped_column(String(300))
+    settlement_backing: Mapped[str | None] = mapped_column(String(40))
+
+    # --- cancellation before acceptance, and the refund it needs ---------------
+    cancelled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    cancelled_by: Mapped[str | None] = mapped_column(String(40))
+    cancel_reason: Mapped[str | None] = mapped_column(String(40))
+    cancel_note: Mapped[str | None] = mapped_column(String(500))
+    # none | pending | confirmed | action_required
+    refund_status: Mapped[str] = mapped_column(String(20), default="none")
+    refund_attempts: Mapped[int] = mapped_column(Integer, default=0)
+    refund_next_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    refund_error: Mapped[str | None] = mapped_column(String(300))
 
 
 class Campaign(Base):
@@ -293,3 +342,47 @@ class ProductReview(Base):
     rating: Mapped[int] = mapped_column(Integer)
     comment: Mapped[str | None] = mapped_column(String(2000))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
+class PolicyAck(Base):
+    """A buyer acknowledging the marketplace policy: before paying, before
+    confirming receipt, before an ebook's first download."""
+
+    __tablename__ = "policy_acks"
+    __table_args__ = (
+        UniqueConstraint("order_id", "stage", name="uq_policy_ack_stage"),
+        {"schema": SCHEMA},
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    order_id: Mapped[str] = mapped_column(String(40), index=True)
+    buyer_id: Mapped[str] = mapped_column(String(40), index=True)
+    stage: Mapped[str] = mapped_column(String(20))  # checkout|acceptance|download
+    policy_version: Mapped[str] = mapped_column(String(20))
+    acknowledged_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
+class SupportCase(Base):
+    """Operational support on an order - not arbitration.
+
+    Payment failures, duplicate charges, an item not handed over after the
+    buyer confirmed, fraud, legally required action. Kinjy looks at these; no
+    money moves because a case was opened.
+    """
+
+    __tablename__ = "support_cases"
+    __table_args__ = {"schema": SCHEMA}
+
+    KINDS = ("payment_problem", "duplicate_charge", "not_handed_over", "file_problem", "fraud", "legal")
+
+    id: Mapped[str] = mapped_column(String(40), primary_key=True, default=lambda: new_id("sup"))
+    order_id: Mapped[str] = mapped_column(String(40), index=True)
+    opened_by: Mapped[str] = mapped_column(String(40), index=True)
+    role: Mapped[str] = mapped_column(String(10))  # buyer|seller
+    kind: Mapped[str] = mapped_column(String(30))
+    message: Mapped[str] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(String(20), default="open", index=True)  # open|closed
+    resolution_note: Mapped[str | None] = mapped_column(Text)
+    closed_by: Mapped[str | None] = mapped_column(String(40))
+    closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, index=True)

@@ -55,7 +55,7 @@ export default function Earnings() {
             <div className="space-y-4">
               <div className="grid grid-cols-[repeat(2,minmax(0,1fr))] gap-3 sm:gap-4 lg:grid-cols-4">
                 <KpiCard icon={WalletIcon} tone="gold" featured label="Available" value={usd(wallet.data.available)} />
-                <KpiCard icon={Clock3} tone="sky" label="Pending" value={usd(wallet.data.pending)} hint="In a dispute window" />
+                <KpiCard icon={Clock3} tone="sky" label="Pending" value={usd(wallet.data.pending)} hint="Not yet released" />
                 <KpiCard icon={Sparkles} tone="emerald" label="Lifetime earned" value={usd(wallet.data.lifetime_earned)} />
                 <KpiCard icon={Landmark} tone="coral" label="Lifetime paid out" value={usd(wallet.data.lifetime_paid)} />
               </div>

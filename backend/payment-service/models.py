@@ -25,7 +25,7 @@ class PaymentIntent(Base):
 
     id: Mapped[str] = mapped_column(String(40), primary_key=True, default=lambda: new_id("pmt"))
     user_id: Mapped[str] = mapped_column(String(40), index=True)
-    rail: Mapped[str] = mapped_column(String(20), default="nowpayments")  # soncopay|nowpayments|mangopay|mock
+    rail: Mapped[str] = mapped_column(String(20), default="soncopay")  # kalutapay|soncopay|mock (test); nowpayments|mangopay on old rows only
     purpose: Mapped[str] = mapped_column(String(40))  # order|subscription|ad_credit|kyc_fee|tribute
     reference: Mapped[str | None] = mapped_column(String(80), index=True)
 
@@ -59,7 +59,7 @@ class PayoutDestination(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     user_id: Mapped[str] = mapped_column(String(40), index=True)
-    rail: Mapped[str] = mapped_column(String(20))  # nowpayments|mangopay
+    rail: Mapped[str] = mapped_column(String(20))  # soncopay; nowpayments|mangopay on old rows only
     # For crypto: a BSC address. Whitelisted on the provider side before use.
     address: Mapped[str] = mapped_column(String(255))
     currency: Mapped[str] = mapped_column(String(20), default="usdtbsc")
@@ -115,6 +115,34 @@ class KycRecord(Base):
     verified_on: Mapped[date | None] = mapped_column(Date)
     expires_on: Mapped[date | None] = mapped_column(Date)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
+class FundAllocation(Base):
+    """One allocation of a marketplace order's held money (orderfunds.py):
+    settlement to the seller and sponsor, or a refund to the buyer.
+
+    ``status``: requested | retrying | confirmed | action_required. Confirmed
+    only on the provider's answer (or, for Sonco Pay direct, against Kinjy's own
+    merchant balance - ``backing`` says which).
+    """
+
+    __tablename__ = "fund_allocations"
+    __table_args__ = {"schema": SCHEMA}
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    reference: Mapped[str] = mapped_column(String(120), unique=True, index=True)
+    order_id: Mapped[str] = mapped_column(String(40), index=True)
+    intent_id: Mapped[str | None] = mapped_column(String(40), index=True)
+    rail: Mapped[str | None] = mapped_column(String(20))
+    purpose: Mapped[str] = mapped_column(String(20))  # settlement | refund
+    amount: Mapped[Decimal] = mapped_column(Numeric(18, 2))
+    status: Mapped[str] = mapped_column(String(20), default="requested", index=True)
+    backing: Mapped[str | None] = mapped_column(String(40))
+    provider_refs: Mapped[str | None] = mapped_column(String(500))
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    error: Mapped[str | None] = mapped_column(String(300))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class Refund(Base):

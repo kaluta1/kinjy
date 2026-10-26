@@ -66,7 +66,8 @@ check("create -> 201 with pricing", r.status_code == 201 and r.json()["pricing"]
 pid = r.json().get("id")
 
 r = c.post("/commerce/products", headers=auth(seller_tok), json={
-    "title": "Logo design", "vendor_price": "50.00", "kind": "service", "country": "KE", "city": city})
+    "title": "Logo design", "vendor_price": "50.00", "kind": "service", "country": "KE", "city": city,
+    "service_terms": "Three logo proposals, then the chosen one in vector formats."})
 check("a service may have no stock", r.status_code == 201, r.text[:150])
 service_id = r.json().get("id")
 
@@ -150,10 +151,10 @@ check("status can only be active|paused", r.status_code == 422, r.status_code)
 # An order placed at 100.00 must keep its own price when the listing changes.
 # A physical product needs a delivery address (see e2e_market_orders.py).
 SHIPPING = {"full_name": "Ada Buyer", "line1": "1 Main St", "city": "Austin", "country": "US"}
-r = c.post("/commerce/orders", headers=auth(buyer_tok), json={"product_id": pid, "quantity": 2, "shipping": SHIPPING})
+r = c.post("/commerce/orders", headers=auth(buyer_tok), json={"acknowledge_policy": True, "policy_version": "2026-10-27", "product_id": pid, "quantity": 2, "shipping": SHIPPING})
 check("buyer orders 2 -> 201", r.status_code == 201 and r.json()["customer_price"] == "240.00", r.text[:150])
 order_id = r.json().get("id")
-r = c.post("/commerce/orders", headers=auth(seller_tok), json={"product_id": pid})
+r = c.post("/commerce/orders", headers=auth(seller_tok), json={"acknowledge_policy": True, "policy_version": "2026-10-27", "product_id": pid})
 check("own-listing purchase is still refused -> 400", r.status_code == 400, r.status_code)
 
 r = c.patch(f"/commerce/products/{pid}", headers=auth(seller_tok),
@@ -205,7 +206,8 @@ r = c.post(f"/commerce/orders/{order_id}/delivered", headers=auth(seller_tok), j
 check("seller marks delivered", r.status_code == 200, r.text[:100])
 sale = next((i for i in c.get("/commerce/sales", headers=auth(seller_tok)).json()["items"] if i["id"] == order_id), None)
 check("delivered is no longer to_ship", sale is not None and sale["to_ship"] is False)
-r = c.post(f"/commerce/orders/{order_id}/confirm-delivery", headers=auth(buyer_tok))
+r = c.post(f"/commerce/orders/{order_id}/confirm-delivery", headers=auth(buyer_tok),
+           json={"acknowledge_final": True, "policy_version": "2026-10-27"})
 check("buyer confirms", r.status_code == 200, r.text[:100])
 f2 = c.get("/commerce/seller/finances", headers=auth(seller_tok)).json()
 check("released = 200.00, nothing pending", f2.get("released") == "200.00" and f2.get("escrow_pending") == "0.00", f2)

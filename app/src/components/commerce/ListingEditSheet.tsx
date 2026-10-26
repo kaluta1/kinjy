@@ -3,6 +3,14 @@ import { useAppTheme } from '@/components/appdemo/theme'
 import ActionSheet, { fieldClass, primaryBtn } from '@/components/commerce/ActionSheet'
 import ImageUploader from '@/components/commerce/ImageUploader'
 import MarginCalculator, { parseCents } from '@/components/commerce/MarginCalculator'
+import ProtectionFields from '@/components/commerce/ProtectionFields'
+import {
+  protectionDraft,
+  protectionPayload,
+  protectionProblems,
+  type ProtectionDraft,
+} from '@/components/commerce/protectionDraft'
+import { useApi } from '@/hooks/useApi'
 import { ApiError, kaluta, type MyProduct, type ProductPatch } from '@/lib/api'
 import { countryOptions } from '@/lib/profileOptions'
 import { cn } from '@/lib/utils'
@@ -30,6 +38,18 @@ export default function ListingEditSheet({ product, onClose, onSaved }: Props) {
   const [uploading, setUploading] = useState(false)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  // The listing's declarations live on its detail, not in the seller's list.
+  // Until they are loaded they are left out of the save, so nothing is cleared by accident.
+  const detail = useApi(
+    () => (product && product.kind !== 'digital' ? kaluta.market.product(product.id) : Promise.resolve(null)),
+    [product?.id, product?.kind],
+  )
+  const [protection, setProtection] = useState<ProtectionDraft | null>(null)
+  const [attempted, setAttempted] = useState(false)
+
+  useEffect(() => {
+    setProtection(detail.data ? protectionDraft(detail.data.protection) : null)
+  }, [detail.data])
 
   useEffect(() => {
     if (!product) return
@@ -43,16 +63,25 @@ export default function ListingEditSheet({ product, onClose, onSaved }: Props) {
     setImages(product.images ?? [])
     setUploading(false)
     setError(null)
+    setAttempted(false)
   }, [product])
 
   if (!product) return null
   const cents = parseCents(price)
   const showStock = product.kind !== 'digital'
+  const isService = product.kind === 'service'
+  const gaps = protection ? protectionProblems(protection, isService, 'ed') : []
+  const problemFor = (id: string) => (attempted ? gaps.find((p) => p.field === id) : undefined)
   const ready = !busy && !uploading && title.trim().length >= 2 && cents !== null && country !== ''
 
   const save = async (event: React.FormEvent) => {
     event.preventDefault()
     if (!ready || cents === null || !product) return
+    setAttempted(true)
+    if (gaps.length) {
+      document.getElementById(gaps[0].field)?.focus()
+      return
+    }
     const patch: ProductPatch = {
       title: title.trim(),
       description: description.trim(),
@@ -63,6 +92,12 @@ export default function ListingEditSheet({ product, onClose, onSaved }: Props) {
       status,
     }
     if (showStock) patch.stock = stock === '' ? null : Number(stock)
+    if (protection) {
+      const declared = protectionPayload(protection, isService)
+      patch.guarantee = declared.guarantee
+      patch.insurance = declared.insurance
+      if (isService) patch.service_terms = declared.service_terms
+    }
     setBusy(true)
     setError(null)
     try {
@@ -148,6 +183,30 @@ export default function ListingEditSheet({ product, onClose, onSaved }: Props) {
             }}
           />
         </div>
+        {showStock && (
+          <section aria-labelledby="ed-protection" className="space-y-2 pt-1">
+            <h3 id="ed-protection" className="text-sm font-semibold text-text-hi">
+              What buyers are told before paying
+            </h3>
+            {detail.loading && <p className="text-xs text-text-low">Loading what this listing declares…</p>}
+            {detail.error && (
+              <p className="text-xs text-red-200">
+                Could not load the guarantee and insurance. Other changes still save; these stay as they were.
+              </p>
+            )}
+            {protection && (
+              <ProtectionFields
+                draft={protection}
+                onChange={setProtection}
+                isService={isService}
+                prefix="ed"
+                fieldClass={fieldClass}
+                invalidClass="border-red-300/60"
+                problemFor={problemFor}
+              />
+            )}
+          </section>
+        )}
         <div>
           <label htmlFor="ed-status" className="caption mb-1.5 block">Visibility</label>
           <select

@@ -1,10 +1,11 @@
 import { useState } from 'react'
 import { Link } from 'react-router'
-import { AlertTriangle, ArrowLeft, BookOpen, Download, Sparkles } from 'lucide-react'
+import { ArrowLeft, BookOpen, Download, LifeBuoy, Sparkles } from 'lucide-react'
 import AppShell from '@/components/app/AppShell'
+import ActionSheet, { ghostBtn, primaryBtn } from '@/components/commerce/ActionSheet'
 import { EbookCover } from '@/components/commerce/EbookPanels'
 import { useApi } from '@/hooks/useApi'
-import { ApiError, kaluta, type LibraryItem } from '@/lib/api'
+import { ApiError, kaluta, type LibraryItem, type MarketplacePolicy } from '@/lib/api'
 import { fileSize } from '@/lib/ebooks'
 
 const STATE_TEXT: Record<LibraryItem['state'], string | null> = {
@@ -17,17 +18,102 @@ const STATE_TEXT: Record<LibraryItem['state'], string | null> = {
   unavailable: 'The file is not available right now. Try again later.',
 }
 
-function LibraryRow({ item }: { item: LibraryItem }) {
+/** Final already: no acknowledgement needed before downloading. */
+const FINAL = new Set(['accepted', 'settled'])
+
+/**
+ * Before the first download of a purchase that is not yet final: the first
+ * successful download makes it final, so the buyer reads and ticks this first.
+ */
+function FirstDownloadDialog({
+  policy,
+  loading,
+  failed,
+  busy,
+  onConfirm,
+  onClose,
+}: {
+  policy: MarketplacePolicy | null
+  loading: boolean
+  failed: boolean
+  busy: boolean
+  onConfirm: (version: string) => void
+  onClose: () => void
+}) {
+  const [ticked, setTicked] = useState(false)
+  return (
+    <ActionSheet open onClose={onClose} title="Before your first download">
+      <div className="space-y-3">
+        {loading && <p className="text-sm text-text-mid">Loading the marketplace policy…</p>}
+        {failed && (
+          <p role="alert" className="text-sm text-red-200">
+            The marketplace policy could not be loaded, so the download cannot start. Try again.
+          </p>
+        )}
+        {policy && (
+          <ul className="list-disc space-y-1.5 ps-5 text-sm leading-relaxed text-text-mid">
+            {policy.download.map((line) => (
+              <li key={line}>{line}</li>
+            ))}
+          </ul>
+        )}
+        <label className="flex cursor-pointer items-start gap-2.5 text-sm text-text-hi">
+          <input
+            type="checkbox"
+            checked={ticked}
+            onChange={(e) => setTicked(e.target.checked)}
+            disabled={!policy}
+            aria-required="true"
+            className="mt-0.5 h-5 w-5 shrink-0 accent-gold"
+          />
+          <span>I understand that my first successful download makes this purchase final.</span>
+        </label>
+        <p className="text-xs text-text-low">
+          If the file turns out to be missing or damaged, Kinjy support can still help from the order page.
+        </p>
+        <div className="flex flex-col gap-2 sm:flex-row-reverse">
+          <button
+            type="button"
+            disabled={!policy || !ticked || busy}
+            onClick={() => policy && onConfirm(policy.version)}
+            className={primaryBtn}
+          >
+            {busy ? 'Preparing…' : 'Download'}
+          </button>
+          <button type="button" onClick={onClose} className={ghostBtn}>
+            Not now
+          </button>
+        </div>
+      </div>
+    </ActionSheet>
+  )
+}
+
+function LibraryRow({ item, onFinal }: { item: LibraryItem; onFinal: () => void }) {
   const [busy, setBusy] = useState(false)
   const [message, setMessage] = useState<{ ok: boolean; text: string } | null>(null)
+  const [asking, setAsking] = useState(false)
+  const needsAck = !FINAL.has(item.status)
+  // Loaded only when the dialog opens.
+  const policy = useApi(
+    () => (asking ? kaluta.market.marketplacePolicy() : Promise.resolve(null)),
+    [asking],
+  )
 
-  const download = async () => {
+  const download = async (policyVersion?: string) => {
+    if (needsAck && !policyVersion) {
+      setAsking(true)
+      return
+    }
     setBusy(true)
     setMessage(null)
     try {
       // A fresh link every time: it works for a few minutes and only for this
       // book. If a download is interrupted, pressing again is not counted.
-      const link = await kaluta.market.downloadEbook(item.order_id)
+      const link = await kaluta.market.downloadEbook(
+        item.order_id,
+        policyVersion ? { policy_version: policyVersion } : undefined,
+      )
       const a = document.createElement('a')
       a.href = link.url
       a.download = link.filename
@@ -41,8 +127,18 @@ function LibraryRow({ item }: { item: LibraryItem }) {
           link.download_limit ? ` ${link.downloads_used} of ${link.download_limit} downloads used.` : ''
         }`,
       })
+      if (policyVersion) {
+        setAsking(false)
+        onFinal()
+      }
     } catch (err) {
-      setMessage({ ok: false, text: err instanceof ApiError ? err.message : 'The download could not start. Try again.' })
+      if (err instanceof ApiError && err.status === 428) {
+        // Not final yet, or the policy changed since the dialog loaded it.
+        setAsking(true)
+        policy.reload()
+      } else {
+        setMessage({ ok: false, text: err instanceof ApiError ? err.message : 'The download could not start. Try again.' })
+      }
     } finally {
       setBusy(false)
     }
@@ -85,19 +181,32 @@ function LibraryRow({ item }: { item: LibraryItem }) {
             {busy ? 'Preparing…' : `Download${item.file ? ` ${item.file.format.toUpperCase()}` : ''}`}
           </button>
           <Link
-            to={`/market/orders/${item.order_id}/dispute`}
+            to={`/market/orders/${item.order_id}`}
             className="inline-flex min-h-[44px] items-center gap-1.5 rounded-full border border-white/12 px-4 text-sm font-semibold text-text-mid hover:border-gold/40 hover:text-gold-soft"
           >
-            <AlertTriangle size={14} aria-hidden="true" />
-            Report a damaged or wrong file
+            <LifeBuoy size={14} aria-hidden="true" />
+            Missing or damaged file? Get support
           </Link>
         </div>
+        {needsAck && item.state === 'active' && (
+          <p className="mt-2 text-xs text-text-low">Your first successful download makes this purchase final.</p>
+        )}
         {message && (
           <p role={message.ok ? 'status' : 'alert'} className={message.ok ? 'mt-2 text-xs text-success' : 'mt-2 text-xs text-red-200'}>
             {message.text}
           </p>
         )}
       </div>
+      {asking && (
+        <FirstDownloadDialog
+          policy={policy.data}
+          loading={policy.loading}
+          failed={Boolean(policy.error)}
+          busy={busy}
+          onConfirm={(version) => void download(version)}
+          onClose={() => setAsking(false)}
+        />
+      )}
     </li>
   )
 }
@@ -131,7 +240,7 @@ export default function MarketLibrary() {
       ) : (
         <ul className="mx-auto max-w-3xl space-y-3">
           {items.map((item) => (
-            <LibraryRow key={item.order_id} item={item} />
+            <LibraryRow key={item.order_id} item={item} onFinal={library.reload} />
           ))}
         </ul>
       )}

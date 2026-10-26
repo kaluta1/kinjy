@@ -1,18 +1,16 @@
 import { Link } from 'react-router'
 import { ArrowRight } from 'lucide-react'
 import PaymentsHero from '@/components/payments/PaymentsHero'
-import CryptoCheckout from '@/components/payments/CryptoCheckout'
-import AutoconversionPipeline from '@/components/payments/AutoconversionPipeline'
+import PaymentFlow from '@/components/payments/PaymentFlow'
+import MarketplaceFinality from '@/components/payments/MarketplaceFinality'
 import CashoutEngine from '@/components/payments/CashoutEngine'
-import EligibilityGate from '@/components/payments/EligibilityGate'
-import DualRail from '@/components/payments/DualRail'
 import SecurityStrip from '@/components/payments/SecurityStrip'
 import { useReducedMotion } from '@/components/creators/motion-utils'
 import PublicShell from '@/components/landing/PublicShell'
 import { ClosingStage } from '@/components/landing/PageKit'
 import { KL_BTN_GHOST, KL_BTN_GOLD } from '@/components/landing/kl-classes'
 
-/** Section 8 — CTA, on the landing's closing paper stage. */
+/** Section 6 — CTA, on the landing's closing paper stage. */
 function PaymentsCta() {
   const reduced = useReducedMotion()
   return (
@@ -31,9 +29,9 @@ function PaymentsCta() {
         <button
           type="button"
           className={KL_BTN_GHOST}
-          onClick={() => document.getElementById('crypto-checkout')?.scrollIntoView({ behavior: reduced ? 'auto' : 'smooth' })}
+          onClick={() => document.getElementById('payment-flow')?.scrollIntoView({ behavior: reduced ? 'auto' : 'smooth' })}
         >
-          Replay the checkout
+          See how a payment flows
         </button>
       </div>
       <Link to="/creators" className="mt-8 inline-flex items-center gap-2 font-semibold text-[var(--kl-gold-deep)] transition-all hover:gap-3">
@@ -43,16 +41,14 @@ function PaymentsCta() {
   )
 }
 
-/** /payments — NowPayments crypto rail, 10-level cashout engine, escrow rails. */
+/** /payments — Sonco Pay payments, Kaluta Pay accounting, marketplace finality, withdrawals. */
 export default function Payments() {
   return (
     <PublicShell>
       <PaymentsHero />
-      <CryptoCheckout />
-      <AutoconversionPipeline />
+      <PaymentFlow />
+      <MarketplaceFinality />
       <CashoutEngine />
-      <EligibilityGate />
-      <DualRail />
       <SecurityStrip />
       <PaymentsCta />
     </PublicShell>

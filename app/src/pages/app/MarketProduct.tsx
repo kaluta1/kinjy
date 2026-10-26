@@ -1,9 +1,10 @@
 import { useEffect, useState } from 'react'
 import { Link, useParams } from 'react-router'
-import { ArrowLeft, BookOpen, MapPin, PackageX, ShieldCheck, ShoppingBag } from 'lucide-react'
+import { ArrowLeft, BookOpen, MapPin, PackageX, ShoppingBag } from 'lucide-react'
 import AppShell from '@/components/app/AppShell'
 import CheckoutSheet from '@/components/commerce/CheckoutSheet'
 import ProductGallery from '@/components/commerce/ProductGallery'
+import ProtectionSummary from '@/components/commerce/ProtectionSummary'
 import { KindBadge } from '@/components/commerce/ProductCard'
 import ProductReviews from '@/components/commerce/ProductReviews'
 import {
@@ -44,7 +45,6 @@ export default function MarketProduct() {
   const { id = '' } = useParams()
   const { user } = useAuth()
   const product = useApi(() => kaluta.market.product(id), [id])
-  const terms = useApi(() => kaluta.market.escrowTerms(), [])
   const [checkout, setCheckout] = useState(false)
   const [ordered, setOrdered] = useState(false)
 
@@ -136,7 +136,7 @@ export default function MarketProduct() {
       className="inline-flex min-h-[48px] flex-1 items-center justify-center gap-1.5 rounded-full bg-gradient-to-br from-gold-soft to-gold px-6 text-sm font-bold text-ink disabled:opacity-40"
     >
       <ShoppingBag size={15} aria-hidden="true" />
-      {unavailable ? (soldOut ? 'Out of stock' : 'Unavailable') : ebook ? 'Buy the ebook' : 'Order - held in escrow'}
+      {unavailable ? (soldOut ? 'Out of stock' : 'Unavailable') : ebook ? 'Buy the ebook' : 'Order - held until final'}
     </button>
   )
 
@@ -189,22 +189,7 @@ export default function MarketProduct() {
             )
           )}
 
-          <div className="cloud-card flex items-start gap-3 p-4">
-            <ShieldCheck size={20} className="mt-0.5 shrink-0 text-gold-soft" aria-hidden="true" />
-            <div className="text-sm">
-              <p className="font-semibold text-text-hi">
-                Funds protected by a licensed custodian until you confirm receipt
-              </p>
-              {terms.data && (
-                <p className="mt-1 text-text-mid">
-                  Held by {terms.data.custodian}. If you do nothing, the funds are released to the seller after{' '}
-                  {terms.data.auto_release_days} days.
-                  {ebook &&
-                    ' You can download the ebook as soon as the payment is confirmed; if the file is damaged or not as described, report it from your order within that time.'}
-                </p>
-              )}
-            </div>
-          </div>
+          {item.protection && <ProtectionSummary protection={item.protection} />}
 
           <div className="cloud-card p-4">
             <Link to={`/market/vendors/${item.vendor.user_id}`} className="flex items-center gap-3">

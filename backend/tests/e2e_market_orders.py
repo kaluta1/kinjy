@@ -1,4 +1,4 @@
-"""Shipping, verified reviews and the dispute detail, against the live API.
+"""Shipping and verified reviews, against the live API.
 
 An order is funded through the same hook payment-service uses once the
 custodian has the money, and settled by the buyer confirming receipt.
@@ -58,7 +58,7 @@ def product(kind, price="20.00"):
 
 
 def place(pid, shipping=None):
-    body = {"product_id": pid}
+    body = {"product_id": pid, "acknowledge_policy": True, "policy_version": "2026-10-27"}
     if shipping:
         body["shipping"] = shipping
     return c.post("/commerce/orders", headers=auth(buyer_tok), json=body)
@@ -82,7 +82,8 @@ def funded(pid, shipping=None):
 
 def settled(pid, shipping=None):
     oid = funded(pid, shipping)
-    r = c.post(f"/commerce/orders/{oid}/confirm-delivery", headers=auth(buyer_tok))
+    r = c.post(f"/commerce/orders/{oid}/confirm-delivery", headers=auth(buyer_tok),
+               json={"acknowledge_final": True, "policy_version": "2026-10-27"})
     r.raise_for_status()
     return oid
 
@@ -178,7 +179,8 @@ check("and the buyer sees them", r.json().get("tracking_number") == "JD0146", r.
 print("\n== reviews ==")
 r = c.post(f"/commerce/orders/{oid}/review", headers=auth(buyer_tok), json={"rating": 5})
 check("no review before settlement (409)", r.status_code == 409, f"{r.status_code} {r.text[:120]}")
-c.post(f"/commerce/orders/{oid}/confirm-delivery", headers=auth(buyer_tok)).raise_for_status()
+c.post(f"/commerce/orders/{oid}/confirm-delivery", headers=auth(buyer_tok),
+       json={"acknowledge_final": True, "policy_version": "2026-10-27"}).raise_for_status()
 r = c.post(f"/commerce/orders/{oid}/review", headers=auth(seller_tok), json={"rating": 5})
 check("the seller cannot review (403)", r.status_code == 403, r.status_code)
 r = c.post(f"/commerce/orders/{oid}/review", headers=auth(stranger_tok), json={"rating": 5})
@@ -210,62 +212,8 @@ r = c.get(f"/commerce/vendors/{seller['id']}/rating")
 check("the vendor rating matches", r.status_code == 200 and (r.json().get("count"), r.json().get("average")) == (2, 3.5),
       r.text[:200])
 
-print("\n== the dispute detail ==")
-oid3 = funded(physical, ADDRESS)
-r = c.post(f"/commerce/orders/{oid3}/dispute", headers=auth(buyer_tok),
-           json={"category": "not_received", "reason": "It never arrived at all",
-                 "evidence": ["javascript:alert(1)"]})
-check("hostile evidence is refused", r.status_code == 422, f"{r.status_code}")
-r = c.post(f"/commerce/orders/{oid3}/dispute", headers=auth(buyer_tok),
-           json={"category": "not_received", "reason": "It never arrived at all",
-                 "evidence": [f"/media/x{i}.png" for i in range(6)]})
-check("more than 5 evidence files is refused", r.status_code == 422, f"{r.status_code}")
-r = c.post(f"/commerce/orders/{oid3}/dispute", headers=auth(buyer_tok),
-           json={"category": "not_received", "reason": "It never arrived at all",
-                 "evidence": ["/media/proof.png"]})
-check("the buyer opens a dispute", r.status_code == 201, f"{r.status_code} {r.text[:120]}")
-did = r.json().get("id")
-
-views = {}
-for who, tok in (("buyer", buyer_tok), ("seller", seller_tok)):
-    r = c.get(f"/commerce/disputes/{did}", headers=auth(tok))
-    check(f"{who} can read the dispute", r.status_code == 200, r.status_code)
-    views[who] = r.json() if r.status_code == 200 else {}
-r = c.get(f"/commerce/disputes/{did}", headers=auth(stranger_tok))
-check("a stranger gets 404", r.status_code == 404, r.status_code)
-
-b, s_ = views["buyer"], views["seller"]
-check("viewer_role is right", (b.get("viewer_role"), s_.get("viewer_role")) == ("buyer", "seller"),
-      (b.get("viewer_role"), s_.get("viewer_role")))
-check("buyer: can withdraw and reply, cannot concede",
-      (b.get("can_withdraw"), b.get("can_reply"), b.get("can_concede")) == (True, True, False), b)
-check("seller: can concede and reply, cannot withdraw",
-      (s_.get("can_concede"), s_.get("can_reply"), s_.get("can_withdraw")) == (True, True, False), s_)
-check("seconds_left_to_respond is positive while unanswered",
-      isinstance(b.get("seconds_left_to_respond"), int) and b["seconds_left_to_respond"] > 0, b.get("seconds_left_to_respond"))
-check("seconds_left_to_arbitrate is positive",
-      isinstance(b.get("seconds_left_to_arbitrate"), int) and b["seconds_left_to_arbitrate"] > 0)
-check("the order summary has a title and price",
-      bool((b.get("order") or {}).get("title")) and bool((b.get("order") or {}).get("customer_price")), b.get("order"))
-check("both parties are listed", b.get("buyer", {}).get("id") == buyer["id"] and b.get("seller", {}).get("id") == seller["id"])
-check("the thread starts with the buyer's evidence",
-      b.get("messages") and b["messages"][0]["author_role"] == "buyer"
-      and b["messages"][0]["evidence"] == ["/media/proof.png"], b.get("messages"))
-
-r = c.post(f"/commerce/disputes/{did}/messages", headers=auth(seller_tok),
-           json={"body": "It was shipped", "evidence": ["https://track.example/x"]})
-check("the seller replies", r.status_code == 201, f"{r.status_code} {r.text[:120]}")
-s_ = c.get(f"/commerce/disputes/{did}", headers=auth(seller_tok)).json()
-check("once answered, the respond clock no longer applies", s_.get("seconds_left_to_respond") is None, s_.get("seconds_left_to_respond"))
-check("the thread is chronological", [m["author_role"] for m in s_.get("messages", [])] == ["buyer", "seller"])
-
-r = c.post(f"/commerce/disputes/{did}/withdraw", headers=auth(buyer_tok))
-check("the buyer withdraws", r.status_code == 200, r.status_code)
-b = c.get(f"/commerce/disputes/{did}", headers=auth(buyer_tok)).json()
-check("a closed dispute allows nothing",
-      (b.get("can_reply"), b.get("can_withdraw"), b.get("can_concede")) == (False, False, False), b)
-check("and has no deadlines left",
-      (b.get("seconds_left_to_respond"), b.get("seconds_left_to_arbitrate")) == (None, None))
+# Disputes were retired on 27/10 (Kinjy no longer arbitrates ordinary
+# marketplace disputes); e2e_market_acceptance.py checks they stay closed.
 
 print("\n" + ("ALL CHECKS PASSED" if ok else "THERE ARE FAILURES ABOVE"))
 sys.exit(0 if ok else 1)

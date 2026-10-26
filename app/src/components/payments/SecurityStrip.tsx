@@ -1,46 +1,44 @@
 import { motion } from 'framer-motion'
 import { BookLock, Fingerprint, KeyRound, Network, Wallet } from 'lucide-react'
 import { EASE, useReducedMotion } from '@/components/creators/motion-utils'
-import { Eyebrow } from '@/components/landing/PageKit'
 import { KL_CARD } from '@/components/landing/kl-classes'
 import { cn } from '@/lib/utils'
 
 const ITEMS = [
   {
-    icon: Network,
-    title: 'IP whitelisting',
-    text: 'NowPayments API access is locked to Kinjy server IPs only.',
+    icon: Fingerprint,
+    title: 'Signed notifications',
+    text: 'Sonco Pay and Kaluta Pay notifications are trusted only when their signature checks out — and the payment is read back from the provider before anything moves.',
   },
   {
-    icon: Wallet,
-    title: 'Wallet whitelisting',
-    text: 'Payouts can only go to pre-approved destination addresses — the safe wallet and member wallets.',
+    icon: Network,
+    title: 'Exact amounts',
+    text: 'A payment opens an order or a fee only when it matches, to the cent, the amount Kinjy’s server set.',
   },
   {
     icon: KeyRound,
-    title: '2FA on every payout',
-    text: 'Mass Payout batches require a verification code; disabling it needs a signed email request.',
+    title: 'Verified identity',
+    text: 'Withdrawals are for members whose identity is verified.',
   },
   {
-    icon: Fingerprint,
-    title: 'HMAC IPN verification',
-    text: 'Callbacks are only trusted when the x-nowpayments-sig header recomputes exactly.',
+    icon: Wallet,
+    title: 'Confirmed wallets',
+    text: 'Money is sent only to the wallet you added and confirmed for your account.',
   },
   {
     icon: BookLock,
-    title: 'Ledger reconciliation',
-    text: 'Every rail movement appends to the immutable Kinjy ledger — audited entry by entry.',
+    title: 'Append-only ledger',
+    text: 'Every movement is a ledger entry. A correction is a new entry, never an edit.',
   },
 ]
 
-/** Section 7 — Security strip. */
+/** Section 5 — Security strip. */
 export default function SecurityStrip() {
   const reduced = useReducedMotion()
   return (
     <section className="kl-pad-x scroll-mt-24 border-t border-[var(--kl-paper-2)] py-[clamp(72px,9vw,120px)]">
       <div>
-        <Eyebrow>Security — Defense in depth</Eyebrow>
-        <h2 className="kl-h2 mt-5 max-w-[900px]">
+        <h2 className="kl-h2 max-w-[900px]">
           Money moves on <span className="text-[var(--kl-gold-deep)]">five locks.</span>
         </h2>
         <div className="mt-12 grid gap-4 sm:grid-cols-2 lg:grid-cols-5">
@@ -62,7 +60,7 @@ export default function SecurityStrip() {
           ))}
         </div>
         <p className="mono-data mt-8 text-center text-xs text-text-low">
-          1000+ payouts per API call · average transaction ≈ 5 minutes · 0% service fee on payouts
+          USDT on BSC · minimum withdrawal $10, network fee included
         </p>
       </div>
     </section>

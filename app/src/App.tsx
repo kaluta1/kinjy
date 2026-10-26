@@ -1,6 +1,6 @@
 import { Suspense, lazy } from 'react'
 import type { ReactNode } from 'react'
-import { Navigate, Routes, Route, useLocation } from 'react-router'
+import { Navigate, Routes, Route, useLocation, useParams } from 'react-router'
 import RouteSkeleton from './components/app/RouteSkeleton'
 import ReferralWatch from './components/app/ReferralWatch'
 import RouteErrorBoundary from './components/app/RouteErrorBoundary'
@@ -47,7 +47,6 @@ const Marketplace = lazy(() => import('./pages/app/Marketplace'))
 const MarketPoolService = lazy(() => import('./pages/app/MarketPoolService'))
 const MarketOrders = lazy(() => import('./pages/app/MarketOrders'))
 const MarketOrder = lazy(() => import('./pages/app/MarketOrder'))
-const MarketDispute = lazy(() => import('./pages/app/MarketDispute'))
 const MarketSell = lazy(() => import('./pages/app/MarketSell'))
 const MarketLibrary = lazy(() => import('./pages/app/MarketLibrary'))
 const MarketSeller = lazy(() => import('./pages/app/MarketSeller'))
@@ -103,6 +102,12 @@ function PageFallback() {
  */
 function gated(feature: Feature, page: ReactNode, fallback: string) {
   return FEATURES[feature] ? page : <Navigate to={fallback} replace />
+}
+
+/** Disputes were retired on 27/10: old links (notifications, e-mails) land on the order itself. */
+function DisputeRedirect() {
+  const { id = '' } = useParams()
+  return <Navigate to={`/market/orders/${id}`} replace />
 }
 
 /**
@@ -184,7 +189,7 @@ export default function App() {
           <Route path="/market" element={gated('marketplace', <Marketplace />, '/hub')} />
           <Route path="/market/orders" element={gated('marketplace', <MarketOrders />, '/hub')} />
           <Route path="/market/orders/:id" element={gated('marketplace', <MarketOrder />, '/hub')} />
-          <Route path="/market/orders/:id/dispute" element={gated('marketplace', <MarketDispute />, '/hub')} />
+          <Route path="/market/orders/:id/dispute" element={<DisputeRedirect />} />
           <Route path="/market/services/referral-pool" element={gated('marketplace', <MarketPoolService />, '/hub')} />
           <Route path="/market/products/:id" element={gated('marketplace', <MarketProduct />, '/hub')} />
           <Route path="/market/sell" element={gated('marketplace', <MarketSell />, '/hub')} />

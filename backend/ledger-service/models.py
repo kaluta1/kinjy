@@ -56,6 +56,9 @@ class Journal(Base):
     reverses_journal_id: Mapped[str | None] = mapped_column(String(40))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, index=True)
     created_by: Mapped[str | None] = mapped_column(String(40))
+    # A journal posted with its member credits held as *pending* (a marketplace
+    # sale): when the money behind them was confirmed and they became withdrawable.
+    funds_released_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class Entry(Base):

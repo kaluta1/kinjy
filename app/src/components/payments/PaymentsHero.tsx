@@ -3,55 +3,52 @@ import { motion } from 'framer-motion'
 import { ArrowDown } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { KineticWords } from '@/components/platform/shared'
-import { Eyebrow, Stage } from '@/components/landing/PageKit'
+import { Stage } from '@/components/landing/PageKit'
 import { EASE, useReducedMotion } from '@/components/creators/motion-utils'
 
-const COIN_CHIPS = [
-  { sym: 'BTC', amt: '0.00104', usd: '$100.00', x: '6%', y: '14%', delay: 0 },
-  { sym: 'ETH', amt: '0.0286', usd: '$100.00', x: '58%', y: '9%', delay: 0.6 },
-  { sym: 'USDT·BSC', amt: '100.00', usd: '$100.00', x: '30%', y: '36%', delay: 1.2 },
+/* How members pay depends on what Sonco Pay offers in their country. */
+const METHOD_CHIPS = [
+  { label: 'Mobile money', detail: 'where available', x: '6%', y: '14%' },
+  { label: 'Card', detail: 'where available', x: '58%', y: '9%' },
+  { label: 'Crypto', detail: 'e.g. USDT on BSC', x: '30%', y: '36%' },
 ]
 
 const STATS = [
-  { k: '350+', v: 'supported coins via NowPayments' },
-  { k: '$1', v: 'minimum commission cashout' },
-  { k: '10', v: 'levels of affiliate allocation' },
-  { k: '0%', v: 'service fee on member payouts' },
+  { k: '$10', v: 'minimum withdrawal, network fee included' },
+  { k: '20%', v: 'of Kinjy’s revenue to your sponsor — one level' },
+  { k: 'USDT', v: 'withdrawals sent on BSC' },
+  { k: '0', v: 'automatic releases on marketplace orders' },
 ]
 
-/** Section 1 — the landing's split: the promise, and three coins settling into one USDT balance. */
+/** Section 1 — how money comes in, and what happens to it. */
 export default function PaymentsHero() {
   const reduced = useReducedMotion()
   const rise = (delay: number) =>
     reduced ? {} : { initial: { opacity: 0, y: 16 }, animate: { opacity: 1, y: 0 }, transition: { duration: 0.6, delay, ease: EASE } }
-  const toCheckout = () =>
-    document.getElementById('crypto-checkout')?.scrollIntoView({ behavior: reduced ? 'auto' : 'smooth' })
+  const toFlow = () =>
+    document.getElementById('payment-flow')?.scrollIntoView({ behavior: reduced ? 'auto' : 'smooth' })
 
   return (
     <header className="kl-split kl-pad-x gap-[clamp(40px,6vw,96px)] pb-24 pt-14">
       <div className="min-w-0">
-        <motion.div {...rise(0.1)}>
-          <Eyebrow>Payments · NowPayments crypto rail</Eyebrow>
-        </motion.div>
         <KineticWords
           as="h1"
-          text="Pay and get paid in crypto."
-          className="kl-serif mt-6 block text-balance text-[clamp(44px,6.6vw,96px)] font-semibold leading-[0.96] tracking-[-0.02em]"
+          text="Pay on Kinjy. Get paid from Kinjy."
+          className="kl-serif block text-balance text-[clamp(44px,6.6vw,96px)] font-semibold leading-[0.96] tracking-[-0.02em]"
         />
         <motion.p className="mt-8 max-w-[520px] text-[18px] leading-[1.6] text-[var(--kl-mid)]" {...rise(0.45)}>
-          The payments rail of the social economy. Members pay for subscriptions, ad credit and
-          marketplace goods in any of 350+ cryptocurrencies — auto-converted into BSC USDT and swept
-          to Kinjy's safe wallet. Money for a marketplace order goes to a licensed custodian instead,
-          and reaches the seller only once the buyer confirms receipt. Commission flows back to the
-          buyer's sponsor automatically, the moment a balance reaches one dollar.
+          Payments are processed by Sonco Pay, on Kinjy’s own page, with the methods available in your
+          country. Kaluta Pay connects to Sonco Pay and carries Kinjy’s accounting: the invoice, the split
+          of each payment, and the money held for marketplace orders until the purchase is final. Every
+          amount is recorded in Kinjy’s ledger.
         </motion.p>
         <motion.div className="mt-10 flex flex-wrap items-center gap-4" {...rise(0.6)}>
           <button
             type="button"
-            onClick={toCheckout}
+            onClick={toFlow}
             className="kl-sheen inline-flex items-center gap-[18px] rounded-[20px] py-[7px] pe-[7px] ps-[30px] text-[17px] font-semibold shadow-[0_14px_30px_-12px_rgba(169,118,28,.55)] transition-transform hover:-translate-y-0.5"
           >
-            Try the crypto checkout
+            See how a payment flows
             <span className="grid h-12 w-12 place-items-center rounded-full bg-white text-[var(--kl-night)]" aria-hidden="true">
               <ArrowDown size={18} />
             </span>
@@ -73,7 +70,7 @@ export default function PaymentsHero() {
         </motion.dl>
       </div>
 
-      {/* Three coins in, one balance out */}
+      {/* Three ways in, one record */}
       <Stage className="min-w-0" glows={['var(--kl-sky)', '#D9A648']}>
         <div className="relative h-[460px]" aria-hidden="true">
           <svg className="absolute inset-0 h-full w-full" viewBox="0 0 520 460" preserveAspectRatio="none" fill="none">
@@ -81,23 +78,21 @@ export default function PaymentsHero() {
               <path key={d} d={d} stroke="var(--kl-dash)" strokeWidth="1.6" strokeDasharray="4 6" />
             ))}
           </svg>
-          {COIN_CHIPS.map((c, i) => (
+          {METHOD_CHIPS.map((c, i) => (
             <div
-              key={c.sym}
+              key={c.label}
               className={cn('absolute rounded-2xl bg-[var(--kl-surface)] px-4 py-3 shadow-[0_20px_40px_-26px_var(--kl-shadow)]', !reduced && 'kl-float')}
               style={{ left: c.x, top: c.y, ['--kl-dur' as string]: `${6 + i}s` }}
             >
-              <p className="kl-mono text-[11px] text-[var(--kl-low)]">{c.sym}</p>
-              <p className="kl-mono mt-0.5 text-sm font-semibold">
-                {c.amt} <span className="font-normal text-[var(--kl-mid)]">≈ {c.usd}</span>
-              </p>
+              <p className="text-sm font-semibold">{c.label}</p>
+              <p className="kl-mono mt-0.5 text-[11px] text-[var(--kl-low)]">{c.detail}</p>
             </div>
           ))}
           <div className="absolute inset-x-0 bottom-10 flex justify-center">
             <div className="w-[260px] rounded-2xl bg-[var(--kl-surface)] p-5 text-center shadow-[0_30px_60px_-32px_var(--kl-shadow)]">
-              <span className="kl-sheen inline-flex items-center gap-1.5 rounded-full px-3 py-1 text-[11px] font-bold">settled</span>
-              <p className="kl-serif mt-3 text-[34px] font-semibold leading-none">300.00</p>
-              <p className="kl-mono mt-1.5 text-[11px] text-[var(--kl-low)]">USDT · BSC — one treasury asset</p>
+              <span className="kl-sheen inline-flex items-center gap-1.5 rounded-full px-3 py-1 text-[11px] font-bold">paid</span>
+              <p className="kl-serif mt-3 text-[26px] font-semibold leading-tight">Sonco Pay</p>
+              <p className="kl-mono mt-1.5 text-[11px] text-[var(--kl-low)]">recorded through Kaluta Pay in Kinjy’s ledger</p>
             </div>
           </div>
         </div>

@@ -5,7 +5,7 @@ import { ApiError, kaluta } from '@/lib/api'
 
 /**
  * A community's marketplace: its members' own listings from the Kinjy
- * marketplace. Buying, delivery, reviews and disputes are the marketplace's.
+ * marketplace. Buying, delivery, acceptance and reviews are the marketplace's.
  */
 export default function CommunityMarket({
   communityId,

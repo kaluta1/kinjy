@@ -6,7 +6,7 @@ import InPagePayment from '@/components/payments/InPagePayment'
 import { inPage } from '@/lib/payrail'
 
 /**
- * Pays for one order, from "Pay" to "held in escrow".
+ * Pays for one order, from "Pay" to "held until the purchase is final".
  *
  * Content only, so it can sit in the checkout dialog right after the order is
  * placed or in a bottom sheet opened from the orders list. The amount is the
@@ -75,7 +75,8 @@ export default function PaymentPanel({
         <CheckCircle2 size={36} className="mx-auto text-gold-soft" aria-hidden="true" />
         <p className="mt-3 text-sm font-semibold text-text-hi">Payment received</p>
         <p className="mt-1 text-sm text-text-mid">
-          ${amount} is held in escrow. It reaches the seller only when you confirm receipt.
+          ${amount} is held. It reaches the seller only when the purchase is final: your confirmation of receipt, or
+          for an ebook your first successful download.
         </p>
         {onDone && (
           <button type="button" onClick={onDone} className={`${primaryBtn} mt-4`}>
@@ -91,8 +92,8 @@ export default function PaymentPanel({
       <p className="flex items-start gap-2 text-sm text-text-mid">
         <ShieldCheck size={16} className="mt-0.5 shrink-0 text-gold" aria-hidden="true" />
         <span>
-          You pay <span className="mono-data text-text-hi">${amount}</span>. The money is held by a licensed custodian
-          until you confirm receipt, not paid to the seller straight away.
+          You pay <span className="mono-data text-text-hi">${amount}</span> through Sonco Pay. It is held until the
+          purchase is final, not paid to the seller straight away.
         </span>
       </p>
 
@@ -162,7 +163,7 @@ export default function PaymentPanel({
             </div>
           )}
           <p className="caption">
-            Confirmation can take a few minutes. Your order moves to “Held in escrow” on its own once the payment is
+            Confirmation can take a few minutes. Your order moves to “Paid, held” on its own once the payment is
             confirmed.
           </p>
           <button type="button" onClick={onPaid} className={ghostBtn}>

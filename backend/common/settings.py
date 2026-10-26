@@ -126,14 +126,10 @@ REFERRAL_POOL_ENTRY_USD = _dec("REFERRAL_POOL_ENTRY_USD", "100")
 REFERRAL_POOL_CAP = _int("REFERRAL_POOL_CAP", 10000)
 REFERRAL_POOL_MAX_UNITS_PER_PURCHASE = _int("REFERRAL_POOL_MAX_UNITS_PER_PURCHASE", 100)
 
-# --- Escrow / custody -------------------------------------------------------
-# Buyer money is held by an authorised financial institution, not by Kinjy, and
-# is released to the seller only once the buyer confirms receipt. If the buyer
-# neither confirms nor disputes, it auto-releases after this many days.
-CUSTODIAN_PROVIDER = _str("CUSTODIAN_PROVIDER", "mangopay")
-CUSTODIAN_NAME = _str("CUSTODIAN_NAME", "Mangopay S.A.")
-CUSTODIAN_LICENCE = _str("CUSTODIAN_LICENCE", "Electronic Money Institution (Luxembourg, CSSF)")
-ESCROW_AUTO_RELEASE_DAYS = _int("ESCROW_AUTO_RELEASE_DAYS", 7)
+# --- Marketplace payments ---------------------------------------------------
+# A buyer's payment is held (with Kaluta Pay, in Kinjy's escrow there) until the
+# purchase is final: the buyer's confirmation, or an ebook's first successful
+# download. Nothing is released because time passed (27/10).
 
 # Ebooks sold on the marketplace (PDF and EPUB). The complete file is stored
 # privately and handed out only as a short-lived signed link, after the
@@ -150,23 +146,14 @@ EBOOK_LINK_TTL_S = _int("EBOOK_LINK_TTL_S", 7 * 24 * 3600)
 EBOOK_RETRY_GRACE_S = _int("EBOOK_RETRY_GRACE_S", 30 * 60)
 # Link requests per buyer per minute, against scripted abuse only.
 EBOOK_LINKS_PER_MINUTE = _int("EBOOK_LINKS_PER_MINUTE", 20)
-# Once a dispute is open the seller has this long to answer before the case is
-# escalated to Kinjy arbitration on the buyer's side of the record.
-DISPUTE_RESPONSE_DAYS = _int("DISPUTE_RESPONSE_DAYS", 3)
-DISPUTE_ARBITRATION_DAYS = _int("DISPUTE_ARBITRATION_DAYS", 10)
-
 # The smallest withdrawal, network fee included ($10 since 26/10). Set on the
 # server to change it; the withdrawal screen reads it from the API.
 PAYOUT_THRESHOLD_USD = _dec("PAYOUT_THRESHOLD_USD", "10.00")
 KYC_ANNUAL_FEE_USD = _dec("KYC_ANNUAL_FEE_USD", "10.00")
 
 # --- Payment rails ----------------------------------------------------------
-NOWPAYMENTS_API_KEY = _str("NOWPAYMENTS_API_KEY")
-NOWPAYMENTS_IPN_SECRET = _str("NOWPAYMENTS_IPN_SECRET")
-NOWPAYMENTS_PAYOUT_CURRENCY = _str("NOWPAYMENTS_PAYOUT_CURRENCY", "usdtbsc")
-MANGOPAY_CLIENT_ID = _str("MANGOPAY_CLIENT_ID")
-MANGOPAY_API_KEY = _str("MANGOPAY_API_KEY")
-MANGOPAY_BASE_URL = _str("MANGOPAY_BASE_URL", "https://api.sandbox.mangopay.com")
+# Sonco Pay takes payments (SONCOPAY_*), through Kaluta Pay when it is
+# configured (KALUTAPAY_*). Mangopay and NowPayments were removed on 27/10.
 
 # Sonco Pay: every payment Kinjy takes, and every commission it pays out.
 # Blank key => the old rails (mock in development). The key is an sp_live_ or

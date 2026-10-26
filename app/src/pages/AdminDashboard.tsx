@@ -4,12 +4,12 @@ import {
   Activity,
   ArrowLeft,
   Dices,
-  Gavel,
   LayoutDashboard,
   Layers,
   Radar,
   ScrollText,
   ShieldCheck,
+  Store,
   Trophy,
   UserCog,
   Users,
@@ -20,11 +20,11 @@ import {
 import { useAppTheme } from '@/components/appdemo/theme'
 import { useAuth } from '@/hooks/useAuth'
 import {
-  Disputes,
   Fraud,
   Kyc,
   Leaders,
   Ledger,
+  Marketplace,
   Members,
   Moderation,
   Overview,
@@ -47,20 +47,20 @@ const SECTIONS: Section[] = [
   { id: 'leaders', label: 'Kinjy Leaders', icon: Trophy, render: () => <Leaders /> },
   { id: 'referral-pool', label: 'Referral pool', icon: Dices, render: () => <PoolAdmin /> },
   { id: 'payouts', label: 'Payouts', icon: Wallet, render: () => <Payouts /> },
-  { id: 'disputes', label: 'Disputes', icon: Gavel, render: () => <Disputes /> },
+  { id: 'marketplace', label: 'Marketplace', icon: Store, render: () => <Marketplace /> },
   { id: 'moderation', label: 'Moderation', icon: Layers, render: () => <Moderation /> },
   { id: 'team', label: 'Team', icon: UserCog, render: () => <Team /> },
   { id: 'communities', label: 'Communities', icon: UsersRound, render: () => <CommunitiesSettings /> },
   { id: 'system', label: 'System', icon: Activity, render: () => <System /> },
 ]
 /** Older addresses that now open a section. */
-const ALIASES: Record<string, string> = { wallets: 'payouts' }
+const ALIASES: Record<string, string> = { wallets: 'payouts', disputes: 'marketplace' }
 
 /**
  * The admin dashboard: /admin and /admin/<section>.
  *
  * One menu for everything an administrator runs - the ledger, KYC, fraud
- * signals, the Leaders month, the referral pool, payouts, disputes,
+ * signals, the Leaders month, the referral pool, payouts, marketplace orders,
  * moderation, the team and the services. Every figure is read from the
  * services as they are now; a section whose service does not answer says so
  * instead of showing a number. The server checks the role on every call; the

@@ -41,6 +41,9 @@ MIGRATIONS = [
     # Same for the per-entry affiliate level: there are no levels any more.
     migrations.column_nullable(models.SCHEMA, "entries", "level"),
     migrations.column_nullable(models.SCHEMA, "commissions", "level"),
+    # Marketplace sales are credited as pending until the provider confirms the
+    # funds (27/10): when they became withdrawable.
+    f"ALTER TABLE {models.SCHEMA}.journals ADD COLUMN IF NOT EXISTS funds_released_at TIMESTAMPTZ",
 ]
 
 app = create_app(
@@ -90,6 +93,9 @@ class MarketplaceOrderIn(BaseModel):
     vendor_price: Decimal = Field(gt=0)
     order_id: str
     idempotency_key: str | None = None
+    # Credit the seller and the sponsor as pending: owed, not yet withdrawable,
+    # until the payment provider confirms the funds (/internal/journals/release-pending).
+    hold: bool = False
 
 
 class ServiceFeeIn(BaseModel):
@@ -109,13 +115,19 @@ class PoolEntryIn(BaseModel):
 
 
 class EscrowIn(BaseModel):
-    """Money moving into or out of the custodian's hands."""
+    """Held buyer money moving in, out, or back to the buyer."""
 
     order_id: str
     amount: Decimal = Field(gt=0)
-    action: str = Field(pattern="^(hold|release|refund)$")
+    action: str = Field(pattern="^(hold|release|refund|refund_to_balance)$")
     description: str = ""
     idempotency_key: str | None = None
+    # refund_to_balance: the buyer whose Kinjy balance is credited.
+    beneficiary_id: str | None = None
+
+
+class ReleasePendingIn(BaseModel):
+    key: str = Field(min_length=1, max_length=120)
 
 
 class SimulateIn(BaseModel):
@@ -230,11 +242,10 @@ def rules():
             "entry_price": str(settings.REFERRAL_POOL_ENTRY_USD),
             "cap": settings.REFERRAL_POOL_CAP,
         },
-        "escrow": {
-            "custodian": settings.CUSTODIAN_NAME,
-            "licence": settings.CUSTODIAN_LICENCE,
-            "auto_release_days": settings.ESCROW_AUTO_RELEASE_DAYS,
-            "note": "Buyer funds are released to the seller only once the buyer confirms receipt.",
+        "marketplace_payments": {
+            "held_until": "the purchase is final: the buyer's confirmation, or an ebook's first successful download",
+            "automatic_release": False,
+            "payments": "Sonco Pay, through Kaluta Pay",
         },
         "payout": {
             "threshold_usd": str(settings.PAYOUT_THRESHOLD_USD),
@@ -336,8 +347,16 @@ def post_community_sale(payload: CommunitySaleIn, db: OrmSession = Depends(get_d
 
 @app.post("/internal/post/marketplace-order", tags=["postings"])
 def post_marketplace_order(payload: MarketplaceOrderIn, db: OrmSession = Depends(get_db)):
-    """The seller is paid their asking price; the commission comes out of the markup."""
+    """The seller is paid their asking price; the commission comes out of the markup.
+
+    Idempotent on the key: a retry returns the journal already written and
+    credits nobody a second time.
+    """
     pricing = economy.marketplace_pricing(payload.vendor_price)
+    existing = posting.find_existing(db, payload.idempotency_key)
+    if existing is not None:
+        return {"pricing": {k: str(v) for k, v in pricing.items()}, "journal": _journal_out(existing, db),
+                "replayed": True}
     split = economy.service_affiliate_split(pricing["margin"], _sponsor(payload.buyer_id))
 
     journal = posting.post_split(
@@ -349,6 +368,7 @@ def post_marketplace_order(payload: MarketplaceOrderIn, db: OrmSession = Depends
         description=f"Order {payload.order_id}",
         idempotency_key=payload.idempotency_key,
         created_by=payload.buyer_id,
+        pending=payload.hold,
     )
 
     # The seller's own money is a separate pair of lines: it was never Kinjy's
@@ -374,7 +394,10 @@ def post_marketplace_order(payload: MarketplaceOrderIn, db: OrmSession = Depends
         )
     )
     wallet = posting.get_wallet(db, payload.vendor_id)
-    wallet.available += pricing["vendor_price"]
+    if payload.hold:
+        wallet.pending += pricing["vendor_price"]
+    else:
+        wallet.available += pricing["vendor_price"]
     wallet.lifetime_earned += pricing["vendor_price"]
 
     journal.amount = pricing["customer_price"]
@@ -426,6 +449,24 @@ def journal_by_key(key: str, db: OrmSession = Depends(get_db)):
     if journal is None:
         raise HTTPException(status_code=404, detail="No journal under that key")
     return _journal_out(journal, db)
+
+
+@app.post("/internal/journals/release-pending", tags=["internal"])
+def release_pending(payload: ReleasePendingIn, db: OrmSession = Depends(get_db)):
+    """Make the pending member credits of one journal withdrawable, once.
+
+    commerce-service calls this after payment-service confirmed that the money
+    behind a marketplace sale is allocated at the provider. Locked and
+    idempotent: two calls release once.
+    """
+    journal = db.scalar(
+        select(models.Journal).where(models.Journal.idempotency_key == payload.key).with_for_update()
+    )
+    if journal is None:
+        raise HTTPException(status_code=404, detail="No journal under that key")
+    released = posting.release_pending(db, journal)
+    db.commit()
+    return {"journal_id": journal.id, "released": released, "funds_released_at": journal.funds_released_at}
 
 
 @app.post("/internal/post/referral-pool-entry", tags=["postings"])
@@ -487,7 +528,8 @@ def post_escrow(payload: EscrowIn, db: OrmSession = Depends(get_db)):
     settlement journal — the one that recognises revenue and accrues the
     commission — is posted only when the buyer confirms receipt.
     """
-    kind = {"hold": "escrow_hold", "release": "escrow_release", "refund": "escrow_refund"}[payload.action]
+    kind = {"hold": "escrow_hold", "release": "escrow_release", "refund": "escrow_refund",
+            "refund_to_balance": "escrow_refund_balance"}[payload.action]
     try:
         journal = posting.post_escrow(
             db,
@@ -496,6 +538,7 @@ def post_escrow(payload: EscrowIn, db: OrmSession = Depends(get_db)):
             reference=payload.order_id,
             description=payload.description or f"Escrow {payload.action} for {payload.order_id}",
             idempotency_key=payload.idempotency_key,
+            beneficiary_id=payload.beneficiary_id,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))

@@ -14,6 +14,7 @@ from pathlib import Path
 
 from urllib.parse import quote
 
+import httpx
 from fastapi import BackgroundTasks, Depends, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
@@ -657,6 +658,8 @@ def serve(
     p: str | None = None,
     poster: str | None = None,
     dl: str | None = None,
+    dlr: str | None = None,
+    dls: str | None = None,
     db: OrmSession = Depends(get_db),
 ):
     """Serve the bytes.
@@ -703,6 +706,12 @@ def serve(
         if not ok:
             log.info("media %s refused: %s", asset_id, reason)
             raise HTTPException(status_code=404, detail="Asset not found")
+    # An ebook download link carries a receipt (dlr/dls, signed by commerce):
+    # when the last byte of the file has gone out on it, commerce is told - the
+    # server-observable "successful download" that makes the purchase final.
+    receipt = (
+        dlr if asset.purpose == "ebook" and dl and crypto.download_receipt_valid(asset.id, dlr, exp, dls) else None
+    )
     if asset.private and not crypto.media_signature_valid(asset.id, exp, sig):
         log.info("media %s refused: missing, expired or forged attachment link", asset_id)
         raise HTTPException(status_code=404, detail="Asset not found")
@@ -758,6 +767,8 @@ def serve(
 
     if remote:
         return _serve_remote(asset, request, media_type, inline, headers)
+    if receipt is not None:
+        return _serve_with_receipt(asset, request, media_type, headers, receipt)
     if not asset.sealed_with:
         return FileResponse(
             asset.storage_path,
@@ -825,6 +836,92 @@ def _serve_sealed(asset: models.Asset, request: Request, media_type: str, inline
         media_type=media_type,
         headers=headers,
     )
+
+
+COMMERCE_URL = "http://commerce-service:8000"
+
+
+def _report_download(download_id: str, asset_id: str) -> None:
+    """Tell commerce-service the file's last byte went out. Retried briefly; a
+    report that never lands leaves the purchase not final, never the reverse."""
+    for attempt in range(4):
+        try:
+            response = httpx.post(f"{COMMERCE_URL}/internal/ebook-downloads/{download_id}/completed",
+                                  params={"asset_id": asset_id}, timeout=10)
+            if response.status_code < 500:
+                return
+        except httpx.HTTPError as exc:
+            log.warning("download %s completion not reported yet: %s", download_id, exc)
+        time.sleep(2 * (attempt + 1))
+    log.error("download %s completion could not be reported", download_id)
+
+
+def _counted(chunks, expected: int, on_complete):
+    """Pass the chunks through; call ``on_complete`` only if exactly ``expected``
+    bytes went out. A client that drops off, or a chunk that fails, stops the
+    stream short - and then nothing is reported."""
+    sent = 0
+    for chunk in chunks:
+        sent += len(chunk)
+        yield chunk
+    if sent == expected:
+        on_complete()
+
+
+def _serve_with_receipt(asset: models.Asset, request: Request, media_type: str, headers: dict,
+                        download_id: str) -> Response:
+    """An ebook download on a receipt link: the whole file, or a range that
+    ends at its last byte (a resumed download). Completion is reported when
+    that last byte has been sent."""
+    size = asset.size_bytes or (os.path.getsize(asset.storage_path) if os.path.exists(asset.storage_path) else 0)
+    if not size:
+        raise HTTPException(status_code=404, detail="Asset not found")
+    start, end, status = 0, size - 1, 200
+    wanted = request.headers.get("range", "")
+    out = {
+        **headers,
+        "Accept-Ranges": "bytes",
+        "Content-Disposition": f"attachment; filename*=UTF-8''{quote(_filename(asset))}",
+    }
+    if wanted.startswith("bytes="):
+        first, _, last = wanted[6:].split(",")[0].strip().partition("-")
+        try:
+            if first:
+                start, end = int(first), (int(last) if last else size - 1)
+            else:
+                start, end = max(0, size - int(last)), size - 1
+        except ValueError:
+            start, end = 0, size - 1
+        else:
+            end = min(end, size - 1)
+            if start > end:
+                return Response(status_code=416, headers={"Content-Range": f"bytes */{size}"})
+            status = 206
+            out["Content-Range"] = f"bytes {start}-{end}/{size}"
+    out["Content-Length"] = str(end - start + 1)
+    if asset.sealed_with:
+        if not crypto.file_key_available(asset.storage_path):
+            raise HTTPException(status_code=404, detail="Asset not found")
+        chunks = _stream_sealed(asset, size, start, end)
+    else:
+        chunks = _read_plain(asset.storage_path, start, end)
+    if end == size - 1:
+        def report() -> None:
+            threading.Thread(target=_report_download, args=(download_id, asset.id), daemon=True).start()
+        chunks = _counted(chunks, end - start + 1, report)
+    return StreamingResponse(chunks, status_code=status, media_type=media_type, headers=out)
+
+
+def _read_plain(path: str, start: int, end: int, chunk_size: int = 256 * 1024):
+    with open(path, "rb") as handle:
+        handle.seek(start)
+        left = end - start + 1
+        while left > 0:
+            chunk = handle.read(min(chunk_size, left))
+            if not chunk:
+                return
+            left -= len(chunk)
+            yield chunk
 
 
 def _stream_sealed(asset: models.Asset, size: int, start: int, end: int):

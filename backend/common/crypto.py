@@ -315,6 +315,23 @@ def sign_media_url(url: str, asset_id: str, ttl_s: int | None = None) -> str:
     return f"{url}{separator}exp={expires}&sig={_media_signature(asset_id, expires)}"
 
 
+def download_receipt(asset_id: str, download_id: int, expires: int) -> str:
+    """A signature binding one ebook download link to its download record.
+
+    media-service reports a completed download back to commerce-service with
+    it, so a completion can only be claimed for a link commerce really issued
+    for that file - not for any record id somebody types in.
+    """
+    mac = hmac.new(_media_link_key(), f"download:{asset_id}:{download_id}:{expires}".encode(), hashlib.sha256).digest()
+    return base64.urlsafe_b64encode(mac).decode().rstrip("=")
+
+
+def download_receipt_valid(asset_id: str, download_id: str | None, expires: str | None, signature: str | None) -> bool:
+    if not download_id or not download_id.isdigit() or not expires or not expires.isdigit() or not signature:
+        return False
+    return hmac.compare_digest(download_receipt(asset_id, int(download_id), int(expires)), signature)
+
+
 def private_fingerprint(sha256_hex: str) -> str:
     """A keyed stand-in for a private file's hash.
 

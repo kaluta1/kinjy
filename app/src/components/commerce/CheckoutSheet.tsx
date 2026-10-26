@@ -1,10 +1,12 @@
 import { useEffect, useMemo, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { Link } from 'react-router'
-import { Minus, Plus, ShieldCheck, X } from 'lucide-react'
+import { Minus, Plus, X } from 'lucide-react'
 import { useAppTheme } from '@/components/appdemo/theme'
 import PaymentPanel from '@/components/commerce/PaymentPanel'
-import { ApiError, kaluta, type OrderShipping } from '@/lib/api'
+import ProtectionSummary from '@/components/commerce/ProtectionSummary'
+import { useApi } from '@/hooks/useApi'
+import { ApiError, kaluta, type OrderShipping, type ProductProtection } from '@/lib/api'
 import { countryOptions } from '@/lib/profileOptions'
 import { cn } from '@/lib/utils'
 
@@ -17,6 +19,8 @@ export interface CheckoutProduct {
   stock?: number | null
   /** Present on an ebook: one copy, delivered to the library, no address. */
   ebook?: unknown
+  /** What the seller declared (guarantee, insurance, service terms). Fetched when absent. */
+  protection?: ProductProtection | null
 }
 
 const field =
@@ -67,6 +71,14 @@ export default function CheckoutSheet({
   const [orderId, setOrderId] = useState<string | null>(null)
   // The price the server put on the order: the payment must be exactly this.
   const [orderPrice, setOrderPrice] = useState('')
+  // The marketplace policy, acknowledged before paying (its version is stored with the order).
+  const policy = useApi(() => kaluta.market.marketplacePolicy(), [])
+  const detail = useApi(
+    () => (product.protection === undefined ? kaluta.market.product(product.id) : Promise.resolve(null)),
+    [product.id, product.protection],
+  )
+  const protection = product.protection ?? detail.data?.protection ?? null
+  const [acknowledged, setAcknowledged] = useState(false)
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
@@ -96,7 +108,7 @@ export default function CheckoutSheet({
   const submit = async (event: React.FormEvent) => {
     event.preventDefault()
     setTouched(true)
-    if (!addressOk || submitting) return
+    if (!addressOk || submitting || !acknowledged || !policy.data) return
     setError(null)
     setSubmitting(true)
     try {
@@ -113,7 +125,7 @@ export default function CheckoutSheet({
             phone: clean(address.phone),
           }
         : undefined
-      const order = await kaluta.market.order(product.id, quantity, shipping)
+      const order = await kaluta.market.order(product.id, quantity, shipping, policy.data.version)
       setOrderPrice(order.customer_price)
       setOrderId(order.id)
       onOrdered?.()
@@ -284,10 +296,44 @@ export default function CheckoutSheet({
                   <dd className="text-gold-soft">{money(total)}</dd>
                 </div>
               </dl>
-              <p className="flex items-start gap-2 text-xs text-text-low">
-                <ShieldCheck size={14} className="mt-0.5 shrink-0" aria-hidden="true" />
-                Held in escrow by a licensed custodian until you confirm receipt.
-              </p>
+
+              {protection && <ProtectionSummary protection={protection} compact />}
+
+              <section aria-labelledby="co-policy" className="rounded-2xl border border-gold/25 bg-gold/[0.06] p-3">
+                <h3 id="co-policy" className="text-sm font-semibold text-text-hi">
+                  How this purchase works
+                </h3>
+                {policy.loading && <p className="mt-2 text-xs text-text-low">Loading the marketplace policy…</p>}
+                {policy.error && (
+                  <p role="alert" className="mt-2 text-xs text-red-200">
+                    The marketplace policy could not be loaded, so the order cannot be placed. Try again.
+                  </p>
+                )}
+                {policy.data && (
+                  <ul className="mt-2 list-disc space-y-1.5 ps-5 text-xs leading-relaxed text-text-mid">
+                    {policy.data.checkout.map((line) => (
+                      <li key={line}>{line}</li>
+                    ))}
+                  </ul>
+                )}
+                <label className="mt-3 flex cursor-pointer items-start gap-2.5 text-sm text-text-hi">
+                  <input
+                    type="checkbox"
+                    checked={acknowledged}
+                    onChange={(e) => setAcknowledged(e.target.checked)}
+                    disabled={!policy.data}
+                    aria-required="true"
+                    className="mt-0.5 h-5 w-5 shrink-0 accent-gold"
+                  />
+                  <span>
+                    I have read this: my confirmation{isEbook ? ' — for this ebook, my first download —' : ''} makes the
+                    purchase final, and Kinjy does not arbitrate ordinary disputes.
+                  </span>
+                </label>
+                {touched && !acknowledged && (
+                  <p className="mt-1 text-xs text-red-200">Tick this to place the order.</p>
+                )}
+              </section>
             </div>
 
             <div className="space-y-2 border-t border-white/10 px-5 pb-[max(1rem,env(safe-area-inset-bottom))] pt-3">
@@ -298,13 +344,13 @@ export default function CheckoutSheet({
               )}
               <button
                 type="submit"
-                disabled={submitting}
+                disabled={submitting || !acknowledged || !policy.data}
                 className={cn(
                   'min-h-[48px] w-full rounded-full bg-gradient-to-br from-gold-soft to-gold px-6 text-sm font-bold text-ink',
-                  submitting && 'opacity-60',
+                  (submitting || !acknowledged || !policy.data) && 'opacity-60',
                 )}
               >
-                {submitting ? 'Placing order...' : `Order - ${money(total)} held in escrow`}
+                {submitting ? 'Placing order...' : `Order - ${money(total)}, held until final`}
               </button>
             </div>
           </form>
