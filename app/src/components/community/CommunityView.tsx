@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { Link, useLocation } from 'react-router'
+import { Link, useLocation, useNavigate } from 'react-router'
 import { ArrowLeft, BarChart3, Bell, BellOff, ClipboardCheck, Coins, Globe, History, Link2, Lock, LogOut, Pencil, Pin, PinOff, ScrollText, UsersRound } from 'lucide-react'
 import Composer from '@/components/social/Composer'
 import LinkQr from '@/components/ui-kit/LinkQr'
@@ -17,6 +17,9 @@ import { copyLink, pendingLink, siteOrigin } from '@/lib/share'
 import { shortLinkFor } from '@/lib/shortLink'
 import { announce } from '@/lib/live'
 import { cn } from '@/lib/utils'
+
+/** Set when a visitor starts joining, so the join resumes only for them. */
+const JOIN_INTENT = 'kaluta.join_intent'
 
 const KIND_LABEL: Record<string, string> = {
   public: 'Public — anyone can read and join',
@@ -52,6 +55,7 @@ export default function CommunityView({
 }) {
   const { user } = useAuth()
   const location = useLocation()
+  const navigate = useNavigate()
   // A secret community's shared link carries `?access=`. Without it the page
   // would be a 404 for the very person the link was sent to.
   const access = new URLSearchParams(location.search).get('access')
@@ -125,13 +129,13 @@ export default function CommunityView({
     onChanged?.()
   }
 
-  const join = async () => {
+  const join = async (via?: string | null) => {
     if (!community) return
     setBusy(true)
     setNote(null)
     try {
       // The invitation link they arrived on, if any: who invited them here.
-      const result = await kaluta.communities.join(communityId, access, pendingLink() || null)
+      const result = await kaluta.communities.join(communityId, access, pendingLink() || via || null)
       setNote(
         result.status === 'pending'
           ? 'Request sent — a moderator has to approve it.'
@@ -147,6 +151,57 @@ export default function CommunityView({
       setBusy(false)
     }
   }
+
+  // A visitor who chose "Join this community" comes back from signing up or in
+  // with `?join=1`: carry on with the join they asked for. The server applies
+  // every rule as it would for a click - approval, payment, a ban - so this
+  // can open nothing a click could not. The flag is dropped from the address
+  // first, so a reload or the back button never asks twice.
+  const resume = new URLSearchParams(location.search)
+  const resumeJoin = resume.get('join') === '1'
+  // The invitation link held before signing up. Signing up spends the stored
+  // one (it must not follow this browser into a second account), so it rides
+  // along here for this one join.
+  const resumeVia = resume.get('join_via')
+  useEffect(() => {
+    if (!resumeJoin || !user || !community) return
+    const rest = new URLSearchParams(location.search)
+    rest.delete('join')
+    rest.delete('join_via')
+    const query = rest.toString()
+    navigate({ pathname: location.pathname, search: query ? `?${query}` : '', hash: location.hash }, { replace: true })
+    // Only a join this tab started. A link that merely carries `?join=1`
+    // must not make whoever opens it join, or ask to join, anything.
+    let started = false
+    try {
+      started = sessionStorage.getItem(JOIN_INTENT) === community.id
+      sessionStorage.removeItem(JOIN_INTENT)
+    } catch {
+      /* storage switched off: the button below is still there */
+    }
+    if (isMember || isPending) return
+    if (started) void join(resumeVia)
+    else setNote('You are signed in. Choose Join to become a member.')
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [resumeJoin, user, community?.id])
+
+  const rememberJoinIntent = () => {
+    try {
+      if (community) sessionStorage.setItem(JOIN_INTENT, community.id)
+    } catch {
+      /* without storage the join is not resumed; the button stays */
+    }
+  }
+
+  // Where a visitor goes to sign up or in: back here, with the join to resume.
+  const joinReturn = (() => {
+    const back = new URLSearchParams(location.search)
+    back.delete('join_via')
+    back.set('join', '1')
+    const held = pendingLink()
+    if (held) back.set('join_via', held)
+    return encodeURIComponent(`${location.pathname}?${back.toString()}`)
+  })()
 
   const leave = async () => {
     setBusy(true)
@@ -242,9 +297,9 @@ export default function CommunityView({
       <button
         type="button"
         onClick={onBack}
-        className="inline-flex items-center gap-1.5 text-sm font-semibold text-text-mid hover:text-gold-soft"
+        className="inline-flex min-h-10 items-center gap-1.5 text-[0.95rem] font-semibold text-text-mid hover:text-gold-soft"
       >
-        <ArrowLeft size={13} aria-hidden="true" />
+        <ArrowLeft size={14} aria-hidden="true" />
         All communities
       </button>
 
@@ -269,56 +324,66 @@ export default function CommunityView({
                 )}
               />
             )}
-            <div className="px-5 pb-6 sm:px-7">
-            <div className="-mt-9 flex items-end gap-4">
+            <div className="px-5 pb-7 sm:px-8">
+            <div className="-mt-9 flex items-end gap-4 sm:-mt-11">
               {community.avatar_url ? (
                 <img
                   src={community.avatar_url}
                   alt=""
-                  className="h-[72px] w-[72px] shrink-0 rounded-[20px] border-4 border-[var(--cloud)] object-cover"
+                  className="h-[72px] w-[72px] shrink-0 rounded-[20px] border-4 border-[var(--cloud)] object-cover sm:h-[88px] sm:w-[88px]"
                 />
               ) : (
                 <span
                   aria-hidden="true"
-                  className="flex h-[72px] w-[72px] shrink-0 items-center justify-center rounded-[20px] border-4 border-[var(--cloud)] bg-gold/25 text-gold-soft"
+                  className="flex h-[72px] w-[72px] shrink-0 items-center justify-center rounded-[20px] border-4 border-[var(--cloud)] bg-gold/25 text-gold-soft sm:h-[88px] sm:w-[88px]"
                 >
                   <UsersRound size={30} />
                 </span>
               )}
             </div>
-            <div className="mt-3 min-w-0">
-                <h1 className="text-[clamp(28px,3.4vw,38px)] font-bold leading-[1.05] tracking-[-0.035em] text-text-hi">{community.name}</h1>
-                <p className="mt-2 inline-flex items-center gap-1.5 text-sm text-text-low">
+            <div className="mt-4 min-w-0">
+                <h1 className="text-[clamp(30px,4vw,44px)] font-bold leading-[1.1] tracking-[-0.03em] text-text-hi [overflow-wrap:anywhere]">{community.name}</h1>
+                <p className="mt-2.5 text-[0.95rem] leading-relaxed text-text-mid">
                   {community.kind === 'public' ? (
-                    <Globe size={13} aria-hidden="true" />
+                    <Globe size={14} className="me-1.5 inline-block align-[-2px]" aria-hidden="true" />
                   ) : (
-                    <Lock size={13} aria-hidden="true" />
+                    <Lock size={14} className="me-1.5 inline-block align-[-2px]" aria-hidden="true" />
                   )}
                   {KIND_LABEL[community.kind] ?? community.kind}
                   {' · '}
                   {community.members_count} member{community.members_count === 1 ? '' : 's'}
                 </p>
                 {community.description && (
-                  <p className="mt-3 max-w-2xl text-[0.95rem] leading-relaxed text-text-mid">{community.description}</p>
+                  <p className="mt-4 max-w-[65ch] whitespace-pre-line text-base leading-[1.7] text-text-mid [overflow-wrap:anywhere] sm:text-[1.0625rem]">{community.description}</p>
                 )}
             </div>
 
-            <div className="mt-5 flex flex-wrap items-center gap-2.5">
+            <div className="mt-6 flex flex-wrap items-center gap-2.5">
               {!user ? (
-                // Not signed in. The link carries this page so they come back
-                // to the community they were reading, not to a dashboard.
-                <Link
-                  to={`/join?mode=signin&next=${encodeURIComponent(location.pathname + location.search)}`}
-                  className="rounded-full bg-gradient-to-br from-gold-soft to-gold px-5 py-2.5 text-sm font-bold text-ink"
-                >
-                  Sign in to join
-                </Link>
+                // Not signed in: an account first, then back here to join.
+                // Somebody who has one switches to Sign in, here or on the form.
+                <>
+                  <Link
+                    to={`/join?mode=signup&next=${joinReturn}`}
+                    onClick={rememberJoinIntent}
+                    className="inline-flex min-h-11 items-center rounded-full bg-gradient-to-br from-gold-soft to-gold px-5 py-2.5 text-[0.95rem] font-bold text-ink"
+                  >
+                    Join this community
+                  </Link>
+                  <Link
+                    to={`/join?mode=signin&next=${joinReturn}`}
+                    onClick={rememberJoinIntent}
+                    className="inline-flex min-h-11 items-center rounded-full border border-[var(--cloud-border)] px-5 py-2.5 text-[0.95rem] font-semibold text-text-hi hover:border-gold/50 hover:text-gold-soft"
+                  >
+                    Already a member? Sign in
+                  </Link>
+                </>
               ) : (
                 !isMember &&
                 !isPending && (
                   <button
                     type="button"
-                    onClick={join}
+                    onClick={() => void join()}
                     disabled={busy}
                     className="rounded-full bg-gradient-to-br from-gold-soft to-gold px-5 py-2.5 text-sm font-bold text-ink disabled:opacity-40"
                   >
@@ -340,7 +405,7 @@ export default function CommunityView({
                   type="button"
                   onClick={leave}
                   disabled={busy}
-                  className="inline-flex items-center gap-1.5 rounded-full border border-[var(--cloud-border)] px-5 py-2.5 text-sm font-semibold text-text-mid hover:border-red-400/50 hover:text-red-200 disabled:opacity-40"
+                  className="inline-flex min-h-11 items-center gap-1.5 rounded-full border border-[var(--cloud-border)] px-5 py-2.5 text-[0.95rem] font-semibold text-text-mid hover:border-red-400/50 hover:text-red-200 disabled:opacity-40"
                 >
                   <LogOut size={12} aria-hidden="true" />
                   Leave
@@ -350,7 +415,7 @@ export default function CommunityView({
                 <button
                   type="button"
                   onClick={() => setEditing(true)}
-                  className="inline-flex items-center gap-1.5 rounded-full border border-[var(--cloud-border)] px-5 py-2.5 text-sm font-semibold text-text-mid hover:border-gold/50 hover:text-gold-soft"
+                  className="inline-flex min-h-11 items-center gap-1.5 rounded-full border border-[var(--cloud-border)] px-5 py-2.5 text-[0.95rem] font-semibold text-text-mid hover:border-gold/50 hover:text-gold-soft"
                 >
                   <Pencil size={13} aria-hidden="true" />
                   Edit community
@@ -360,7 +425,7 @@ export default function CommunityView({
                 <button
                   type="button"
                   onClick={() => setShowMembers(true)}
-                  className="inline-flex items-center gap-1.5 rounded-full border border-[var(--cloud-border)] px-5 py-2.5 text-sm font-semibold text-text-mid hover:border-gold/50 hover:text-gold-soft"
+                  className="inline-flex min-h-11 items-center gap-1.5 rounded-full border border-[var(--cloud-border)] px-5 py-2.5 text-[0.95rem] font-semibold text-text-mid hover:border-gold/50 hover:text-gold-soft"
                 >
                   <UsersRound size={13} aria-hidden="true" />
                   Members
@@ -377,7 +442,7 @@ export default function CommunityView({
                   onClick={togglePin}
                   disabled={busy}
                   aria-pressed={Boolean(community.my_pinned)}
-                  className="inline-flex items-center gap-1.5 rounded-full border border-[var(--cloud-border)] px-5 py-2.5 text-sm font-semibold text-text-mid hover:border-gold/50 hover:text-gold-soft disabled:opacity-40"
+                  className="inline-flex min-h-11 items-center gap-1.5 rounded-full border border-[var(--cloud-border)] px-5 py-2.5 text-[0.95rem] font-semibold text-text-mid hover:border-gold/50 hover:text-gold-soft disabled:opacity-40"
                 >
                   {community.my_pinned ? <PinOff size={13} aria-hidden="true" /> : <Pin size={13} aria-hidden="true" />}
                   {community.my_pinned ? 'Unpin' : 'Pin'}
@@ -390,7 +455,7 @@ export default function CommunityView({
                   disabled={busy}
                   aria-pressed={Boolean(community.my_notify_posts)}
                   title={community.my_notify_posts ? 'Stop notifications for new posts' : 'Be notified of new posts'}
-                  className="inline-flex items-center gap-1.5 rounded-full border border-[var(--cloud-border)] px-5 py-2.5 text-sm font-semibold text-text-mid hover:border-gold/50 hover:text-gold-soft disabled:opacity-40"
+                  className="inline-flex min-h-11 items-center gap-1.5 rounded-full border border-[var(--cloud-border)] px-5 py-2.5 text-[0.95rem] font-semibold text-text-mid hover:border-gold/50 hover:text-gold-soft disabled:opacity-40"
                 >
                   {community.my_notify_posts ? <Bell size={13} aria-hidden="true" /> : <BellOff size={13} aria-hidden="true" />}
                   {community.my_notify_posts ? 'Notifications on' : 'Notifications off'}
@@ -399,7 +464,7 @@ export default function CommunityView({
               <button
                 type="button"
                 onClick={share}
-                className="inline-flex items-center gap-1.5 rounded-full border border-[var(--cloud-border)] px-5 py-2.5 text-sm font-semibold text-text-mid hover:border-gold/50 hover:text-gold-soft"
+                className="inline-flex min-h-11 items-center gap-1.5 rounded-full border border-[var(--cloud-border)] px-5 py-2.5 text-[0.95rem] font-semibold text-text-mid hover:border-gold/50 hover:text-gold-soft"
               >
                 <Link2 size={13} aria-hidden="true" />
                 Share link
@@ -447,12 +512,12 @@ export default function CommunityView({
           </header>
 
           {community.rules && (
-            <details className="cloud-card p-4">
-              <summary className="cursor-pointer text-sm font-semibold text-text-hi">
+            <details className="cloud-card p-4 sm:px-5">
+              <summary className="cursor-pointer text-[0.95rem] font-semibold text-text-hi">
                 <ScrollText size={13} className="me-1.5 inline" aria-hidden="true" />
                 Community rules
               </summary>
-              <p className="mt-2 whitespace-pre-wrap text-sm text-text-mid">{community.rules}</p>
+              <p className="mt-2.5 max-w-[70ch] whitespace-pre-wrap text-[0.95rem] leading-relaxed text-text-mid">{community.rules}</p>
             </details>
           )}
 
@@ -498,7 +563,7 @@ export default function CommunityView({
           ) : isMember ? (
             <p className="cloud-card p-4 text-sm text-text-mid">Posting is closed in this community for now.</p>
           ) : (
-            <p className="cloud-card p-4 text-sm text-text-mid">
+            <p className="cloud-card p-4 text-[0.95rem] leading-relaxed text-text-mid sm:px-5">
               {/* Said before anything is tapped. Somebody reading an open
                   community can see every post and answer none of them, and
                   being told that up front is kinder than a refusal after. */}
@@ -507,9 +572,9 @@ export default function CommunityView({
                   ? isPending
                     ? 'You can read this community while your request is answered. Joining is what lets you post, like and comment.'
                     : 'This community is open — anyone can read it. Join to post, like and comment.'
-                  : 'This community is open, so you can read it without an account. Sign in and join to take part.'
+                  : 'This community is open, so you can read it without an account. Join it to take part.'
                 : !user
-                  ? 'Sign in and join to post in this community.'
+                  ? 'Join this community to post in it.'
                   : isPending
                     ? 'You can post here once your request is approved.'
                     : 'Join this community to post in it.'}
@@ -602,7 +667,7 @@ export default function CommunityView({
               {isMember
                 ? feed.error
                 : !user
-                  ? 'The posts in this community are for its members. Sign in and join to read them.'
+                  ? 'The posts in this community are for its members. Join it to read them.'
                   : 'The posts in this community are for its members. Join to read them.'}
             </p>
           ) : feed.loading ? (

@@ -8,6 +8,7 @@ import { useAuth } from '@/hooks/useAuth'
 import { isRouteAvailable } from '@/lib/features'
 import { useMyProfile } from '@/hooks/useMyProfile'
 import MemberAvatar from '@/components/social/MemberAvatar'
+import ThemeMenu from './ThemeMenu'
 
 /**
  * Ten top-level links read as a site map rather than a way in. Five carry the
@@ -211,9 +212,8 @@ export default function Navbar() {
                 )}
             </div>
 
-            {/* The display-mode button that used to sit here had no handler —
-                it looked interactive and did nothing. The real switcher lives
-                in the App demo; bring it back here when it actually switches. */}
+            {/* Light, Dark or System: the same setting as the app's switcher. */}
+            <ThemeMenu />
 
             {user ? (
               <>

@@ -73,7 +73,7 @@ export default function Communities() {
     const view = <CommunityView handle={slug} onBack={() => navigate('/communities')} onChanged={reload} />
     // A visitor gets the page without the member shell, which would bounce
     // them to sign in or show a sidebar they do not have.
-    if (!user) return <section className="mx-auto w-full max-w-3xl px-6 py-12">{view}</section>
+    if (!user) return <section className="mx-auto w-full max-w-4xl px-4 py-10 sm:px-6 sm:py-12">{view}</section>
     return <AppShell>{view}</AppShell>
   }
 
@@ -86,14 +86,19 @@ export default function Communities() {
     <CommunityCard
       key={community.id}
       community={community}
+      visitor={!user}
       busy={busyId === community.id}
       note={cardNote?.id === community.id ? cardNote.text : null}
       onJoin={() => join(community)}
     />
   )
 
+  // The directory is public: a visitor gets it in the site's own layout, as a
+  // community page does, rather than being sent to sign in.
+  const Frame = user ? AppShell : PublicFrame
+
   return (
-    <AppShell>
+    <Frame>
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
         <form
           onSubmit={(e) => {
@@ -161,8 +166,12 @@ export default function Communities() {
           }}
         />
       )}
-    </AppShell>
+    </Frame>
   )
+}
+
+function PublicFrame({ children }: { children: React.ReactNode }) {
+  return <section className="mx-auto w-full max-w-5xl px-4 py-12 sm:px-6">{children}</section>
 }
 
 function Section({
@@ -193,11 +202,14 @@ function Section({
 
 function CommunityCard({
   community,
+  visitor,
   busy,
   note,
   onJoin,
 }: {
   community: Community
+  /** Signed out: joining starts with an account, then resumes on the community. */
+  visitor: boolean
   busy: boolean
   note: string | null
   onJoin: () => void
@@ -234,7 +246,21 @@ function CommunityCard({
               <span className="rounded-full bg-amber-400/10 px-3 py-1.5 text-xs font-semibold text-amber-200">
                 Request sent
               </span>
-            ) : status === 'banned' ? null : (
+            ) : status === 'banned' ? null : visitor ? (
+              <Link
+                to={`/join?mode=signup&next=${encodeURIComponent(`/communities/${community.slug}?join=1`)}`}
+                onClick={() => {
+                  try {
+                    sessionStorage.setItem('kaluta.join_intent', community.id)
+                  } catch {
+                    /* the community page still offers the button */
+                  }
+                }}
+                className="inline-flex rounded-full border border-[var(--cloud-border)] bg-[var(--cloud)] px-4 py-1.5 text-xs font-semibold text-text-hi hover:border-gold/60 hover:text-gold-soft"
+              >
+                {community.kind === 'private' ? 'Ask to join' : community.kind === 'paid' ? 'Buy access' : 'Join'}
+              </Link>
+            ) : (
               <button
                 type="button"
                 onClick={onJoin}
