@@ -155,7 +155,9 @@ EBOOK_LINKS_PER_MINUTE = _int("EBOOK_LINKS_PER_MINUTE", 20)
 DISPUTE_RESPONSE_DAYS = _int("DISPUTE_RESPONSE_DAYS", 3)
 DISPUTE_ARBITRATION_DAYS = _int("DISPUTE_ARBITRATION_DAYS", 10)
 
-PAYOUT_THRESHOLD_USD = _dec("PAYOUT_THRESHOLD_USD", "1.00")
+# The smallest withdrawal, network fee included ($10 since 26/10). Set on the
+# server to change it; the withdrawal screen reads it from the API.
+PAYOUT_THRESHOLD_USD = _dec("PAYOUT_THRESHOLD_USD", "10.00")
 KYC_ANNUAL_FEE_USD = _dec("KYC_ANNUAL_FEE_USD", "10.00")
 
 # --- Payment rails ----------------------------------------------------------
