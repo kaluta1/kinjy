@@ -166,6 +166,28 @@ class Forum(Base):
     community_id: Mapped[str | None] = mapped_column(String(40), index=True)
     threads_count: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    # --- 27/10: organising, access and rules ---------------------------------
+    # Who made it: the first moderator of a forum with no community.
+    created_by: Mapped[str | None] = mapped_column(String(40))
+    # A subject to group forums under ("Farming", "Health"...), and free tags.
+    category: Mapped[str | None] = mapped_column(String(60), index=True)
+    tags: Mapped[str] = mapped_column(Text, default="")  # csv, lower case
+    # Its usual language and country, for the directory's filters.
+    lang: Mapped[str | None] = mapped_column(String(5))
+    country: Mapped[str | None] = mapped_column(String(2))
+    # inherit: the community's own door (what every forum did before 27/10)
+    # public: anyone may read, even in a private community (not a secret one)
+    # members: the community's active members only
+    # private: the forum's moderators and the community's stewards only
+    visibility: Mapped[str] = mapped_column(String(10), default="inherit")
+    # Who may start a thread, and who may reply: everyone who can read it,
+    # the community's members, or the forum's moderators.
+    post_policy: Mapped[str] = mapped_column(String(12), default="everyone")
+    reply_policy: Mapped[str] = mapped_column(String(12), default="everyone")
+    # Shown to whoever writes a thread here.
+    rules: Mapped[str | None] = mapped_column(Text)
+    # A knowledge article not reviewed for this many days says so.
+    review_days: Mapped[int] = mapped_column(Integer, default=180)
 
 
 class Thread(Base):
@@ -188,6 +210,31 @@ class Thread(Base):
     status: Mapped[str] = mapped_column(String(20), default="open")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, index=True)
     last_activity_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, index=True)
+    # --- 27/10 -------------------------------------------------------------
+    # question | discussion | guide | announcement. Threads from before are
+    # questions: an answer could be accepted on any of them.
+    kind: Mapped[str] = mapped_column(String(14), default="question")
+    tags: Mapped[str] = mapped_column(Text, default="")  # csv, lower case
+    # Where the question is about, when it matters (a country, then a free
+    # region). Never inferred from the author.
+    country: Mapped[str | None] = mapped_column(String(2))
+    region: Mapped[str | None] = mapped_column(String(120))
+    edited_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # The author reopened a solved question (the accepted mark was removed).
+    reopened_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # The author says the thread promotes something they sell or are paid for.
+    commercial: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Moved here from another forum, merged into another thread, or hidden by a
+    # moderator - with the reason the author is given.
+    moved_from: Mapped[str | None] = mapped_column(String(40))
+    merged_into: Mapped[str | None] = mapped_column(String(40))
+    moderation_reason: Mapped[str | None] = mapped_column(Text)
+    # A Community event the discussion is about (same community only).
+    event_id: Mapped[str | None] = mapped_column(String(40))
+    # An expert question session the question was asked in.
+    session_id: Mapped[str | None] = mapped_column(String(40), index=True)
+    # Files attached (ids from media-service, private: served on signed links).
+    attachments: Mapped[str] = mapped_column(Text, default="[]")  # json
 
 
 class Reply(Base):
@@ -204,6 +251,11 @@ class Reply(Base):
     upvotes: Mapped[int] = mapped_column(Integer, default=0)
     status: Mapped[str] = mapped_column(String(20), default="published")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    # --- 27/10 -------------------------------------------------------------
+    edited_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    commercial: Mapped[bool] = mapped_column(Boolean, default=False)
+    moderation_reason: Mapped[str | None] = mapped_column(Text)
+    attachments: Mapped[str] = mapped_column(Text, default="[]")  # json
 
 
 class ReplyVote(Base):
@@ -245,6 +297,21 @@ class KnowledgeEntry(Base):
     confidence: Mapped[float] = mapped_column(Numeric(4, 3), default=0)
     reviewed_by: Mapped[str | None] = mapped_column(String(40))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    # --- 27/10: articles that can be edited, reviewed and traced -----------------
+    source_reply_ids: Mapped[str] = mapped_column(Text, default="")  # csv
+    # Links contributors gave as sources, as they gave them: [{"url", "label"}].
+    source_links: Mapped[str] = mapped_column(Text, default="[]")  # json
+    contributors: Mapped[str] = mapped_column(Text, default="")  # csv user ids
+    tags: Mapped[str] = mapped_column(Text, default="")
+    # draft | published. Older entries were published by whoever curated them.
+    status: Mapped[str] = mapped_column(String(10), default="published")
+    # Written by an AI from the source contributions, and who checked it.
+    ai_generated: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_by: Mapped[str | None] = mapped_column(String(40))
+    updated_by: Mapped[str | None] = mapped_column(String(40))
+    updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class ContentSafetyClassification(Base):
@@ -500,4 +567,220 @@ class CommunityListing(Base):
     community_id: Mapped[str] = mapped_column(String(40), index=True)
     product_id: Mapped[str] = mapped_column(String(40))
     added_by: Mapped[str] = mapped_column(String(40))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
+
+# --- forums, 27/10 ----------------------------------------------------------------
+
+class ForumModerator(Base):
+    """Somebody who keeps one forum in order, appointed by whoever runs it."""
+
+    __tablename__ = "forum_moderators"
+    __table_args__ = (UniqueConstraint("forum_id", "user_id", name="uq_forum_moderator"), {"schema": SCHEMA})
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    forum_id: Mapped[str] = mapped_column(String(40), index=True)
+    user_id: Mapped[str] = mapped_column(String(40), index=True)
+    # Pin, lock, hide, move, merge, review reports.
+    can_moderate: Mapped[bool] = mapped_column(Boolean, default=True)
+    # Write and review knowledge articles.
+    can_edit_knowledge: Mapped[bool] = mapped_column(Boolean, default=True)
+    appointed_by: Mapped[str] = mapped_column(String(40))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
+class ForumFollow(Base):
+    __tablename__ = "forum_follows"
+    __table_args__ = (UniqueConstraint("forum_id", "user_id", name="uq_forum_follow"), {"schema": SCHEMA})
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    forum_id: Mapped[str] = mapped_column(String(40), index=True)
+    user_id: Mapped[str] = mapped_column(String(40), index=True)
+    # Notified of each new thread, and/or a weekly digest.
+    notify_new: Mapped[bool] = mapped_column(Boolean, default=False)
+    digest: Mapped[bool] = mapped_column(Boolean, default=True)
+    digest_sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
+class ThreadFollow(Base):
+    """Following a thread (notified of replies) and saving it (a bookmark) are
+    two separate wishes, held on one row."""
+
+    __tablename__ = "thread_follows"
+    __table_args__ = (UniqueConstraint("thread_id", "user_id", name="uq_thread_follow"), {"schema": SCHEMA})
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    thread_id: Mapped[str] = mapped_column(String(40), index=True)
+    user_id: Mapped[str] = mapped_column(String(40), index=True)
+    following: Mapped[bool] = mapped_column(Boolean, default=False)
+    saved: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
+class TopicFollow(Base):
+    __tablename__ = "topic_follows"
+    __table_args__ = (UniqueConstraint("tag", "user_id", name="uq_topic_follow"), {"schema": SCHEMA})
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    tag: Mapped[str] = mapped_column(String(40), index=True)
+    user_id: Mapped[str] = mapped_column(String(40), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
+class ForumPrefs(Base):
+    """A member's forum notifications, all in one place."""
+
+    __tablename__ = "forum_prefs"
+    __table_args__ = {"schema": SCHEMA}
+
+    user_id: Mapped[str] = mapped_column(String(40), primary_key=True)
+    replies: Mapped[bool] = mapped_column(Boolean, default=True)
+    mentions: Mapped[bool] = mapped_column(Boolean, default=True)
+    followed_threads: Mapped[bool] = mapped_column(Boolean, default=True)
+    topics: Mapped[bool] = mapped_column(Boolean, default=True)
+    digests: Mapped[bool] = mapped_column(Boolean, default=True)
+    # What the member says about their background. Claimed, never verified.
+    background: Mapped[str | None] = mapped_column(Text)
+    # Whether their forum activity shows on their profile.
+    show_activity: Mapped[bool] = mapped_column(Boolean, default=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
+class ThreadDraft(Base):
+    __tablename__ = "thread_drafts"
+    __table_args__ = {"schema": SCHEMA}
+
+    id: Mapped[str] = mapped_column(String(40), primary_key=True, default=lambda: new_id("drf"))
+    user_id: Mapped[str] = mapped_column(String(40), index=True)
+    forum_id: Mapped[str] = mapped_column(String(40), index=True)
+    title: Mapped[str] = mapped_column(String(300), default="")
+    body: Mapped[str] = mapped_column(Text, default="")
+    kind: Mapped[str] = mapped_column(String(14), default="question")
+    tags: Mapped[str] = mapped_column(Text, default="")
+    lang: Mapped[str | None] = mapped_column(String(5))
+    country: Mapped[str | None] = mapped_column(String(2))
+    region: Mapped[str | None] = mapped_column(String(120))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
+class ForumReport(Base):
+    """A member telling the forum's moderators something is wrong - or an
+    author asking for a moderation decision to be looked at again."""
+
+    __tablename__ = "forum_reports"
+    __table_args__ = (
+        UniqueConstraint("reporter_id", "target_kind", "target_id", name="uq_forum_report"),
+        {"schema": SCHEMA},
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    forum_id: Mapped[str] = mapped_column(String(40), index=True)
+    reporter_id: Mapped[str] = mapped_column(String(40), index=True)
+    # thread | reply | knowledge | review (a review request about a moderation)
+    target_kind: Mapped[str] = mapped_column(String(10))
+    target_id: Mapped[str] = mapped_column(String(40))
+    # spam | harassment | hate | violence | sexual | child_safety | misinformation | private_info | other | review
+    reason: Mapped[str] = mapped_column(String(20))
+    note: Mapped[str | None] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(String(10), default="open", index=True)
+    resolution: Mapped[str | None] = mapped_column(Text)
+    resolved_by: Mapped[str | None] = mapped_column(String(40))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class ForumModAction(Base):
+    """Every significant moderation action: who, what, when and why."""
+
+    __tablename__ = "forum_mod_actions"
+    __table_args__ = (Index("ix_forum_mod_actions_forum", "forum_id", "created_at"), {"schema": SCHEMA})
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    forum_id: Mapped[str] = mapped_column(String(40))
+    actor_id: Mapped[str] = mapped_column(String(40))
+    action: Mapped[str] = mapped_column(String(30))
+    target_kind: Mapped[str | None] = mapped_column(String(12))
+    target_id: Mapped[str | None] = mapped_column(String(40))
+    reason: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
+class KnowledgeRevision(Base):
+    """One version of a knowledge article: kept whole, so any change can be
+    read back and compared."""
+
+    __tablename__ = "knowledge_revisions"
+    __table_args__ = (Index("ix_knowledge_revisions_entry", "entry_id", "created_at"), {"schema": SCHEMA})
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    entry_id: Mapped[str] = mapped_column(String(40))
+    editor_id: Mapped[str] = mapped_column(String(40))
+    question: Mapped[str] = mapped_column(Text)
+    answer: Mapped[str] = mapped_column(Text)
+    source_links: Mapped[str] = mapped_column(Text, default="[]")
+    tags: Mapped[str] = mapped_column(Text, default="")
+    note: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
+class KnowledgeSuggestion(Base):
+    """A member's correction, or a flag that an article may be out of date."""
+
+    __tablename__ = "knowledge_suggestions"
+    __table_args__ = {"schema": SCHEMA}
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    entry_id: Mapped[str] = mapped_column(String(40), index=True)
+    user_id: Mapped[str] = mapped_column(String(40))
+    kind: Mapped[str] = mapped_column(String(12))  # correction | outdated
+    note: Mapped[str] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(String(10), default="open", index=True)
+    resolved_by: Mapped[str | None] = mapped_column(String(40))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
+class ForumPoll(Base):
+    __tablename__ = "forum_polls"
+    __table_args__ = {"schema": SCHEMA}
+
+    id: Mapped[str] = mapped_column(String(40), primary_key=True, default=lambda: new_id("fpl"))
+    thread_id: Mapped[str] = mapped_column(String(40), unique=True)
+    question: Mapped[str] = mapped_column(String(300))
+    options: Mapped[str] = mapped_column(Text)  # json list of strings
+    multiple: Mapped[bool] = mapped_column(Boolean, default=False)
+    closes_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
+class ForumPollVote(Base):
+    __tablename__ = "forum_poll_votes"
+    __table_args__ = (UniqueConstraint("poll_id", "option", "user_id", name="uq_forum_poll_vote"), {"schema": SCHEMA})
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    poll_id: Mapped[str] = mapped_column(String(40), index=True)
+    option: Mapped[int] = mapped_column(Integer)
+    user_id: Mapped[str] = mapped_column(String(40))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
+class ExpertSession(Base):
+    """An "ask the expert" session: a window in which members ask an invited
+    expert questions, answered in the forum itself."""
+
+    __tablename__ = "expert_sessions"
+    __table_args__ = {"schema": SCHEMA}
+
+    id: Mapped[str] = mapped_column(String(40), primary_key=True, default=lambda: new_id("exs"))
+    forum_id: Mapped[str] = mapped_column(String(40), index=True)
+    title: Mapped[str] = mapped_column(String(200))
+    description: Mapped[str] = mapped_column(Text, default="")
+    expert_id: Mapped[str] = mapped_column(String(40))
+    # How the organiser introduces the expert. Their words, not Kinjy's check.
+    expert_intro: Mapped[str] = mapped_column(Text, default="")
+    organizer_id: Mapped[str] = mapped_column(String(40))
+    starts_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    ends_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    cancelled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)

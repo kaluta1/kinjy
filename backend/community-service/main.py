@@ -132,6 +132,69 @@ MIGRATIONS = [
     # Paid access (25/10): free for every existing community.
     f"ALTER TABLE {models.SCHEMA}.communities ADD COLUMN IF NOT EXISTS access_model VARCHAR(10) NOT NULL DEFAULT 'free'",
     f"ALTER TABLE {models.SCHEMA}.community_spaces ADD COLUMN IF NOT EXISTS paid_only BOOLEAN NOT NULL DEFAULT FALSE",
+    # Forums, 27/10: organising, access, rules; thread types and moderation;
+    # knowledge articles that can be edited and traced. Additive, with
+    # defaults that keep every existing forum, thread and entry as it was.
+    *(
+        f"ALTER TABLE {models.SCHEMA}.forums ADD COLUMN IF NOT EXISTS {column}"
+        for column in (
+            "created_by VARCHAR(40)",
+            "category VARCHAR(60)",
+            "tags TEXT DEFAULT ''",
+            "lang VARCHAR(5)",
+            "country VARCHAR(2)",
+            "visibility VARCHAR(10) DEFAULT 'inherit'",
+            "post_policy VARCHAR(12) DEFAULT 'everyone'",
+            "reply_policy VARCHAR(12) DEFAULT 'everyone'",
+            "rules TEXT",
+            "review_days INTEGER DEFAULT 180",
+        )
+    ),
+    *(
+        f"ALTER TABLE {models.SCHEMA}.threads ADD COLUMN IF NOT EXISTS {column}"
+        for column in (
+            "kind VARCHAR(14) DEFAULT 'question'",
+            "tags TEXT DEFAULT ''",
+            "country VARCHAR(2)",
+            "region VARCHAR(120)",
+            "edited_at TIMESTAMPTZ",
+            "reopened_at TIMESTAMPTZ",
+            "commercial BOOLEAN DEFAULT FALSE",
+            "moved_from VARCHAR(40)",
+            "merged_into VARCHAR(40)",
+            "moderation_reason TEXT",
+            "event_id VARCHAR(40)",
+            "session_id VARCHAR(40)",
+            "attachments TEXT DEFAULT '[]'",
+        )
+    ),
+    *(
+        f"ALTER TABLE {models.SCHEMA}.replies ADD COLUMN IF NOT EXISTS {column}"
+        for column in (
+            "edited_at TIMESTAMPTZ",
+            "commercial BOOLEAN DEFAULT FALSE",
+            "moderation_reason TEXT",
+            "attachments TEXT DEFAULT '[]'",
+        )
+    ),
+    *(
+        f"ALTER TABLE {models.SCHEMA}.knowledge_entries ADD COLUMN IF NOT EXISTS {column}"
+        for column in (
+            "source_reply_ids TEXT DEFAULT ''",
+            "source_links TEXT DEFAULT '[]'",
+            "contributors TEXT DEFAULT ''",
+            "tags TEXT DEFAULT ''",
+            "status VARCHAR(10) DEFAULT 'published'",
+            "ai_generated BOOLEAN DEFAULT FALSE",
+            "created_by VARCHAR(40)",
+            "updated_by VARCHAR(40)",
+            "updated_at TIMESTAMPTZ",
+            "published_at TIMESTAMPTZ",
+            "reviewed_at TIMESTAMPTZ",
+        )
+    ),
+    f"CREATE INDEX IF NOT EXISTS ix_threads_session_id ON {models.SCHEMA}.threads (session_id)",
+    f"CREATE INDEX IF NOT EXISTS ix_forums_category ON {models.SCHEMA}.forums (category)",
 ]
 
 
@@ -154,6 +217,10 @@ async def _due_loop() -> None:
                 await asyncio.to_thread(paid_rules.run_due, db)
             with SessionLocal() as db:
                 await asyncio.to_thread(event_rules.remind_upcoming, db)
+            # Weekly forum digests (forum_features.py): each claims its rows.
+            import forum_features
+            with SessionLocal() as db:
+                await asyncio.to_thread(forum_features.run_digests, db)
         except Exception as exc:  # pragma: no cover - logged, retried next round
             log.error("community due loop: %s", exc)
 
@@ -211,24 +278,55 @@ class CommunityIn(BaseModel):
 
 class ForumIn(BaseModel):
     name: str = Field(min_length=2, max_length=140)
-    description: str = ""
+    description: str = Field(default="", max_length=4_000)
     parent_id: str | None = None
     hierarchy: str = Field(default="topic", pattern="^(topic|geographic)$")
+    # 27/10: organising, access and rules.
+    category: str | None = Field(default=None, max_length=60)
+    tags: list[str] = Field(default_factory=list, max_length=10)
+    lang: str | None = Field(default=None, max_length=5)
+    country: str | None = Field(default=None, pattern="^[A-Z]{2}$")
+    visibility: str = Field(default="inherit", pattern="^(inherit|public|members|private)$")
+    post_policy: str = Field(default="everyone", pattern="^(everyone|members|moderators)$")
+    reply_policy: str = Field(default="everyone", pattern="^(everyone|members|moderators)$")
+    rules: str | None = Field(default=None, max_length=8_000)
     scope: str | None = None
     scope_value: str | None = None
     community_id: str | None = None
 
 
+class PollIn(BaseModel):
+    question: str = Field(min_length=1, max_length=300)
+    options: list[str] = Field(min_length=2, max_length=10)
+    multiple: bool = False
+    closes_at: datetime | None = None
+
+
 class ThreadIn(BaseModel):
     title: str = Field(min_length=3, max_length=300)
-    body: str = Field(min_length=1)
+    body: str = Field(min_length=1, max_length=40_000)
     lang: str = "en"
+    # 27/10. All optional, so an older client keeps working: a thread without a
+    # kind is a question, as every thread was before.
+    kind: str = Field(default="question", pattern="^(question|discussion|guide|announcement)$")
+    tags: list[str] = Field(default_factory=list, max_length=8)
+    country: str | None = Field(default=None, pattern="^[A-Z]{2}$")
+    region: str | None = Field(default=None, max_length=120)
+    commercial: bool = False
+    attachments: list[str] = Field(default_factory=list, max_length=6)
+    poll: PollIn | None = None
+    event_id: str | None = Field(default=None, max_length=40)
+    session_id: str | None = Field(default=None, max_length=40)
+    # The draft this thread was written from, deleted once it is published.
+    draft_id: str | None = Field(default=None, max_length=40)
 
 
 class ReplyIn(BaseModel):
-    body: str = Field(min_length=1)
+    body: str = Field(min_length=1, max_length=20_000)
     parent_id: str | None = None
     lang: str = "en"
+    commercial: bool = False
+    attachments: list[str] = Field(default_factory=list, max_length=6)
 
 
 # --- communities -----------------------------------------------------------
@@ -626,8 +724,56 @@ def _forum_access(db: OrmSession, forum: models.Forum, principal) -> None:
     if chain is None:
         # A broken chain is a data fault. Fail closed.
         raise HTTPException(status_code=404, detail="Forum not found")
-    for community_id in {f.community_id for f in chain if f.community_id}:
-        _community_door(db, community_id, principal)
+    # Each forum on the chain keeps its own door too (since 27/10): a forum
+    # set to "members" or "private" narrows its community's, and a "public"
+    # forum of a public or private community opens it to readers - never to
+    # somebody the community banned.
+    for link in chain:
+        _forum_door(db, link, principal)
+
+
+def _forum_door(db: OrmSession, forum: models.Forum, principal) -> None:
+    """One forum's own rule, which may narrow (or, for public, open) its community's."""
+    visibility = forum.visibility or "inherit"
+    if visibility == "private":
+        if principal is None or not _moderates_forum(db, forum, principal.user_id):
+            raise HTTPException(status_code=404, detail="Forum not found")
+        return
+    if not forum.community_id:
+        return
+    community = db.get(models.Community, forum.community_id)
+    if community is None:
+        raise HTTPException(status_code=404, detail="Forum not found")
+    membership = _membership(db, community.id, principal.user_id) if principal else None
+    if membership is not None and membership.status == "banned":
+        raise HTTPException(status_code=403, detail="This forum is for members of its community")
+    # Never for a secret community (it would announce it) nor a paid one (its
+    # forums may be what members pay for): there "public" reads as "inherit".
+    if visibility == "public" and community.kind in ("public", "private"):
+        return
+    if visibility == "members":
+        if membership is not None and membership.status == "active":
+            return
+        if community.kind == "secret":
+            raise HTTPException(status_code=404, detail="Forum not found")
+        raise HTTPException(status_code=403, detail="This forum is for members of its community")
+    _community_door(db, community.id, principal)
+
+
+def _moderates_forum(db: OrmSession, forum: models.Forum, user_id: str, *, knowledge: bool = False) -> bool:
+    """A forum moderator (with the right permission), the community's owner or a
+    moderator of it, or - for a forum with no community - whoever created it."""
+    row = db.scalar(
+        select(models.ForumModerator).where(
+            models.ForumModerator.forum_id == forum.id, models.ForumModerator.user_id == user_id
+        )
+    )
+    if row is not None and (row.can_edit_knowledge if knowledge else row.can_moderate):
+        return True
+    if forum.community_id:
+        membership = _membership(db, forum.community_id, user_id)
+        return membership is not None and membership.status == "active" and membership.role in ("owner", "moderator")
+    return forum.created_by is not None and forum.created_by == user_id
 
 
 def _community_door(db: OrmSession, community_id: str, principal) -> None:
@@ -697,6 +843,12 @@ def _can_enter_or_listed(db: OrmSession, forum: models.Forum, principal) -> bool
     chain = _forum_chain(db, forum)
     if chain is None:
         return False
+    # A private forum is not listed to anybody who cannot enter it.
+    for link in chain:
+        if (link.visibility or "inherit") == "private" and (
+            principal is None or not _moderates_forum(db, link, principal.user_id)
+        ):
+            return False
     for community_id in {f.community_id for f in chain if f.community_id}:
         community = db.get(models.Community, community_id)
         if community is None:
@@ -1496,6 +1648,12 @@ def create_forum(payload: ForumIn, principal: CurrentUser, db: OrmSession = Depe
     if data["community_id"]:
         _require_steward(db, data["community_id"], principal.user_id)
 
+    import forum_features
+
+    forum_features.check_forum_settings(db, data.get("community_id"), payload.visibility, payload.post_policy, payload.reply_policy)
+    data["tags"] = forum_features.clean_tags(payload.tags)
+    data["category"] = (payload.category or "").strip() or None
+    data["created_by"] = principal.user_id
     slug = _slugify(payload.name)
     if db.scalar(select(models.Forum).where(models.Forum.slug == slug)):
         slug = f"{slug}-{new_id('x')[-4:].lower()}"
@@ -1601,9 +1759,39 @@ def list_forums(
     parent_id: str | None = None,
     scope: str | None = None,
     community_id: str | None = None,
+    category: str | None = None,
+    lang: str | None = None,
+    country: str | None = None,
+    tag: str | None = None,
+    q: str | None = Query(default=None, max_length=100),
+    followed: bool = False,
     db: OrmSession = Depends(get_db),
 ):
     stmt = select(models.Forum)
+    if category:
+        stmt = stmt.where(models.Forum.category == category)
+    if lang:
+        stmt = stmt.where(models.Forum.lang == lang)
+    if country:
+        stmt = stmt.where(models.Forum.country == country.upper())
+    if tag:
+        stmt = stmt.where(func.lower(models.Forum.tags).like(_like(tag.strip().lower()), escape="\\"))
+    if q:
+        pattern = _like(q)
+        stmt = stmt.where(
+            or_(
+                func.lower(models.Forum.name).like(pattern, escape="\\"),
+                func.lower(models.Forum.description).like(pattern, escape="\\"),
+            )
+        )
+    if followed:
+        if principal is None:
+            return {"geo_scopes": GEO_SCOPES, "items": []}
+        stmt = stmt.where(
+            models.Forum.id.in_(select(models.ForumFollow.forum_id).where(models.ForumFollow.user_id == principal.user_id))
+        )
+        # The member's own list: every level, not only the top one.
+        parent_id = parent_id or ""
     if community_id:
         # One community's forums, for its page. Its own door first: whoever
         # cannot enter the community is told no more than its page would say.
@@ -1631,7 +1819,7 @@ def list_forums(
         stmt = stmt.where(models.Forum.hierarchy == hierarchy)
     if parent_id:
         stmt = stmt.where(models.Forum.parent_id == parent_id)
-    elif parent_id is None and scope is None:
+    elif parent_id is None and scope is None and not (q or category or tag):
         stmt = stmt.where(models.Forum.parent_id.is_(None))
     if scope:
         stmt = stmt.where(models.Forum.scope == scope)
@@ -1650,8 +1838,12 @@ def list_forums(
             db.scalars(select(models.Community).where(models.Community.id.in_(owners))).all() if owners else []
         )
     }
+    import forum_features
+
+    facts = forum_features.forum_facts(db, rows, principal, communities)
     return {
         "geo_scopes": GEO_SCOPES,
+        "categories": forum_features.categories(db),
         "items": [
             {
                 "id": r.id,
@@ -1668,6 +1860,7 @@ def list_forums(
                      "name": communities[r.community_id].name}
                     if r.community_id in communities else None
                 ),
+                **facts.get(r.id, {}),
             }
             for r in rows
         ],
@@ -1678,14 +1871,36 @@ def list_forums(
 async def create_thread(
     forum_id: str, payload: ThreadIn, principal: CurrentUser, db: OrmSession = Depends(get_db)
 ):
+    import forum_features
+
     forum = _get_forum_or_404(db, forum_id)
     _forum_access(db, forum, principal)
+    # Who may start a thread here, of which kind, and in which session.
+    forum_features.may_post(db, forum, principal.user_id, payload.kind, payload.session_id)
+    attachments = forum_features.resolve_attachments(payload.attachments, principal.user_id)
+    if payload.event_id:
+        forum_features.check_event(db, forum, payload.event_id)
 
     thread = models.Thread(
-        id=new_id("thr"), forum_id=forum_id, author_id=principal.user_id, **payload.model_dump()
+        id=new_id("thr"),
+        forum_id=forum_id,
+        author_id=principal.user_id,
+        title=payload.title.strip(),
+        body=payload.body,
+        lang=payload.lang,
+        kind=payload.kind,
+        tags=forum_features.clean_tags(payload.tags),
+        country=payload.country,
+        region=(payload.region or "").strip() or None,
+        commercial=payload.commercial,
+        attachments=attachments,
+        event_id=payload.event_id,
+        session_id=payload.session_id,
     )
     db.add(thread)
     db.flush()
+    if payload.poll is not None:
+        forum_features.add_poll(db, thread, payload.poll)
 
     # Classified before it is committed. A thread that appears first and is
     # rated a moment later was readable by everybody for that moment.
@@ -1702,7 +1917,9 @@ async def create_thread(
         )
 
     forum.threads_count += 1
+    forum_features.thread_published(db, thread, forum, principal.user_id, payload.draft_id)
     db.commit()
+    forum_features.announce_thread(db, thread, forum, principal.user_id)
 
     # ai-service picks this up to suggest duplicates and a summary.
     await events.publish(
@@ -1787,6 +2004,12 @@ def list_threads(
     limit: int = 30,
     offset: int = 0,
     sort: ThreadSort = "recent",
+    q: str | None = Query(default=None, max_length=100),
+    kind: str | None = Query(default=None, pattern="^(question|discussion|guide|announcement)$"),
+    lang: str | None = Query(default=None, max_length=5),
+    country: str | None = Query(default=None, max_length=2),
+    tag: str | None = Query(default=None, max_length=40),
+    session_id: str | None = Query(default=None, max_length=40),
     db: OrmSession = Depends(get_db),
 ):
     """Threads in a forum, age-filtered before ordering and paging.
@@ -1811,15 +2034,44 @@ def list_threads(
     if sort == "solved":
         stmt = stmt.where(models.Thread.id.in_(_solved_filter(db, age, forum_id)))
     elif sort == "unanswered":
-        stmt = stmt.where(models.Thread.replies_count == 0)
+        # A question nobody has answered: not an announcement or a guide,
+        # which ask for nothing, and nothing anybody replied to.
+        stmt = stmt.where(models.Thread.replies_count == 0, models.Thread.kind.in_(("question", "discussion")))
+    if q:
+        pattern = _like(q)
+        stmt = stmt.where(
+            or_(
+                func.lower(models.Thread.title).like(pattern, escape="\\"),
+                func.lower(models.Thread.body).like(pattern, escape="\\"),
+            )
+        )
+    if kind:
+        stmt = stmt.where(models.Thread.kind == kind)
+    if lang:
+        stmt = stmt.where(models.Thread.lang == lang)
+    if country:
+        stmt = stmt.where(models.Thread.country == country.upper())
+    if tag:
+        stmt = stmt.where(func.lower(models.Thread.tags).like(_like(tag.strip().lower()), escape="\\"))
+    if session_id:
+        stmt = stmt.where(models.Thread.session_id == session_id)
     rows = agecommunity.readable_page(db, stmt.order_by(*_thread_order(sort)), age, limit=limit, offset=offset)
     profiles = _profiles({r.author_id for r in rows})
     solved = _solved_threads(db, age, among=[r.id for r in rows])
-    return {"items": [_thread_card(r, profiles, solved) for r in rows]}
+    import forum_features
+
+    extra = forum_features.card_extras(db, rows, principal)
+    return {"items": [{**_thread_card(r, profiles, solved), **extra.get(r.id, {})} for r in rows]}
 
 
 @app.get("/threads/{thread_id}", tags=["forums"])
 def get_thread(thread_id: str, principal: MaybeUser, db: OrmSession = Depends(get_db)):
+    import forum_features
+
+    # A thread merged into another leads to it - for whoever may read that one.
+    moved = forum_features.merged_target(db, thread_id, principal)
+    if moved:
+        return {"id": thread_id, "merged_into": moved}
     thread = _thread_for(db, thread_id, principal)
 
     # A direct link bypasses the listing entirely, so the gate runs here too.
@@ -1841,7 +2093,9 @@ def get_thread(thread_id: str, principal: MaybeUser, db: OrmSession = Depends(ge
     profiles = _profiles({thread.author_id} | {r.author_id for r in replies})
     voted = _voted_by(db, principal.user_id if principal else None, [r.id for r in replies])
     db.commit()
+    detail = forum_features.thread_extras(db, thread, replies, principal)
     return {
+        **detail["thread"],
         "id": thread.id,
         "forum_id": thread.forum_id,
         "title": thread.title,
@@ -1863,6 +2117,7 @@ def get_thread(thread_id: str, principal: MaybeUser, db: OrmSession = Depends(ge
                 "voted_by_me": r.id in voted,
                 "accepted_answer": r.accepted_answer,
                 "created_at": r.created_at,
+                **detail["replies"].get(r.id, {}),
             }
             for r in replies
         ],
@@ -1871,9 +2126,13 @@ def get_thread(thread_id: str, principal: MaybeUser, db: OrmSession = Depends(ge
 
 @app.post("/threads/{thread_id}/replies", status_code=201, tags=["forums"])
 def add_reply(thread_id: str, payload: ReplyIn, principal: CurrentUser, db: OrmSession = Depends(get_db)):
+    import forum_features
+
     thread = _thread_for(db, thread_id, principal)
     if thread.locked:
         raise HTTPException(status_code=403, detail="This thread is locked")
+    forum_features.may_reply(db, thread, principal.user_id)
+    attachments = forum_features.resolve_attachments(payload.attachments, principal.user_id)
 
     # A reply may only answer a reply in the same thread. Otherwise a member of
     # one thread could aim a reply at an id from another, and the author of that
@@ -1884,7 +2143,14 @@ def add_reply(thread_id: str, payload: ReplyIn, principal: CurrentUser, db: OrmS
             raise HTTPException(status_code=400, detail="That reply is not in this thread")
 
     reply = models.Reply(
-        id=new_id("rpl"), thread_id=thread_id, author_id=principal.user_id, **payload.model_dump()
+        id=new_id("rpl"),
+        thread_id=thread_id,
+        author_id=principal.user_id,
+        parent_id=payload.parent_id,
+        body=payload.body,
+        lang=payload.lang,
+        commercial=payload.commercial,
+        attachments=attachments,
     )
     db.add(reply)
     db.flush()
@@ -1917,27 +2183,10 @@ def add_reply(thread_id: str, payload: ReplyIn, principal: CurrentUser, db: OrmS
         replies_count=thread.replies_count,
     )
 
-    # The thread's author, and the person being replied to, hear about it even
-    # when they are not looking at the page.
-    parent = db.get(models.Reply, reply.parent_id) if reply.parent_id else None
-    targets = {thread.author_id, parent.author_id if parent else None} - {principal.user_id, None}
-    # Named, not "somebody": whose reply it is decides whether you go and read
-    # it, and the name costs one lookup for the whole fan-out.
-    author = (
-        (_profiles({principal.user_id}).get(principal.user_id) or {}).get("display_name")
-        if targets
-        else None
-    )
-    for target in targets:
-        notify.notify(
-            target,
-            kind="forum_reply",
-            title=f"{author} replied in a thread you are in"
-            if author
-            else "New reply in a thread you are in",
-            body=payload.body[:140],
-            link=f"/forums?thread={thread_id}",
-        )
+    # The thread's author, the person being replied to, whoever follows the
+    # thread and whoever is @mentioned - each once, as their settings allow,
+    # and only while they can still read the thread.
+    forum_features.notify_reply(db, thread, reply, principal.user_id)
     return {"id": reply.id}
 
 
@@ -2044,6 +2293,10 @@ def accept_reply(reply_id: str, principal: CurrentUser, db: OrmSession = Depends
     reply, thread = _reply_in_reach(db, reply_id, principal)
     if thread.author_id != principal.user_id:
         raise HTTPException(status_code=403, detail="Only the author of the thread can accept an answer")
+    if (thread.kind or "question") != "question":
+        raise HTTPException(status_code=409, detail="Only a question has an accepted answer")
+    if reply.parent_id:
+        raise HTTPException(status_code=409, detail="A comment on an answer cannot be the accepted answer")
     # One accept at a time per thread, so two quick taps cannot leave two answers.
     db.scalar(select(models.Thread.id).where(models.Thread.id == thread.id).with_for_update())
     db.refresh(reply)
@@ -2056,6 +2309,7 @@ def accept_reply(reply_id: str, principal: CurrentUser, db: OrmSession = Depends
         .values(accepted_answer=False)
     )
     reply.accepted_answer = True
+    thread.reopened_at = None
     db.commit()
 
     _live(f"thread:{thread.id}", "answer_accepted", thread_id=thread.id, reply_id=reply.id)
@@ -2170,8 +2424,11 @@ def _like(term: str) -> str:
     return f"%{escaped}%"
 
 
-def _curated_entries(db: OrmSession, forum_id: str, age, q: str | None, limit: int) -> list[dict]:
+def _curated_entries(db: OrmSession, forum_id: str, age, q: str | None, limit: int, editor: bool = False) -> list[dict]:
     stmt = select(models.KnowledgeEntry).where(models.KnowledgeEntry.forum_id == forum_id)
+    # A draft (an AI draft above all) is for the people who review it.
+    if not editor:
+        stmt = stmt.where(models.KnowledgeEntry.status == "published")
     if q:
         pattern = _like(q)
         stmt = stmt.where(
@@ -2215,11 +2472,18 @@ def _curated_entries(db: OrmSession, forum_id: str, age, q: str | None, limit: i
                 "sources": cited,
                 "source_reply_id": None,
                 "reviewed": r.reviewed_by is not None,
+                **_entry_extras(db, r),
             }
         )
         if len(entries) == limit:
             break
     return entries
+
+
+def _entry_extras(db: OrmSession, entry: models.KnowledgeEntry) -> dict:
+    import forum_features
+
+    return forum_features.entry_extras(db, entry)
 
 
 def _community_entry(reply: models.Reply, thread: models.Thread) -> dict:
@@ -2234,6 +2498,15 @@ def _community_entry(reply: models.Reply, thread: models.Thread) -> dict:
         "sources": [thread.id],
         "source_reply_id": reply.id,
         "reviewed": False,
+        # Who wrote it, and when: an accepted answer, not a checked fact.
+        "contributors": [reply.author_id],
+        "published_at": reply.created_at,
+        "updated_at": reply.edited_at,
+        "reviewed_at": None,
+        "status": "published",
+        "ai_generated": False,
+        "source_links": [],
+        "tags": [t for t in (thread.tags or "").split(",") if t],
     }
 
 
@@ -2293,16 +2566,23 @@ def knowledge(
     Curated entries first, then answers the community settled. Both follow the
     forum's door and the viewer's age, like the discussions they came from.
     """
-    _forum_access(db, _get_forum_or_404(db, forum_id), principal)
+    forum = _get_forum_or_404(db, forum_id)
+    _forum_access(db, forum, principal)
     age = agecommunity.viewer(principal.user_id if principal else None)
     limit = min(max(limit, 1), 100)
-    curated = _curated_entries(db, forum_id, age, q, limit)
+    editor = principal is not None and _moderates_forum(db, forum, principal.user_id, knowledge=True)
+    curated = _curated_entries(db, forum_id, age, q, limit, editor)
     community = _community_entries(db, forum_id, age, q, limit)
     # Curated first, but never all of it: half the page stays open to what the
     # community settled, so a long curated list cannot hide it.
     keep_curated = limit - min(len(community), limit // 2)
     items = curated[:keep_curated]
-    return {"items": items + community[: limit - len(items)]}
+    return {
+        "items": items + community[: limit - len(items)],
+        # Whether this viewer may write and review articles here.
+        "can_edit": editor,
+        "review_days": forum.review_days or 180,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -2520,3 +2800,10 @@ def unlink_group_chat(handle: str, conversation_id: str, principal: CurrentUser,
     _audit(db, community.id, principal.user_id, "group_chat_unlinked", "conversation", conversation_id)
     db.commit()
     return result
+
+
+# Forums, 27/10: settings, moderators, following, search, drafts, editing,
+# moderation, knowledge articles, polls, expert sessions, contributor profiles.
+import forum_features as _forum_routes  # noqa: E402
+
+app.include_router(_forum_routes.router)

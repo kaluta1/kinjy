@@ -1,7 +1,8 @@
 import { useState, type FormEvent } from 'react'
 import { Link } from 'react-router'
-import { MessagesSquare } from 'lucide-react'
+import { Globe, Lock, MessagesSquare, UsersRound } from 'lucide-react'
 import { ApiError, kaluta, type Forum } from '@/lib/api'
+import { ago } from '@/components/forums/forumText'
 import { useApi } from '@/hooks/useApi'
 
 const BTN = 'rounded-full border border-[var(--cloud-border)] px-3.5 py-1.5 text-xs font-semibold text-text-mid hover:border-gold/50 hover:text-text-hi disabled:opacity-40'
@@ -25,7 +26,12 @@ export default function CommunityForums({
   onChanged?: () => void
 }) {
   const forums = useApi(() => kaluta.forums.list({ community_id: communityId }), [communityId])
+  // Recent threads from these forums, each one only if this viewer could open it.
+  const activity = useApi(() => kaluta.forums.communityActivity(communityId).catch(() => ({ items: [] })), [communityId])
   const [creating, setCreating] = useState(false)
+  // Forums grouped by the subject their stewards gave them.
+  const groups = new Map<string, Forum[]>()
+  for (const f of forums.data?.items ?? []) groups.set(f.category ?? '', [...(groups.get(f.category ?? '') ?? []), f])
 
   return (
     <section aria-label="Forums" className="space-y-3">
@@ -55,8 +61,26 @@ export default function CommunityForums({
           {steward ? 'No forum yet. Open one for the questions members keep asking.' : 'This community has no forum yet.'}
         </p>
       )}
+      {(activity.data?.items.length ?? 0) > 0 && (
+        <div className="cloud-card p-4">
+          <h3 className="text-sm font-semibold text-text-hi">Recent in the forums</h3>
+          <ul className="mt-2 space-y-1.5">
+            {activity.data!.items.slice(0, 5).map((t) => (
+              <li key={t.id}>
+                <Link to={`/forums?thread=${encodeURIComponent(t.id)}`} className="block text-sm text-text-hi hover:text-gold-soft">
+                  {t.title}
+                  <span className="text-xs text-text-low"> · {t.forum_name} · {t.replies_count} {t.replies_count === 1 ? 'reply' : 'replies'} · {ago(t.last_activity_at)}{t.solved ? ' · solved' : ''}</span>
+                </Link>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+      {[...groups.entries()].map(([subject, list]) => (
+      <div key={subject || 'none'} className="space-y-2">
+        {groups.size > 1 && <h3 className="px-1 text-xs font-semibold text-text-low">{subject || 'Other'}</h3>}
       <ul className="space-y-3">
-        {forums.data?.items.map((f: Forum) => (
+        {list.map((f: Forum) => (
           <li key={f.id}>
             <Link
               to={`/forums?forum=${encodeURIComponent(f.id)}`}
@@ -68,14 +92,22 @@ export default function CommunityForums({
                 {f.description && (
                   <span className="mt-1 block text-[0.95rem] leading-relaxed text-text-mid">{f.description}</span>
                 )}
-                <span className="mt-1 block text-sm text-text-mid">
-                  {f.threads_count} thread{f.threads_count === 1 ? '' : 's'}
+                <span className="mt-1 flex flex-wrap items-center gap-x-2 text-sm text-text-mid">
+                  <span>{f.threads_count} thread{f.threads_count === 1 ? '' : 's'}</span>
+                  {(f.unanswered_count ?? 0) > 0 && <span>· {f.unanswered_count} unanswered</span>}
+                  {f.last_activity_at && <span>· active {ago(f.last_activity_at)}</span>}
+                  <span className="inline-flex items-center gap-1 text-xs">
+                    {f.visibility === 'public' ? <Globe size={11} aria-hidden="true" /> : f.visibility === 'private' ? <Lock size={11} aria-hidden="true" /> : <UsersRound size={11} aria-hidden="true" />}
+                    {f.visibility === 'public' ? 'Public' : f.visibility === 'private' ? 'Moderators only' : 'Members only'}
+                  </span>
                 </span>
               </span>
             </Link>
           </li>
         ))}
       </ul>
+      </div>
+      ))}
     </section>
   )
 }
@@ -83,6 +115,8 @@ export default function CommunityForums({
 function NewForum({ communityId, onCreated }: { communityId: string; onCreated: () => void }) {
   const [name, setName] = useState('')
   const [description, setDescription] = useState('')
+  const [category, setCategory] = useState('')
+  const [visibility, setVisibility] = useState<'inherit' | 'public' | 'members' | 'private'>('inherit')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
@@ -92,7 +126,13 @@ function NewForum({ communityId, onCreated }: { communityId: string; onCreated: 
     setBusy(true)
     setError(null)
     try {
-      await kaluta.forums.create({ name: name.trim(), description: description.trim(), community_id: communityId })
+      await kaluta.forums.create({
+        name: name.trim(),
+        description: description.trim(),
+        community_id: communityId,
+        category: category.trim() || undefined,
+        visibility,
+      })
       onCreated()
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'Could not create the forum')
@@ -111,6 +151,20 @@ function NewForum({ communityId, onCreated }: { communityId: string; onCreated: 
         <span className="mb-1 block text-sm font-semibold text-text-mid">What it is for</span>
         <textarea value={description} onChange={(e) => setDescription(e.target.value)} rows={2} maxLength={2000} className={FIELD} />
       </label>
+      <label className="block">
+        <span className="mb-1 block text-sm font-semibold text-text-mid">Subject (groups the forums on this page)</span>
+        <input value={category} onChange={(e) => setCategory(e.target.value)} maxLength={60} className={FIELD} />
+      </label>
+      <label className="block">
+        <span className="mb-1 block text-sm font-semibold text-text-mid">Who can read it</span>
+        <select value={visibility} onChange={(e) => setVisibility(e.target.value as typeof visibility)} className={FIELD}>
+          <option value="inherit">As the community allows</option>
+          <option value="public">Public (not for a secret or paid community)</option>
+          <option value="members">Community members only</option>
+          <option value="private">Moderators only</option>
+        </select>
+      </label>
+      <p className="text-xs text-text-low">Rules, moderators and who may post are set from the forum’s Settings.</p>
       {error && <p role="alert" className="text-sm text-red-300">{error}</p>}
       <button type="submit" disabled={busy || name.trim().length < 2} className={BTN}>
         Create forum

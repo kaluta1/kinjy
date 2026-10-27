@@ -1566,3 +1566,46 @@ Not done / to decide:
   stops it happening again. No automatic promotion.
 - Pre-existing, unrelated: `e2e_group_privacy.py` fails on Community privacy
   (a moderator can no longer make a community public).
+
+## Forums: the 27/10 upgrade
+
+Done: each forum's own visibility (as its community allows, public, community
+members only, private to its moderators) and who may start threads or reply;
+categories, tags, language and country; search across every forum the member
+can read (questions, answers, knowledge) and within one; related questions
+while writing; following forums, threads and topics; saved threads; drafts;
+thread types (question, discussion, guide, announcement for moderators);
+editing with an "edited" mark; reopening a solved question; comments on
+answers; @mentions and reply notifications by each member's settings;
+polls; attachments (private, served on signed links); formatting (headings,
+lists, links, bold); forum moderators appointed by the community's stewards;
+pin, lock, hide with a reason and a review request, move and merge (with an
+explicit confirmation when the readers differ), reports, suspected-spam
+signals, an audit trail; knowledge articles with sources, contributors,
+dates, revisions, suggestions, a configurable review period, and AI drafts
+that stay drafts until an editor publishes them; expert question sessions;
+contributor profiles (claimed background marked as unverified, activity
+counted only in forums the viewer can read, opt-out); the community page's
+recent forum activity and forums grouped by subject; a weekly digest.
+
+Not done / to decide:
+- **Translation of threads and replies**: the button appears only when
+  ai-service has a live translation model (none configured locally; in
+  production it depends on the provider key).
+- **AI drafts of knowledge articles** (and the existing AI thread summary)
+  need a real model behind ai-service; without one they are refused, never
+  faked. Sending forum text to an AI provider is the editor's choice; a
+  privacy notice for members may be wanted before it is switched on.
+- **Credentials**: Kinjy has no process to verify professional credentials.
+  Profiles show "Kinjy account verified" (the existing account verification)
+  and what the member says about themselves, marked as not verified.
+- **Creating a Community event from a thread**: a thread can be linked to an
+  existing event of its community; creating one stays on the community's
+  Events page.
+- **Search** uses SQL pattern matching (no full-text index or ranking); fine
+  at today's volume, worth a Postgres full-text index later.
+- **Merging across forums with different readers** is allowed only when the
+  moderator confirms it (and moderates both); there is no "pending review"
+  step beyond that confirmation.
+- **Pre-existing, unrelated**: `e2e_discovery_forums.py` fails on community
+  suggestions (top 10 only, depends on local data volume).

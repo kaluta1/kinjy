@@ -1081,6 +1081,111 @@ export interface Forum {
   description?: string
   /** The community the forum belongs to, when it belongs to one. */
   community?: { id: string; slug: string; name: string } | null
+  // 27/10: organising and access.
+  category?: string | null
+  tags?: string[]
+  lang?: string | null
+  country?: string | null
+  /** Who can read it: public, the community's members only, or its moderators. */
+  visibility?: 'public' | 'members' | 'private'
+  unanswered_count?: number
+  last_activity_at?: string | null
+  following?: boolean
+  post_policy?: ForumPolicy
+  reply_policy?: ForumPolicy
+}
+
+export type ForumPolicy = 'everyone' | 'members' | 'moderators'
+export type ThreadKind = 'question' | 'discussion' | 'guide' | 'announcement'
+
+/** One forum's own page: its rules, moderators and what the viewer may do. */
+export interface ForumDetail extends Forum {
+  rules: string | null
+  visibility_setting: 'inherit' | 'public' | 'members' | 'private'
+  review_days: number
+  community: { id: string; slug: string; name: string; kind: string } | null
+  follow: { notify_new: boolean; digest: boolean } | null
+  moderators: Array<{ user_id: string; display_name: string | null; handle: string | null; can_moderate: boolean; can_edit_knowledge: boolean }>
+  can_post: boolean
+  can_announce: boolean
+  can_moderate: boolean
+  can_configure: boolean
+  can_edit_knowledge: boolean
+  sessions: ExpertSession[]
+}
+
+export interface ExpertSession {
+  id: string
+  title: string
+  description: string
+  expert_id: string
+  expert?: PersonBrief | null
+  /** How the organiser introduces the expert: their words, not a check by Kinjy. */
+  expert_intro: string
+  starts_at: string
+  ends_at: string
+  open: boolean
+}
+
+export interface ForumAttachment {
+  id: string
+  url: string | null
+  kind: string | null
+  name: string | null
+  type: string | null
+  size: number | null
+}
+
+export interface ForumPoll {
+  id: string
+  question: string
+  options: Array<{ index: number; text: string; votes: number }>
+  multiple: boolean
+  closes_at: string | null
+  closed: boolean
+  voters: number
+  my_votes: number[]
+}
+
+/** A thread as a search result, a suggestion or a saved item. */
+export interface ThreadBrief {
+  id: string
+  title: string
+  excerpt: string
+  kind: ThreadKind
+  forum_id: string
+  forum_name: string | null
+  solved: boolean
+  replies_count: number
+  author?: PersonBrief | null
+  last_activity_at: string
+}
+
+export interface ForumPrefs {
+  replies: boolean
+  mentions: boolean
+  followed_threads: boolean
+  topics: boolean
+  digests: boolean
+  background: string | null
+  show_activity: boolean
+  topics_followed?: string[]
+}
+
+export interface ForumModerationQueue {
+  reports: Array<{
+    id: number
+    target_kind: 'thread' | 'reply' | 'knowledge' | 'review'
+    target_id: string
+    reason: string
+    note: string | null
+    reporter: string | null
+    status: string
+    resolution: string | null
+    created_at: string
+    target: { kind: string; title?: string | null; excerpt?: string | null; status?: string; thread_id?: string | null; moderation_reason?: string | null }
+  }>
+  suspected_spam: Array<{ id: string; thread_id: string | null; author_id: string; signal: string; excerpt: string }>
 }
 
 export type ThreadSort = 'recent' | 'trending' | 'solved' | 'unanswered'
@@ -1098,6 +1203,19 @@ export interface Thread {
   ai_summary: string | null
   last_activity_at: string
   created_at?: string
+  kind?: ThreadKind
+  tags?: string[]
+  lang?: string
+  country?: string | null
+  region?: string | null
+  edited_at?: string | null
+  locked?: boolean
+  /** The author says it promotes something they sell or are paid for. */
+  commercial?: boolean
+  has_poll?: boolean
+  session_id?: string | null
+  last_reply_at?: string | null
+  attachments_count?: number
 }
 
 export interface KnowledgeEntry {
@@ -1112,6 +1230,20 @@ export interface KnowledgeEntry {
   /** The threads this came from. */
   sources: string[]
   reviewed: boolean
+  source_reply_id?: string | null
+  // 27/10: what makes an article traceable.
+  status?: 'draft' | 'published'
+  /** Written by an AI from the cited contributions; published only after a person reviewed it. */
+  ai_generated?: boolean
+  source_reply_ids?: string[]
+  source_links?: Array<{ url: string; label: string | null }>
+  contributors?: Array<{ user_id: string; display_name?: string | null; handle?: string | null }> | string[]
+  tags?: string[]
+  created_at?: string
+  published_at?: string | null
+  updated_at?: string | null
+  reviewed_at?: string | null
+  needs_review?: boolean
 }
 
 export interface ThreadDetail {
@@ -1125,6 +1257,34 @@ export interface ThreadDetail {
   ai_summary: string | null
   locked: boolean
   created_at?: string
+  /** Set when this thread was merged into another: open that one instead. */
+  merged_into?: string
+  kind?: ThreadKind
+  tags?: string[]
+  country?: string | null
+  region?: string | null
+  pinned?: boolean
+  edited_at?: string | null
+  reopened_at?: string | null
+  commercial?: boolean
+  solved?: boolean
+  replies_count?: number
+  views_count?: number
+  last_activity_at?: string
+  attachments?: ForumAttachment[]
+  poll?: ForumPoll | null
+  event?: { id: string; title: string; starts_at: string; timezone: string; status: string } | null
+  session?: { id: string; title: string; expert_id: string } | null
+  forum?: { id: string; name: string; rules: string | null; community_id: string | null }
+  following?: boolean
+  saved?: boolean
+  can_reply?: boolean
+  can_edit?: boolean
+  can_moderate?: boolean
+  can_accept?: boolean
+  can_reopen?: boolean
+  /** What the author says about their background: claimed, not verified. */
+  author_background?: string | null
   replies: Array<{
     id: string
     author_id: string
@@ -1136,6 +1296,13 @@ export interface ThreadDetail {
     voted_by_me?: boolean
     accepted_answer?: boolean
     created_at: string
+    edited_at?: string | null
+    commercial?: boolean
+    attachments?: ForumAttachment[]
+    is_author?: boolean
+    is_expert?: boolean
+    author_background?: string | null
+    can_edit?: boolean
   }>
 }
 
@@ -3291,27 +3458,225 @@ export const kaluta = {
 
     // Forum reads carry the sign-in when there is one: a forum of a private
     // community is for its members, and an anonymous read would refuse them.
-    list: (params: { hierarchy?: string; scope?: string; community_id?: string } = {}) => {
+    list: (
+      params: {
+        hierarchy?: string
+        scope?: string
+        community_id?: string
+        category?: string
+        lang?: string
+        country?: string
+        tag?: string
+        q?: string
+        followed?: boolean
+      } = {},
+    ) => {
       const query = new URLSearchParams()
-      if (params.hierarchy) query.set('hierarchy', params.hierarchy)
-      if (params.scope) query.set('scope', params.scope)
-      if (params.community_id) query.set('community_id', params.community_id)
-      return api.get<{ geo_scopes: string[]; items: Forum[] }>(`/forums?${query}`)
+      for (const [key, value] of Object.entries(params)) {
+        if (value) query.set(key, String(value))
+      }
+      return api.get<{ geo_scopes: string[]; categories?: string[]; items: Forum[] }>(`/forums?${query}`)
     },
     /** With `community_id`, the forum belongs to that community (owner and moderators only). */
-    create: (input: { name: string; description?: string; hierarchy?: string; scope?: string; scope_value?: string; community_id?: string }) =>
-      api.post<{ id: string; slug: string }>('/forums', { hierarchy: 'topic', ...input }),
-    threads: (forumId: string, sort: ThreadSort = 'recent') =>
-      api.get<{ items: Thread[] }>(`/forums/${forumId}/threads?sort=${sort}`),
-    createThread: (forumId: string, input: { title: string; body: string; lang?: string }) =>
-      api.post<{ id: string }>(`/forums/${forumId}/threads`, input),
+    create: (input: {
+      name: string
+      description?: string
+      hierarchy?: string
+      scope?: string
+      scope_value?: string
+      community_id?: string
+      category?: string
+      tags?: string[]
+      lang?: string
+      country?: string
+      visibility?: 'inherit' | 'public' | 'members' | 'private'
+      post_policy?: ForumPolicy
+      reply_policy?: ForumPolicy
+      rules?: string
+    }) => api.post<{ id: string; slug: string }>('/forums', { hierarchy: 'topic', ...input }),
+    detail: (forumId: string) => api.get<ForumDetail>(`/forums/${forumId}`),
+    update: (
+      forumId: string,
+      input: Partial<{
+        name: string
+        description: string
+        category: string
+        tags: string[]
+        lang: string
+        country: string
+        visibility: 'inherit' | 'public' | 'members' | 'private'
+        post_policy: ForumPolicy
+        reply_policy: ForumPolicy
+        rules: string
+        review_days: number
+      }>,
+    ) => api.patch<{ changed: string[] }>(`/forums/${forumId}`, input),
+    threads: (
+      forumId: string,
+      sort: ThreadSort = 'recent',
+      filters: { q?: string; kind?: ThreadKind; lang?: string; country?: string; tag?: string; session_id?: string } = {},
+    ) => {
+      const query = new URLSearchParams({ sort })
+      for (const [key, value] of Object.entries(filters)) {
+        if (value) query.set(key, value)
+      }
+      return api.get<{ items: Thread[] }>(`/forums/${forumId}/threads?${query}`)
+    },
+    createThread: (
+      forumId: string,
+      input: {
+        title: string
+        body: string
+        lang?: string
+        kind?: ThreadKind
+        tags?: string[]
+        country?: string
+        region?: string
+        commercial?: boolean
+        attachments?: string[]
+        poll?: { question: string; options: string[]; multiple?: boolean; closes_at?: string | null }
+        event_id?: string
+        session_id?: string
+        draft_id?: string
+      },
+    ) => api.post<{ id: string }>(`/forums/${forumId}/threads`, input),
     thread: (threadId: string) => api.get<ThreadDetail>(`/threads/${threadId}`),
-    reply: (threadId: string, body: string) => api.post<{ id: string }>(`/threads/${threadId}/replies`, { body }),
+    /** `parentId` makes it a comment on that answer. */
+    reply: (threadId: string, body: string, options: { parentId?: string; attachments?: string[]; commercial?: boolean } = {}) =>
+      api.post<{ id: string }>(`/threads/${threadId}/replies`, {
+        body,
+        parent_id: options.parentId,
+        attachments: options.attachments,
+        commercial: options.commercial,
+      }),
+    editThread: (
+      threadId: string,
+      input: Partial<{ title: string; body: string; tags: string[]; lang: string; country: string; region: string; commercial: boolean }>,
+    ) => api.patch<{ id: string; edited_at: string }>(`/threads/${threadId}`, input),
+    editReply: (replyId: string, body: string) => api.patch<{ id: string; edited_at: string }>(`/replies/${replyId}`, { body }),
+    /** The asker says the accepted answer no longer settles it. */
+    reopen: (threadId: string, reason?: string) => api.post<{ reopened: boolean }>(`/threads/${threadId}/reopen`, { reason }),
+    followThread: (threadId: string, input: { following?: boolean; saved?: boolean }) =>
+      api.post<{ following: boolean; saved: boolean }>(`/threads/${threadId}/follow`, input),
+    votePoll: (threadId: string, options: number[]) => api.post<ForumPoll>(`/threads/${threadId}/poll/vote`, { options }),
+    follow: (forumId: string, input: { notify_new?: boolean; digest?: boolean } = {}) =>
+      api.post<{ following: boolean; notify_new: boolean; digest: boolean }>(`/forums/${forumId}/follow`, input),
+    unfollow: (forumId: string) => api.delete<{ following: boolean }>(`/forums/${forumId}/follow`),
+    /** Across every forum the member may read, or within one. */
+    search: (q: string, filters: { forum_id?: string; kind?: ThreadKind; lang?: string; country?: string; tag?: string } = {}) => {
+      const query = new URLSearchParams({ q })
+      for (const [key, value] of Object.entries(filters)) {
+        if (value) query.set(key, value)
+      }
+      return api.get<{ threads: ThreadBrief[]; knowledge: Array<KnowledgeEntry & { forum_id: string }> }>(`/forums/search?${query}`)
+    },
+    related: (title: string, forumId?: string) =>
+      api.get<{ items: ThreadBrief[] }>(
+        `/forums/related?title=${encodeURIComponent(title)}${forumId ? `&forum_id=${forumId}` : ''}`,
+      ),
+    recommended: () => api.get<{ items: Array<Forum & { reason: string }> }>('/forums/recommended'),
+    saved: () => api.get<{ items: ThreadBrief[] }>('/forum-saved'),
+    drafts: (forumId?: string) =>
+      api.get<{
+        items: Array<{ id: string; forum_id: string; title: string; body: string; kind: ThreadKind; tags: string[]; lang: string | null; country: string | null; region: string | null; updated_at: string }>
+      }>(`/forum-drafts${forumId ? `?forum_id=${forumId}` : ''}`),
+    saveDraft: (input: { id?: string; forum_id: string; title: string; body: string; kind: ThreadKind; tags?: string[]; lang?: string; country?: string; region?: string }) =>
+      api.post<{ id: string; updated_at: string }>('/forum-drafts', input),
+    deleteDraft: (draftId: string) => api.delete<{ deleted: boolean }>(`/forum-drafts/${draftId}`),
+    prefs: () => api.get<ForumPrefs>('/forum-prefs'),
+    setPrefs: (input: Partial<Omit<ForumPrefs, 'topics_followed'>>) => api.patch<ForumPrefs>('/forum-prefs', input),
+    followTopic: (tag: string) => api.post<{ tag: string; following: boolean }>(`/forum-topics/${encodeURIComponent(tag)}/follow`),
+    unfollowTopic: (tag: string) => api.delete<{ following: boolean }>(`/forum-topics/${encodeURIComponent(tag)}/follow`),
+    profile: (userId: string) =>
+      api.get<{
+        user_id: string
+        display_name: string | null
+        handle: string | null
+        account_verified: boolean
+        background: string | null
+        background_note: string | null
+        show_activity: boolean
+        stats: { answers: number; helpful_votes: number; accepted: number; knowledge: number; badges: Array<{ key: string; label: string }> } | null
+        recognition_note: string
+      }>(`/forum-profiles/${userId}`),
+    // --- moderation ---
+    moderators: {
+      add: (forumId: string, input: { user_id: string; can_moderate?: boolean; can_edit_knowledge?: boolean }) =>
+        api.post<{ user_id: string }>(`/forums/${forumId}/moderators`, input),
+      remove: (forumId: string, userId: string) => api.delete<{ removed: boolean }>(`/forums/${forumId}/moderators/${userId}`),
+    },
+    moderateThread: (
+      threadId: string,
+      action: 'pin' | 'unpin' | 'lock' | 'unlock' | 'hide' | 'restore' | 'mark_commercial' | 'unmark_commercial',
+      reason?: string,
+    ) => api.post<{ id: string; pinned: boolean; locked: boolean; status: string }>(`/threads/${threadId}/moderate`, { action, reason }),
+    moderateReply: (replyId: string, action: 'hide' | 'restore' | 'mark_commercial' | 'unmark_commercial', reason?: string) =>
+      api.post<{ id: string; status: string }>(`/replies/${replyId}/moderate`, { action, reason }),
+    moveThread: (threadId: string, forumId: string, reason: string, acknowledge = false) =>
+      api.post<{ id: string; forum_id: string }>(`/threads/${threadId}/move`, {
+        forum_id: forumId,
+        reason,
+        acknowledge_audience_change: acknowledge,
+      }),
+    mergeThread: (threadId: string, intoThreadId: string, reason: string, acknowledge = false) =>
+      api.post<{ merged_into: string; replies_moved: number }>(`/threads/${threadId}/merge`, {
+        into_thread_id: intoThreadId,
+        reason,
+        acknowledge_audience_change: acknowledge,
+      }),
+    report: (targetKind: 'thread' | 'reply' | 'knowledge', targetId: string, reason: string, note?: string) =>
+      api.post<{ received: boolean }>('/forum-reports', { target_kind: targetKind, target_id: targetId, reason, note }),
+    requestReview: (targetKind: 'thread' | 'reply', targetId: string, note: string) =>
+      api.post<{ received: boolean; reason_given: string | null }>('/forum-reviews', { target_kind: targetKind, target_id: targetId, note }),
+    moderation: (forumId: string, status: 'open' | 'closed' = 'open') =>
+      api.get<ForumModerationQueue>(`/forums/${forumId}/moderation?status=${status}`),
+    resolveReport: (reportId: number, resolution: string) =>
+      api.post<{ closed: boolean }>(`/forum-reports/${reportId}/resolve`, { resolution }),
+    audit: (forumId: string) =>
+      api.get<{ items: Array<{ id: number; actor: string | null; action: string; target_kind: string | null; target_id: string | null; reason: string | null; created_at: string }> }>(
+        `/forums/${forumId}/audit`,
+      ),
+    createSession: (forumId: string, input: { title: string; description?: string; expert_id: string; expert_intro?: string; starts_at: string; ends_at: string }) =>
+      api.post<{ id: string }>(`/forums/${forumId}/sessions`, input),
+    cancelSession: (sessionId: string) => api.post<{ cancelled: boolean }>(`/expert-sessions/${sessionId}/cancel`),
+    communityActivity: (handle: string) => api.get<{ items: ThreadBrief[] }>(`/communities/${handle}/forum-activity`),
     /** What a forum has settled, with the discussions it came from. */
     knowledge: (forumId: string, q = '') =>
-      api.get<{ items: KnowledgeEntry[] }>(
+      api.get<{ items: KnowledgeEntry[]; can_edit?: boolean; review_days?: number }>(
         `/forums/${forumId}/knowledge${q ? `?q=${encodeURIComponent(q)}` : ''}`,
       ),
+    article: {
+      create: (
+        forumId: string,
+        input: {
+          question: string
+          answer: string
+          source_thread_ids?: string[]
+          source_reply_ids?: string[]
+          source_links?: Array<{ url: string; label?: string }>
+          tags?: string[]
+          publish?: boolean
+        },
+      ) => api.post<{ id: string; status: string }>(`/forums/${forumId}/knowledge`, input),
+      edit: (
+        entryId: string,
+        input: { question?: string; answer?: string; source_links?: Array<{ url: string; label?: string | null }>; tags?: string[]; note?: string; mark_reviewed?: boolean },
+      ) => api.patch<{ id: string }>(`/knowledge/${entryId}`, input),
+      publish: (entryId: string) => api.post<{ id: string; status: string }>(`/knowledge/${entryId}/publish`),
+      revisions: (entryId: string) =>
+        api.get<{ items: Array<{ id: number; editor: string | null; question: string; answer: string; note: string | null; created_at: string }> }>(
+          `/knowledge/${entryId}/revisions`,
+        ),
+      suggest: (entryId: string, kind: 'correction' | 'outdated', note: string) =>
+        api.post<{ received: boolean }>(`/knowledge/${entryId}/suggestions`, { kind, note }),
+      suggestions: (entryId: string) =>
+        api.get<{ items: Array<{ id: number; kind: string; note: string; status: string; by: string | null; created_at: string }> }>(
+          `/knowledge/${entryId}/suggestions`,
+        ),
+      resolveSuggestion: (suggestionId: number) => api.post<{ closed: boolean }>(`/knowledge-suggestions/${suggestionId}/resolve`),
+      /** An AI draft for an editor to check; refused when no real model is configured. */
+      aiDraft: (threadId: string) => api.post<{ id: string; status: string; ai_generated: boolean }>(`/threads/${threadId}/knowledge-draft`),
+    },
     /** Upvote a reply, or take the vote back. One vote each, never on your own reply. */
     upvote: (replyId: string) => api.post<{ upvotes: number; voted: boolean }>(`/replies/${replyId}/upvote`),
     /** Mark a reply as the answer. Only the author of the thread can. */
