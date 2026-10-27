@@ -616,3 +616,62 @@ class ShareLinkConversion(Base):
     kind: Mapped[str] = mapped_column(String(20))  # registration|community_join
     subject_id: Mapped[str] = mapped_column(String(40))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
+class ReferralCapture(Base):
+    """An invitation caught when somebody arrived on a member's link, before
+    they had an account.
+
+    The browser holds only a signed reference to this row (an HttpOnly
+    cookie), so the inviter it names was checked here and cannot be edited or
+    dropped from the sign-up form. Nothing about the visitor is stored - not
+    their address, not their browser - only who invited them and when.
+    """
+
+    __tablename__ = "referral_captures"
+    __table_args__ = (Index("ix_referral_captures_referrer", "referrer_id", "captured_at"), {"schema": SCHEMA})
+
+    id: Mapped[str] = mapped_column(String(40), primary_key=True)
+    referrer_id: Mapped[str] = mapped_column(String(40))
+    source: Mapped[str] = mapped_column(String(10))  # code|link
+    # The short link it came through, when it did (for link conversions).
+    link_token: Mapped[str | None] = mapped_column(String(16))
+    captured_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    # Set once, at the registration that spent it.
+    used_by: Mapped[str | None] = mapped_column(String(40))
+    used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class ReferralAttribution(Base):
+    """How a member got their sponsor, written once at registration: enough to
+    answer "why is X my sponsor?" later without guessing."""
+
+    __tablename__ = "referral_attributions"
+    __table_args__ = {"schema": SCHEMA}
+
+    user_id: Mapped[str] = mapped_column(String(40), primary_key=True)
+    referrer_id: Mapped[str | None] = mapped_column(String(40), index=True)
+    # captured (a link followed within the window) | code (typed at sign-up)
+    # | link (short link sent with the form) | pool | none
+    method: Mapped[str] = mapped_column(String(12))
+    capture_id: Mapped[str | None] = mapped_column(String(40))
+    captured_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    registered_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
+class SponsorCorrection(Base):
+    """A sponsor changed by an administrator after registration - the only way
+    an established sponsor changes. Kept forever as the audit trail."""
+
+    __tablename__ = "sponsor_corrections"
+    __table_args__ = {"schema": SCHEMA}
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[str] = mapped_column(String(40), index=True)
+    previous_sponsor_id: Mapped[str | None] = mapped_column(String(40))
+    new_sponsor_id: Mapped[str | None] = mapped_column(String(40))
+    admin_id: Mapped[str] = mapped_column(String(40))
+    reason: Mapped[str] = mapped_column(String(500))
+    corrected_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)

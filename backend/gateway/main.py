@@ -17,6 +17,7 @@ import time
 
 import httpx
 import asyncio
+from http.cookiejar import CookieJar, DefaultCookiePolicy
 
 import websockets
 from fastapi import FastAPI, Request, Response, WebSocket, WebSocketDisconnect
@@ -41,6 +42,11 @@ ROUTES: dict[str, str] = {
     "/api/preferences": "http://user-service:8000",
     "/api/supervision": "http://user-service:8000",
     "/api/posts": "http://social-service:8000",
+    # Circle audiences, 27/10: a reader's choices about somebody's circles, and
+    # an author's posts per circle and opt-out counts.
+    "/api/audience-prefs": "http://social-service:8000",
+    "/api/me/circle-posts": "http://social-service:8000",
+    "/api/me/circle-opt-outs": "http://social-service:8000",
     "/api/link-preview": "http://social-service:8000",
     "/api/share": "http://social-service:8000",
     "/api/comments": "http://social-service:8000",
@@ -110,6 +116,7 @@ ADMIN_ROUTES: dict[str, str] = {
     "/api/admin/reconcile": "http://ledger-service:8000",
     "/api/admin/leaders-pool": "http://ledger-service:8000",
     "/api/admin/referral-pool": "http://auth-service:8000",
+    "/api/admin/referrals": "http://auth-service:8000",
     "/api/admin/moderation": "http://social-service:8000",
     "/api/admin/classification": "http://social-service:8000",
     "/api/admin/classification-queue": "http://social-service:8000",
@@ -158,7 +165,11 @@ _client: httpx.AsyncClient | None = None
 @app.on_event("startup")
 async def _startup() -> None:
     global _client
-    _client = httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=5.0), follow_redirects=False)
+    # One client for every visitor, so it must keep no cookies of its own: a
+    # Set-Cookie from a service is passed back to the browser that caused it,
+    # and a jar here would replay it on every other visitor's requests.
+    no_cookies = CookieJar(policy=DefaultCookiePolicy(allowed_domains=[]))
+    _client = httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=5.0), follow_redirects=False, cookies=no_cookies)
 
 
 @app.on_event("shutdown")

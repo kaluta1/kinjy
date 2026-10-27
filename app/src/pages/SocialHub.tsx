@@ -532,7 +532,12 @@ export default function SocialHub() {
             </div>
           )}
 
-          <Composer onPosted={prepend} collapsed={scrolled} openSignal={openComposer} />
+          <Composer
+            onPosted={prepend}
+            collapsed={scrolled}
+            openSignal={openComposer}
+            shareWithCircle={params.get('share')}
+          />
 
           {pending > 0 && (
             <button

@@ -1,17 +1,22 @@
-"""A short vertical video made from a post: its words as title cards, its pictures in between.
+"""A short vertical video made from a post: its words as title cards, its pictures in between,
+read aloud.
 
 One-to-Many's "Short video". Nothing is invented: every word on screen is the
-author's, every picture is one they attached to the post. What this adds is
-framing - a 720x1280 frame, a few seconds per card, H.264 that every phone plays.
+author's, every picture is one they attached to the post, and the narration
+reads exactly the words on each card, in the post's language. What this adds
+is framing - a 720x1280 frame, H.264 + AAC that every phone plays.
 
-Rendering is Pillow for the frames and ffmpeg for the encoding. The result is
-probed before it is handed back: a file ffprobe cannot read as a vertical H.264
-video of a sensible length is a failure, not an output.
+Rendering is Pillow for the frames, espeak-ng for the voice (local: no vendor,
+no key, the text never leaves the server) and ffmpeg for the encoding. The
+result is probed before it is handed back: a file that is not a vertical H.264
+video of a sensible length, or whose narration track is missing or silent, is
+a failure, not an output. A video is never delivered without its voice.
 """
 from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import shutil
 import subprocess
@@ -25,6 +30,8 @@ WIDTH, HEIGHT = 720, 1280
 FPS = 25
 MAX_SCENES = 10
 MAX_SECONDS = 60
+# Narrated cards last as long as their reading; ten of them need more room.
+NARRATED_MAX_SECONDS = 150
 IMAGE_SECONDS = 3.0
 CONTENT_TYPE = "video/mp4"
 
@@ -42,8 +49,57 @@ _UNSUPPORTED_SCRIPT = re.compile(r"[؀-ۿݐ-ݿࢠ-ࣿﭐ-﷿ﹰ-﻿぀-ヿ㐀-�
 UNSUPPORTED_LANGS = ("ar", "zh")
 
 
+# Narration on by default; "0" turns it off (videos are then silent title cards
+# and say so). A server setting, not code.
+NARRATION_ENABLED = os.getenv("SHORT_VIDEO_NARRATION", "1") not in ("0", "false", "off")
+# The espeak-ng voice for each platform language it can read well enough.
+VOICES = {"en": "en-us", "fr": "fr-fr", "sw": "sw"}
+SPEECH_RATE = int(os.getenv("SHORT_VIDEO_SPEECH_RATE", "150"))  # words a minute
+# Below this mean loudness a track is treated as silence, not as narration.
+AUDIBLE_DB = -45.0
+
+
 class RenderError(RuntimeError):
     pass
+
+
+def narration_available(lang: str | None) -> tuple[bool, str | None]:
+    """Whether a video in this language can be narrated here, and why not."""
+    if not NARRATION_ENABLED:
+        return False, "narration is turned off on this server"
+    if not shutil.which("espeak-ng"):
+        return False, "the narration voice (espeak-ng) is not installed on the media server"
+    if (lang or "en") not in VOICES:
+        return False, "narration is not available in this language yet"
+    return True, None
+
+
+def _speak(text: str, lang: str | None, path: Path) -> float:
+    """Read one card aloud into a WAV file; returns its length in seconds."""
+    voice = VOICES.get(lang or "en", VOICES["en"])
+    try:
+        # A list, never a shell: the text is the author's and goes in as one argument.
+        done = subprocess.run(
+            ["espeak-ng", "-v", voice, "-s", str(SPEECH_RATE), "-w", str(path), "--", text],
+            capture_output=True, text=True, timeout=60,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise RenderError("the narration took too long") from exc
+    if done.returncode != 0 or not path.exists() or path.stat().st_size < 1000:
+        log.error("espeak-ng failed: %s", (done.stderr or "")[-300:])
+        raise RenderError("the narration could not be generated")
+    return _duration(path)
+
+
+def _duration(path: Path) -> float:
+    done = subprocess.run(
+        ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "json", str(path)],
+        capture_output=True, text=True, timeout=30,
+    )
+    try:
+        return float(json.loads(done.stdout or "{}").get("format", {}).get("duration") or 0)
+    except (json.JSONDecodeError, ValueError):
+        return 0.0
 
 
 def available() -> tuple[bool, str | None]:
@@ -143,8 +199,17 @@ def _picture_card(source: Path, path: Path) -> None:
     backdrop.save(path, "PNG")
 
 
-def render(texts: list[str], pictures: list[Path], destination: Path, workdir: Path, byline: str | None = None) -> dict:
-    """Render the cards, encode, probe. Returns ``{duration_s, width, height, size_bytes}``."""
+def render(
+    texts: list[str],
+    pictures: list[Path],
+    destination: Path,
+    workdir: Path,
+    byline: str | None = None,
+    lang: str | None = None,
+    narrate: bool = True,
+) -> dict:
+    """Render the cards, narrate them, encode, probe.
+    Returns ``{duration_s, width, height, size_bytes, narrated}``."""
     ok, reason = available()
     if not ok:
         raise RenderError(reason or "rendering is unavailable")
@@ -152,6 +217,12 @@ def render(texts: list[str], pictures: list[Path], destination: Path, workdir: P
         raise RenderError("the post has neither text nor pictures")
     if any(unsupported_text(t) for t in texts):
         raise RenderError("title cards cannot be drawn in this script yet")
+    narrate = narrate and bool(texts)
+    if narrate:
+        can, why = narration_available(lang)
+        if not can:
+            raise RenderError(why or "narration is unavailable")
+    limit = NARRATED_MAX_SECONDS if narrate else MAX_SECONDS
 
     workdir.mkdir(parents=True, exist_ok=True)
     frames: list[tuple[Path, float]] = []
@@ -165,10 +236,17 @@ def render(texts: list[str], pictures: list[Path], destination: Path, workdir: P
             order.append(("picture", queue.pop(0)))
     order.extend(("picture", p) for p in queue)
 
+    voices: dict[Path, Path] = {}
     for index, (kind, item) in enumerate(order):
         frame = workdir / f"frame{index:02d}.png"
         if kind == "text":
             seconds = _seconds_for(str(item))
+            if narrate:
+                voice = workdir / f"voice{index:02d}.wav"
+                spoken = _speak(str(item), lang, voice)
+                # The card stays up for as long as it is being read, plus a breath.
+                seconds = round(max(seconds, spoken + 0.6), 2)
+                voices[frame] = voice
             last = index == len(order) - 1
             _text_card(str(item), frame, byline if last or index == 0 else None)
         else:
@@ -178,7 +256,7 @@ def render(texts: list[str], pictures: list[Path], destination: Path, workdir: P
             except Exception as exc:  # an unreadable picture is skipped, not fatal
                 log.warning("picture %s skipped: %s", item, exc)
                 continue
-        if total + seconds > MAX_SECONDS:
+        if total + seconds > limit:
             break
         frames.append((frame, seconds))
         total += seconds
@@ -191,10 +269,30 @@ def render(texts: list[str], pictures: list[Path], destination: Path, workdir: P
     for frame, seconds in frames:
         command += ["-loop", "1", "-framerate", str(FPS), "-t", str(seconds), "-i", str(frame)]
     chains = "".join(f"[{i}:v]scale={WIDTH}:{HEIGHT},setsar=1,format=yuv420p[v{i}];" for i in range(len(frames)))
-    joined = "".join(f"[v{i}]" for i in range(len(frames)))
+    if narrate:
+        # One audio piece per card, exactly as long as the card: its reading
+        # padded with silence, or silence alone under a picture.
+        n = len(frames)
+        for frame, seconds in frames:
+            if frame in voices:
+                command += ["-i", str(voices[frame])]
+            else:
+                command += ["-f", "lavfi", "-t", str(seconds), "-i", "anullsrc=r=44100:cl=mono"]
+        for i, (frame, seconds) in enumerate(frames):
+            chains += (
+                f"[{n + i}:a]aresample=44100,aformat=sample_fmts=fltp:channel_layouts=mono,"
+                f"apad,atrim=0:{seconds},asetpts=N/SR/TB[a{i}];"
+            )
+        joined = "".join(f"[v{i}][a{i}]" for i in range(n))
+        command += [
+            "-filter_complex", f"{chains}{joined}concat=n={n}:v=1:a=1[out][aout]",
+            "-map", "[out]", "-map", "[aout]", "-c:a", "aac", "-b:a", "96k",
+        ]
+    else:
+        joined = "".join(f"[v{i}]" for i in range(len(frames)))
+        command += ["-filter_complex", f"{chains}{joined}concat=n={len(frames)}:v=1:a=0[out]", "-map", "[out]"]
     command += [
-        "-filter_complex", f"{chains}{joined}concat=n={len(frames)}:v=1:a=0[out]",
-        "-map", "[out]", "-r", str(FPS),
+        "-r", str(FPS),
         "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
         "-movflags", "+faststart", "-threads", "2",
         str(destination),
@@ -206,11 +304,25 @@ def render(texts: list[str], pictures: list[Path], destination: Path, workdir: P
     if done.returncode != 0 or not destination.exists():
         log.error("ffmpeg failed: %s", (done.stderr or "")[-500:])
         raise RenderError("the video could not be encoded")
-    return probe(destination, expected_seconds=total)
+    return probe(destination, expected_seconds=total, narrated=narrate)
 
 
-def probe(path: Path, expected_seconds: float | None = None) -> dict:
-    """What ffprobe says the file is; raises unless it is a playable vertical H.264 video."""
+def _mean_volume(path: Path) -> float | None:
+    """The audio track's mean loudness in dB, or None when there is none."""
+    done = subprocess.run(
+        ["ffmpeg", "-hide_banner", "-nostats", "-i", str(path), "-map", "0:a:0", "-af", "volumedetect", "-f", "null", "-"],
+        capture_output=True, text=True, timeout=120,
+    )
+    found = re.search(r"mean_volume:\s*(-?[0-9.]+|-inf) dB", done.stderr or "")
+    if not found:
+        return None
+    return float("-inf") if found.group(1) == "-inf" else float(found.group(1))
+
+
+def probe(path: Path, expected_seconds: float | None = None, narrated: bool | None = None) -> dict:
+    """What ffprobe says the file is; raises unless it is a playable vertical H.264
+    video - and, when it is meant to be narrated, one with an audible voice track.
+    ``narrated=None`` (a file made earlier) reports what is there without requiring it."""
     try:
         done = subprocess.run(
             ["ffprobe", "-v", "error", "-select_streams", "v:0",
@@ -226,8 +338,15 @@ def probe(path: Path, expected_seconds: float | None = None) -> dict:
     duration = float((info.get("format") or {}).get("duration") or 0)
     if stream.get("codec_name") != "h264" or stream.get("width") != WIDTH or stream.get("height") != HEIGHT:
         raise RenderError("the encoded file is not the expected video")
-    if duration < 1 or duration > MAX_SECONDS + 5:
+    if duration < 1 or duration > NARRATED_MAX_SECONDS + 5:
         raise RenderError("the encoded file has an unexpected length")
     if expected_seconds and abs(duration - expected_seconds) > 2:
         raise RenderError("the encoded file is shorter than its cards")
-    return {"duration_s": round(duration, 2), "width": WIDTH, "height": HEIGHT, "size_bytes": path.stat().st_size}
+    loudness = _mean_volume(path)
+    has_voice = loudness is not None and loudness > AUDIBLE_DB
+    if narrated and loudness is None:
+        raise RenderError("the video has no narration track")
+    if narrated and not has_voice:
+        raise RenderError("the narration track is silent")
+    return {"duration_s": round(duration, 2), "width": WIDTH, "height": HEIGHT, "size_bytes": path.stat().st_size,
+            "narrated": has_voice}

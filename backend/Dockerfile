@@ -32,10 +32,11 @@ COPY common /app/common
 ARG SERVICE
 ENV SERVICE=${SERVICE}
 
-# media-service alone needs ffmpeg, to take a cover picture from each video.
+# media-service alone needs ffmpeg (video covers, short videos) and espeak-ng
+# (a short video's spoken narration: local, no vendor, no key).
 # After the shared layers, so the other services' images are not touched.
 RUN if [ "$SERVICE" = "media-service" ]; then \
-        apt-get update && apt-get install -y --no-install-recommends ffmpeg \
+        apt-get update && apt-get install -y --no-install-recommends ffmpeg espeak-ng \
         && rm -rf /var/lib/apt/lists/*; \
     fi
 # ai-service alone talks to a model vendor. Pinned to the 1.x line it was

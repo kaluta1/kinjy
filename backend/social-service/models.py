@@ -40,8 +40,17 @@ class Post(Base):
     format: Mapped[str] = mapped_column(String(20), default="text")  # text|image|video|audio|article|carousel
 
     # Audience (blueprint module D): public, a named circle, or followers only.
-    visibility: Mapped[str] = mapped_column(String(20), default="public")  # public|followers|circle|community|private (only the author)
+    visibility: Mapped[str] = mapped_column(String(20), default="public")  # public|followers|connections|circle|community|private (only the author)
+    # The first circle of a circle post (kept for older clients); all of them,
+    # with the people added or left out, are in post_circles / post_people.
     circle_id: Mapped[str | None] = mapped_column(String(40), index=True)
+    # live: whoever is in the circles now (every circle post before 27/10);
+    # snapshot: the people the audience reached when the post was published.
+    audience_mode: Mapped[str] = mapped_column(String(10), default="live")
+    # When a snapshot audience was recorded (publication, for a scheduled post).
+    audience_fixed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # The author's choice: tell the audience with a notification.
+    notify_audience: Mapped[bool] = mapped_column(Boolean, default=False)
     community_id: Mapped[str | None] = mapped_column(String(40), index=True)
 
     # Geographic discovery ladder.
@@ -459,3 +468,57 @@ class PostBookmark(Base):
     user_id: Mapped[str] = mapped_column(String(40))
     post_id: Mapped[str] = mapped_column(String(40), index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
+
+class PostCircle(Base):
+    """One circle a circle post is shared with."""
+
+    __tablename__ = "post_circles"
+    __table_args__ = (UniqueConstraint("post_id", "circle_id", name="uq_post_circle"), {"schema": SCHEMA})
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    post_id: Mapped[str] = mapped_column(String(40), index=True)
+    circle_id: Mapped[str] = mapped_column(String(40), index=True)
+
+
+class PostPerson(Base):
+    """A person a circle post names: added by the author (include), left out by
+    them (exclude - wins over any circle), or recorded in its audience at
+    publication (snapshot)."""
+
+    __tablename__ = "post_people"
+    __table_args__ = (
+        UniqueConstraint("post_id", "user_id", "role", name="uq_post_person"),
+        Index("ix_post_people_user", "user_id", "role"),
+        {"schema": SCHEMA},
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    post_id: Mapped[str] = mapped_column(String(40), index=True)
+    user_id: Mapped[str] = mapped_column(String(40))
+    role: Mapped[str] = mapped_column(String(10))  # include | exclude | snapshot
+
+
+class CircleAudiencePref(Base):
+    """A recipient's choice about posts shared through one of somebody else's
+    circles. The circle is never named to them; they manage it from a post.
+
+    muted: no notifications from it. hidden: not in their feeds (still opens
+    by link). opted_out_at: no posts through it from then on - and, with
+    opt_out_past, none from before either. Any of these counts as soon as the
+    circle is one of a post's circles, whatever other circle also reaches them.
+    """
+
+    __tablename__ = "circle_audience_prefs"
+    __table_args__ = (UniqueConstraint("user_id", "circle_id", name="uq_circle_audience_pref"), {"schema": SCHEMA})
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[str] = mapped_column(String(40), index=True)
+    circle_id: Mapped[str] = mapped_column(String(40), index=True)
+    owner_id: Mapped[str] = mapped_column(String(40))
+    muted: Mapped[bool] = mapped_column(Boolean, default=False)
+    hidden: Mapped[bool] = mapped_column(Boolean, default=False)
+    opted_out_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    opt_out_past: Mapped[bool] = mapped_column(Boolean, default=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)

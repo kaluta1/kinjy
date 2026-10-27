@@ -110,6 +110,20 @@ MIGRATIONS: list[str] = [
     f"ALTER TABLE {models.SCHEMA}.posts ADD COLUMN IF NOT EXISTS accepted_comment_id VARCHAR(40)",
     f"CREATE INDEX IF NOT EXISTS ix_posts_scheduled ON {models.SCHEMA}.posts (publish_at) WHERE status = 'scheduled'",
     f"CREATE INDEX IF NOT EXISTS ix_posts_community_status ON {models.SCHEMA}.posts (community_id, status, created_at)",
+    # Circles, 27/10: several circles per post, people added or left out, the
+    # two audience modes, the author's notification choice. Every circle post
+    # that exists keeps exactly the audience it had: "live" (whoever is in its
+    # circle now), and its one circle copied into post_circles.
+    f"ALTER TABLE {models.SCHEMA}.posts ADD COLUMN IF NOT EXISTS audience_mode VARCHAR(10) DEFAULT 'live'",
+    f"UPDATE {models.SCHEMA}.posts SET audience_mode = 'live' WHERE audience_mode IS NULL",
+    f"ALTER TABLE {models.SCHEMA}.posts ADD COLUMN IF NOT EXISTS audience_fixed_at TIMESTAMPTZ",
+    f"ALTER TABLE {models.SCHEMA}.posts ADD COLUMN IF NOT EXISTS notify_audience BOOLEAN DEFAULT FALSE",
+    f"""CREATE TABLE IF NOT EXISTS {models.SCHEMA}.post_circles (
+        id SERIAL PRIMARY KEY, post_id VARCHAR(40) NOT NULL, circle_id VARCHAR(40) NOT NULL,
+        CONSTRAINT uq_post_circle UNIQUE (post_id, circle_id))""",
+    f"""INSERT INTO {models.SCHEMA}.post_circles (post_id, circle_id)
+        SELECT id, circle_id FROM {models.SCHEMA}.posts WHERE visibility = 'circle' AND circle_id IS NOT NULL
+        ON CONFLICT DO NOTHING""",
 ]
 
 
@@ -137,8 +151,15 @@ class PostIn(BaseModel):
     # "short" is declared, never inferred. A portrait clip posted to the feed is
     # still a feed post; what makes a short is the author choosing that surface.
     format: str = Field(default="text", pattern="^(text|image|video|audio|article|carousel|short)$")
-    visibility: str = Field(default="public", pattern="^(public|followers|circle|community|private)$")
+    visibility: str = Field(default="public", pattern="^(public|followers|connections|circle|community|private)$")
     circle_id: str | None = None
+    # 27/10: several circles, people added by name and people left out, and
+    # whether the audience follows the circles or is fixed at publication.
+    circle_ids: list[str] = Field(default_factory=list, max_length=20)
+    include_ids: list[str] = Field(default_factory=list, max_length=500)
+    exclude_ids: list[str] = Field(default_factory=list, max_length=500)
+    audience_mode: str = Field(default="live", pattern="^(live|snapshot)$")
+    notify_audience: bool = False
     community_id: str | None = None
     lang: str = "en"
     country: str | None = None
@@ -320,6 +341,14 @@ def _notify_mentions(body: str, actor_id: str, post_id: str, where: str) -> set[
     handles = _mentioned_handles(body)
     if not handles:
         return set()
+    # On a post that is not public, naming somebody is not a way to reach them:
+    # only people who can read the post are told, and never with a quote.
+    restricted = None
+    with SessionLocal() as session:
+        target_post = session.get(models.Post, post_id)
+        if target_post is not None and target_post.visibility != "public":
+            restricted = target_post
+            session.expunge(target_post)
     try:
         response = httpx.post(
             f"{USER_SERVICE}/internal/profiles/by-handle", json={"handles": handles}, timeout=5
@@ -344,12 +373,17 @@ def _notify_mentions(body: str, actor_id: str, post_id: str, where: str) -> set[
         target = profile.get("user_id")
         if not target or target == actor_id:
             continue
+        if restricted is not None:
+            with SessionLocal() as session:
+                fresh = session.get(models.Post, post_id)
+                if fresh is None or not _can_see(fresh, _viewer_audience(target)):
+                    continue
         told.add(target)
         notify.notify(
             target,
             kind="mention",
             title=f"{who} mentioned you in a {where}",
-            body=excerpt[:140],
+            body=None if restricted is not None else excerpt[:140],
             # /p/{id} opens the post in the feed and is the same address a
             # shared link uses, so one route has to keep working rather than
             # two.
@@ -641,6 +675,39 @@ def _restrict_attached_media(media_ids: list[str | None]) -> None:
             log.error("could not restrict media %s: %s", media_id, exc)
 
 
+_COMMUNITY_LABELS: dict[str, tuple[float, dict | None]] = {}
+_COMMUNITY_LABEL_TTL = 120.0
+
+
+def _community_label(community_id: str | None) -> dict | None:
+    """The name and slug of the community a post is in, for its card.
+
+    Only ever added to a post the reader was already allowed (every caller of
+    _post_out sits behind the read checks), so the name tells them nothing the
+    post does not. Kept briefly in memory: a feed of one community's posts
+    asks once, and a rename shows within two minutes. None when the
+    community is gone or community-service cannot answer - the card then
+    keeps its generic label.
+    """
+    if not community_id:
+        return None
+    now = time.monotonic()
+    hit = _COMMUNITY_LABELS.get(community_id)
+    if hit and now - hit[0] < _COMMUNITY_LABEL_TTL:
+        return hit[1]
+    try:
+        response = httpx.post(f"{COMMUNITY_URL}/internal/communities/names", json={"ids": [community_id]}, timeout=3)
+        response.raise_for_status()
+        label = response.json().get("items", {}).get(community_id)
+    except Exception as exc:
+        log.warning("community name lookup failed for %s: %s", community_id, exc)
+        return hit[1] if hit else None
+    if len(_COMMUNITY_LABELS) > 5000:
+        _COMMUNITY_LABELS.clear()
+    _COMMUNITY_LABELS[community_id] = (now, label)
+    return label
+
+
 def _post_out(
     post: models.Post,
     db: OrmSession,
@@ -692,6 +759,8 @@ def _post_out(
         "visibility": post.visibility,
         "circle_id": post.circle_id,
         "community_id": post.community_id,
+        # {name, slug} of that community, or None when it is gone.
+        "community": _community_label(post.community_id) if post.visibility == "community" else None,
         "country": post.country,
         "city": post.city,
         "topics": [t for t in (post.topics or "").split(",") if t],
@@ -1063,8 +1132,13 @@ def _clean_body(body: str, fmt: str) -> str:
 @app.post("/posts", status_code=201, tags=["posts"])
 async def create_post(payload: PostIn, principal: CurrentUser, db: OrmSession = Depends(get_db)):
     payload.body = _clean_body(payload.body, payload.format)
+    import audiences
+
+    circle_ids: list[str] = []
     if payload.visibility == "circle":
-        _require_own_circle(principal.user_id, payload.circle_id)
+        # Several circles and people by name; an older client sends one circle_id.
+        circle_ids = audiences.check_new_audience(principal.user_id, payload.circle_id, payload.circle_ids, payload.include_ids)
+        payload.circle_id = circle_ids[0] if circle_ids else None
     status = "published"
     space: str | None = None
     policy: dict | None = None
@@ -1094,7 +1168,10 @@ async def create_post(payload: PostIn, principal: CurrentUser, db: OrmSession = 
             status = "scheduled"
 
     media = _verified_media(payload.media, principal.user_id)
-    data = payload.model_dump(exclude={"topics", "media", "space", "publish_at"})
+    data = payload.model_dump(exclude={"topics", "media", "space", "publish_at", "circle_ids", "include_ids", "exclude_ids"})
+    if payload.visibility != "circle":
+        data["audience_mode"] = "live"
+        data["notify_audience"] = False
     # A circle id only means something on a circle post; elsewhere it would be
     # a stray pointer the audience rule might one day read.
     if payload.visibility != "circle":
@@ -1115,6 +1192,8 @@ async def create_post(payload: PostIn, principal: CurrentUser, db: OrmSession = 
     )
     db.add(post)
     db.flush()
+    if post.visibility == "circle":
+        audiences.store_audience(db, post, circle_ids, payload.include_ids, payload.exclude_ids)
 
     for index, item in enumerate(media):
         db.add(
@@ -1174,6 +1253,12 @@ async def _announce(post: models.Post) -> None:
     """Everything that happens when a post becomes visible: the event, the live
     feed, mentions and the community's notifications. Once, at publication -
     for a scheduled or approved post that is later than its creation."""
+    if post.visibility == "circle":
+        import audiences
+
+        # A "people at publication" audience is recorded now - for a scheduled
+        # post, when it goes out - and the author's notification, if asked for.
+        audiences.on_published(post.id)
     await events.publish(
         "post.published",
         {"post_id": post.id, "author_id": post.author_id, "format": post.format, "lang": post.lang},
@@ -2851,6 +2936,13 @@ class Audience:
     following: frozenset[str] = frozenset()
     circles: frozenset[str] = frozenset()
     communities: frozenset[str] = frozenset()
+    connections: frozenset[str] = frozenset()
+    blocked: frozenset[str] = frozenset()
+    # The viewer's own choices about other people's circles (audiences.py).
+    hidden_circles: frozenset[str] = frozenset()
+    muted_circles: frozenset[str] = frozenset()
+    # circle id -> (opted out at, also earlier posts)
+    opted_out: tuple = ()
 
 
 def _viewer_audience(viewer: str | None) -> Audience:
@@ -2863,18 +2955,27 @@ def _viewer_audience(viewer: str | None) -> Audience:
         return Audience()
     following: frozenset[str] = frozenset()
     circles: frozenset[str] = frozenset()
+    connections: frozenset[str] = frozenset()
+    blocked: frozenset[str] = frozenset()
     try:
         response = httpx.get(f"{USER_URL}/internal/viewer-audience/{viewer}", timeout=4)
         response.raise_for_status()
         data = response.json()
         following = frozenset(data.get("following", []))
         circles = frozenset(data.get("circles", []))
+        connections = frozenset(data.get("connections", []))
+        blocked = frozenset(data.get("blocked", []))
     except Exception as exc:
         log.warning("audience lookup failed for %s: %s", viewer, exc)
+    import audiences
+
+    hidden, muted, opted = audiences.viewer_prefs(viewer)
     # Asked separately, and allowed to fail on its own: a community-service
     # outage should cost this member their group posts, not their whole feed.
     # Either failure narrows what is shown; neither widens it.
-    return Audience(viewer, following, circles, _viewer_communities(viewer))
+    return Audience(
+        viewer, following, circles, _viewer_communities(viewer), connections, blocked, hidden, muted, opted
+    )
 
 
 def _viewer_communities(viewer: str) -> frozenset[str]:
@@ -2913,8 +3014,12 @@ def _can_see(post: models.Post, audience: Audience) -> bool:
         return True
     if post.visibility == "followers":
         return post.author_id in audience.following
+    if post.visibility == "connections":
+        return post.author_id in audience.connections
     if post.visibility == "circle":
-        return post.circle_id in audience.circles
+        import audiences
+
+        return audiences.can_see_circle_post(post, audience)
     if post.visibility == "community":
         return post.community_id in audience.communities
     return False
@@ -2941,8 +3046,16 @@ def _audience_clause(audience: Audience):
         clauses.append(
             and_(models.Post.visibility == "followers", models.Post.author_id.in_(audience.following))
         )
-    if audience.circles:
-        clauses.append(and_(models.Post.visibility == "circle", models.Post.circle_id.in_(audience.circles)))
+    if audience.connections:
+        clauses.append(
+            and_(models.Post.visibility == "connections", models.Post.author_id.in_(audience.connections))
+        )
+    import audiences
+
+    # Circle posts: by the circles that reach the viewer now (live), by the
+    # audience recorded at publication (snapshot), or by name - never if the
+    # author left them out or they opted out of one of the post's circles.
+    clauses.append(audiences.circle_clause(audience))
     if audience.communities:
         clauses.append(
             and_(models.Post.visibility == "community",
@@ -3099,7 +3212,10 @@ def _visible_posts(principal, age, audience: Audience):
     # Age eligibility enters the SQL here, before ranking and before paging,
     # so restricted rows are never candidates in the first place.
     stmt = agefilter.restrict_query(stmt, age)
-    return stmt.where(_audience_clause(audience))
+    import audiences
+
+    # A circle the viewer chose to hide stays out of their feeds (a link still opens it).
+    return stmt.where(_audience_clause(audience), audiences.not_hidden(audience))
 
 
 @app.get("/feed/community/{community_id}", tags=["feed"])
@@ -4329,7 +4445,7 @@ class RepostIn(BaseModel):
     """A comment turns a repost into a quote — the blueprint's two are one route."""
 
     body: str = Field(default="", max_length=5000)
-    visibility: str = Field(default="public", pattern="^(public|followers|circle|community|private)$")
+    visibility: str = Field(default="public", pattern="^(public|followers|connections|circle|community|private)$")
     circle_id: str | None = None
 
 
@@ -4388,6 +4504,8 @@ def repost(post_id: str, payload: RepostIn, principal: CurrentUser, db: OrmSessi
         provenance="original" if payload.body.strip() else "verified_source",
     )
     db.add(post)
+    if post.visibility == "circle" and post.circle_id:
+        db.add(models.PostCircle(post_id=post.id, circle_id=post.circle_id))
     target.reposts_count += 1
     db.commit()
     live(f"post:{target.id}", "reposts", post_id=target.id,
@@ -4946,3 +5064,10 @@ def backfill_media_dimensions(limit: int = 200, dry_run: bool = True, db: OrmSes
         "asset_had_no_size": unknown,
         "still_without_size": remaining,
     }
+
+
+# Circle audiences, 27/10: previews, changes after publication, the recipient's
+# own choices, and the posts shared with a circle (audiences.py).
+import audiences as _audience_routes  # noqa: E402
+
+app.include_router(_audience_routes.router)

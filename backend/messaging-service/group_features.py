@@ -1945,3 +1945,25 @@ def messaging_capabilities(principal: CurrentUser):
     except Exception as exc:
         log.info("translation availability unknown: %s", exc)
     return {"translate": translate, "group_calls": False, "summaries": False}
+
+
+# --- withdrawing notifications (social-service) --------------------------------
+
+class ForgetIn(BaseModel):
+    user_ids: list[str] = Field(default_factory=list, max_length=5000)
+    links: list[str] = Field(default_factory=list, max_length=500)
+
+
+@app.post("/internal/notifications/forget", tags=["internal"])
+def forget_notifications(payload: ForgetIn, db: OrmSession = Depends(get_db)):
+    """Delete stored notifications about content these people can no longer
+    read (an audience narrowed, an opt-out). Internal - never routed."""
+    if not payload.user_ids or not payload.links:
+        return {"deleted": 0}
+    deleted = db.execute(
+        delete(models.Notification).where(
+            models.Notification.user_id.in_(payload.user_ids), models.Notification.link.in_(payload.links)
+        )
+    ).rowcount or 0
+    db.commit()
+    return {"deleted": deleted}

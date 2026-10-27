@@ -8,6 +8,7 @@ import { Bookmark, BookmarkCheck, Check, Columns2, Eye, EyeOff, Flag, HelpCircle
 import { ApiError, kaluta, type Post, type WhyFactor } from '@/lib/api'
 import { useTopic } from '@/hooks/useRealtime'
 import EditPostDialog from './EditPostDialog'
+import { AuthorAudienceSheet, ReaderAudienceSheet } from './PostAudienceDialogs'
 import { OneToManyDialog } from './OneToManyPanel'
 import { articleMediaIds, htmlToText, hydrateArticle, looksLikeHtml, readableText, sanitizeHtml } from '@/lib/richtext'
 import { useAuth } from '@/hooks/useAuth'
@@ -53,7 +54,8 @@ const BODY_COLLAPSED = 140
 /** Who can read a restricted post, said on the card so nobody has to guess. */
 const AUDIENCE: Record<string, { label: string; hint: string }> = {
   followers: { label: 'Followers', hint: 'Only the author’s followers can see this.' },
-  circle: { label: 'Circle', hint: 'Shared with a circle — only its members and the author can see this.' },
+  connections: { label: 'Connections', hint: 'Only the author’s connections can see this.' },
+  circle: { label: 'Private audience', hint: 'Shared with people the author chose — only they and the author can see this.' },
   community: { label: 'Community', hint: 'Shared with a community — only its members can see this.' },
   private: { label: 'Only me', hint: 'Only you can see this post.' },
 }
@@ -335,6 +337,9 @@ export default function PostCard({
   // an article's own pictures with it; the audience, the community and the
   // photos under a post are not typos, and changing them would be a re-post.
   const [editing, setEditing] = useState(false)
+  // Who a post goes to: the author's view (change it) or a reader's (mute, hide, opt out).
+  const [audienceOpen, setAudienceOpen] = useState(false)
+  const [visibilityNow, setVisibilityNow] = useState<string | null>(null)
   // The article's video slots, found after its HTML is on the page.
   const articleRef = useRef<HTMLDivElement>(null)
   const [videoSlots, setVideoSlots] = useState<Array<{ el: HTMLElement; src: string; poster: string | null }>>([])
@@ -592,6 +597,8 @@ export default function PostCard({
   // not fragment a conversation across two posts.
   const shared = post.repost_of ?? null
   const source = target
+  // The author can change any audience but a community's; a reader can manage a private audience.
+  const audienceManageable = !post.repost_of && (isOwn ? source.visibility !== 'community' : source.visibility === 'circle')
 
   // Articles are stored as markup; everything else is plain text.
   // The edited text once this card has saved one, otherwise what arrived.
@@ -686,15 +693,36 @@ export default function PostCard({
               </span>
             )}
             <span className="uppercase">{source.lang}</span>
-            {AUDIENCE[source.visibility] && (
-              <span
-                className="inline-flex items-center gap-1 text-text-mid"
-                title={AUDIENCE[source.visibility].hint}
+            {source.visibility === 'community' && source.community?.name && !visibilityNow ? (
+              // The community it was posted in, by name - not the generic word.
+              <Link
+                to={`/communities/${source.community.slug}`}
+                className="inline-flex items-center gap-1 text-text-mid underline-offset-2 hover:text-text-hi hover:underline"
+                title={AUDIENCE.community.hint}
               >
                 <Lock size={10} aria-hidden="true" />
-                {AUDIENCE[source.visibility].label}
-              </span>
-            )}
+                {source.community.name}
+              </Link>
+            ) : AUDIENCE[visibilityNow ?? source.visibility] &&
+              (audienceManageable ? (
+                <button
+                  type="button"
+                  onClick={() => setAudienceOpen(true)}
+                  className="inline-flex items-center gap-1 text-text-mid underline-offset-2 hover:text-text-hi hover:underline"
+                  title={AUDIENCE[visibilityNow ?? source.visibility].hint}
+                >
+                  <Lock size={10} aria-hidden="true" />
+                  {AUDIENCE[visibilityNow ?? source.visibility].label}
+                </button>
+              ) : (
+                <span
+                  className="inline-flex items-center gap-1 text-text-mid"
+                  title={AUDIENCE[visibilityNow ?? source.visibility].hint}
+                >
+                  <Lock size={10} aria-hidden="true" />
+                  {AUDIENCE[visibilityNow ?? source.visibility].label}
+                </span>
+              ))}
           </p>
         </div>
         <div className="ms-auto flex shrink-0 items-center gap-2">
@@ -989,6 +1017,17 @@ export default function PostCard({
           </button>
         )}
 
+        {isOwn && !post.repost_of && target.visibility !== 'community' && (
+          <button
+            type="button"
+            onClick={() => setAudienceOpen(true)}
+            className="inline-flex items-center gap-1.5 rounded-full px-3 py-1.5 text-xs font-semibold text-text-low hover:text-text-hi"
+          >
+            <Lock size={13} aria-hidden="true" />
+            Audience
+          </button>
+        )}
+
         {isOwn && !post.repost_of && (
           /* One-to-Many: what was made from this post, and a way to make more.
              The author's alone; the server refuses everyone else. */
@@ -1272,6 +1311,24 @@ export default function PostCard({
           onAccept={(id) => void accept(id)}
         />
       )}
+
+      {audienceOpen &&
+        (isOwn ? (
+          <AuthorAudienceSheet
+            postId={target.id}
+            onClose={() => setAudienceOpen(false)}
+            onChanged={setVisibilityNow}
+          />
+        ) : (
+          <ReaderAudienceSheet
+            postId={target.id}
+            onClose={() => setAudienceOpen(false)}
+            onHidden={() => {
+              setAudienceOpen(false)
+              onHidden(post.id)
+            }}
+          />
+        ))}
 
       {editing && (
         <EditPostDialog

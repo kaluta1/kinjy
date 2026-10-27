@@ -16,7 +16,7 @@ import threading
 import time
 from datetime import datetime, timedelta, timezone
 
-from fastapi import Depends, HTTPException, Request, status
+from fastapi import Depends, HTTPException, Request, Response, status
 from fastapi.responses import HTMLResponse, RedirectResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import func, or_, select, text, update
@@ -32,6 +32,7 @@ from common.service import create_app
 import models
 import passkeys
 import agegate
+import attribution
 import referral_pool
 import schemas
 
@@ -169,7 +170,7 @@ def _active_user(db: OrmSession, user_id: str) -> models.User:
 # ---------------------------------------------------------------------------
 
 @app.post("/auth/register", response_model=schemas.AuthOut, status_code=201, tags=["auth"])
-async def register(payload: schemas.RegisterIn, request: Request, db: OrmSession = Depends(get_db)):
+async def register(payload: schemas.RegisterIn, request: Request, response: Response, db: OrmSession = Depends(get_db)):
     email = payload.email.lower().strip()
     clash = db.scalar(
         select(models.User).where(
@@ -218,13 +219,25 @@ async def register(payload: schemas.RegisterIn, request: Request, db: OrmSession
 
     inviter_id: str | None = None
     credited_link: str | None = None
-    if payload.referral_code:
+    # An invitation link followed in the last REFERRAL_ATTRIBUTION_DAYS, held
+    # by the server (see attribution.py), wins over whatever the form says:
+    # clearing or changing the code field does not drop the inviter.
+    held = attribution.held_capture(db, request)
+    method = "none"
+    if held is not None:
+        inviter_id = held.referrer_id
+        credited_link = held.link_token
+        method = "captured"
+    elif payload.referral_code:
         inviter = db.scalar(
             select(models.User).where(models.User.referral_code == payload.referral_code.strip().upper())
         )
-        if inviter is None:
+        # Only a member who can still be credited: the same rule as a short
+        # link's sharer (a deleted or closed account's code is not a referral).
+        if attribution.eligible_referrer(db, inviter.id if inviter else None) is None:
             raise HTTPException(status_code=400, detail="Unknown referral code")
         inviter_id = inviter.id
+        method = "code"
     elif payload.referral_link:
         # An invitation short link stands for the invitation of the member who
         # made it, exactly as their code would - same rules from here on. A
@@ -236,6 +249,7 @@ async def register(payload: schemas.RegisterIn, request: Request, db: OrmSession
         if sharer is not None:
             inviter_id = sharer.id
             credited_link = found[0].token
+            method = "link"
     # No personal invitation link: the referral pool draws a sponsor for them.
     # Resolved below, once the account has an id to record the assignment under.
 
@@ -277,6 +291,10 @@ async def register(payload: schemas.RegisterIn, request: Request, db: OrmSession
         if assignment is not None:
             user.invited_by = assignment.sponsor_id
             inviter_id = assignment.sponsor_id
+            method = "pool"
+    attribution.record(db, user, method, held)
+    if held is not None:
+        attribution.clear_cookie(response)
 
     # No device label: the member's *name* is not a device name, and passing it
     # here made the device manager list "Demo K." instead of the browser.
@@ -2337,3 +2355,6 @@ def admin_users(
     total = db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
     rows = db.scalars(stmt.limit(min(limit, 200)).offset(offset)).all()
     return {"total": total, "items": [schemas.UserOut.model_validate(r) for r in rows]}
+
+
+app.include_router(attribution.router)

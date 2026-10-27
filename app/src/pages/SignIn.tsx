@@ -8,7 +8,7 @@ import { HeroCollage } from '@/components/landing/LandingHero'
 import { Brand, ThemeToggle } from '@/components/landing/shared'
 import { useLandingTheme } from '@/components/landing/useLandingTheme'
 import { useAuth } from '@/hooks/useAuth'
-import { ApiError } from '@/lib/api'
+import { ApiError, kaluta } from '@/lib/api'
 import {
   clearPendingRef,
   pendingInviter,
@@ -126,6 +126,34 @@ export default function SignIn() {
   }
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  // The invitation the server holds for this browser (kept for the
+  // attribution window when an invitation link was followed). When there is
+  // one it is applied at sign-up whatever the form says, so the form says so
+  // instead of offering an "optional" code box that would not change it.
+  const [heldInviter, setHeldInviter] = useState<string | null>(null)
+  useEffect(() => {
+    if (mode !== 'signup') return
+    let live = true
+    const fromUrl = refFromSearch(params.toString())
+    kaluta.auth
+      .heldInvitation()
+      .then(async (held) => {
+        if (held.inviter) return held.inviter.display_name
+        // An invitation this browser remembered before the server held them
+        // (or on this very address): hand it over to be checked and held.
+        const code = fromUrl ?? pendingRef()
+        const token = code ? '' : pendingLink()
+        if (!code && !token) return null
+        const captured = await kaluta.auth.captureInvitation(code ? { code } : { link: token })
+        return captured.inviter?.display_name ?? null
+      })
+      .then((name) => live && setHeldInviter(name ?? null))
+      .catch(() => live && setHeldInviter(null))
+    return () => {
+      live = false
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mode])
 
   // Already signed in? The sign-in page has nothing to offer.
   useEffect(() => {
@@ -179,7 +207,8 @@ export default function SignIn() {
             referral_link: code ? undefined : link || undefined,
           })
         try {
-          await register(referral.trim() || undefined)
+          // A held invitation is applied by the server; nothing to send.
+          await register(heldInviter ? undefined : referral.trim() || undefined)
         } catch (err) {
           const unknownCode =
             err instanceof ApiError && /referral code/i.test(err.message)
@@ -346,7 +375,24 @@ export default function SignIn() {
                 )}
               </label>
 
-              {mode === 'signup' && (
+              {mode === 'signup' && heldInviter && (
+                <div className="rounded-[12px] border border-[var(--kl-gold)] px-4 py-3 text-sm">
+                  <p className="font-semibold text-[var(--kl-ink)]">
+                    {t('signin.invitedLocked', {
+                      name: heldInviter,
+                      defaultValue: 'Your account will be linked to {{name}}, who invited you.',
+                    })}
+                  </p>
+                  <p className={hint}>
+                    {t('signin.invitedLockedHint', {
+                      defaultValue:
+                        'You opened their invitation link, so it is applied automatically when you join.',
+                    })}
+                  </p>
+                </div>
+              )}
+
+              {mode === 'signup' && !heldInviter && (
                 <label className="block">
                   <span className={label}>{t('signin.referralCodeOptional')}</span>
                   <input

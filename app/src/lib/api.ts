@@ -594,6 +594,8 @@ export interface Post {
   visibility: string
   circle_id: string | null
   community_id: string | null
+  /** The community a community post is in; null when it no longer exists. */
+  community?: { name: string; slug: string } | null
   country: string | null
   city: string | null
   topics: string[]
@@ -717,6 +719,14 @@ export interface NewPost {
   format?: string
   visibility?: string
   circle_id?: string
+  /** A circle post: one or more of your circles, plus or minus named people. */
+  circle_ids?: string[]
+  include_ids?: string[]
+  exclude_ids?: string[]
+  /** 'live' follows your circles; 'snapshot' fixes the audience at publication. */
+  audience_mode?: AudienceMode
+  /** Tell the audience the post is there (no circle name is ever shown). */
+  notify_audience?: boolean
   /** Required when visibility is 'community'; the server checks you are a member. */
   community_id?: string
   topics?: string[]
@@ -910,6 +920,98 @@ export interface Circle {
   /** Who a post shared to it would reach right now. */
   members_count: number
   created_at?: string
+  description?: string | null
+  icon?: string | null
+  archived?: boolean
+  last_used_at?: string | null
+  /** Smart circles: people left out whatever the rule says. */
+  excluded_count?: number
+}
+
+export type CircleSort = 'name' | 'recent' | 'size' | 'created'
+export type AudienceMode = 'live' | 'snapshot'
+
+export interface AudiencePerson {
+  user_id: string
+  display_name: string | null
+  handle: string | null
+  avatar_url?: string | null
+  city?: string | null
+}
+
+export interface AudienceSelection {
+  circle_ids: string[]
+  include_ids: string[]
+  exclude_ids: string[]
+}
+
+export interface AudiencePreview {
+  count: number
+  people: AudiencePerson[]
+  excluded: AudiencePerson[]
+  refused: AudiencePerson[]
+  includes_smart_circle: boolean
+  archived_circles: string[]
+}
+
+/** The author's view of who a post goes to. */
+export interface PostAudience {
+  visibility: string
+  audience_mode: AudienceMode
+  audience_fixed_at: string | null
+  notify_audience: boolean
+  circles?: Array<{ id: string; name: string | null; deleted: boolean }>
+  include?: AudiencePerson[]
+  exclude?: AudiencePerson[]
+  eligible_count?: number
+  eligible?: AudiencePerson[]
+  /** Only when enough people opted out that it points at nobody. */
+  opted_out_count?: number | null
+  note?: string
+}
+
+export interface AudienceChange extends AudienceSelection {
+  visibility: 'public' | 'followers' | 'connections' | 'circle' | 'private'
+  audience_mode: AudienceMode
+  confirm_added?: boolean
+}
+
+/** What a 409 on an audience change says: who would newly see the post. */
+export interface AudienceWidening {
+  message: string
+  added_count: number | null
+  added: AudiencePerson[]
+  becomes: string
+}
+
+export interface AudiencePrefState {
+  muted: boolean
+  hidden: boolean
+  opted_out: boolean
+  opt_out_past: boolean
+  opted_out_at: string | null
+}
+
+export interface AudienceControl extends AudiencePrefState {
+  /** A label only this reader sees; it says nothing about the list itself. */
+  token: string
+  label: string
+}
+
+export interface AudiencePrefRow extends AudiencePrefState {
+  id: number
+  label: string
+  author: { display_name?: string | null; handle?: string | null; avatar_url?: string | null } | null
+}
+
+export interface CirclePostRow {
+  id: string
+  excerpt: string
+  format: string
+  status: string
+  publish_at: string | null
+  created_at: string
+  audience_mode: AudienceMode
 }
 
 export interface CircleMember {
@@ -2670,6 +2772,8 @@ export type OneToManyOutput = {
   completed_at: string | null
   /** Made from an earlier version of the post. */
   stale: boolean
+  /** Short video: whether it is read aloud (videos made before narration are silent). */
+  narrated?: boolean
   legacy: boolean
   user_edited: boolean
   content: string | null
@@ -2873,6 +2977,28 @@ export const kaluta = {
     byAuthor: (userId: string, limit = 20) =>
       api.get<{ total: number; items: Post[] }>(`/posts/by/${userId}?limit=${limit}`),
     remove: (id: string) => api.delete<void>(`/posts/${id}`),
+    /** The author: who this post goes to and who can see it now. */
+    audience: (id: string) => api.get<PostAudience>(`/posts/${id}/audience`),
+    /** A change that lets new people in answers 409 (AudienceWidening) until confirmed. */
+    changeAudience: (id: string, change: AudienceChange) =>
+      api.patch<{ visibility: string; removed: number; added: number }>(`/posts/${id}/audience`, change),
+    /** A reader of a circle post: the private audiences it came through, and their choices. */
+    audienceControls: (id: string) =>
+      api.get<{ author?: string; items: AudienceControl[]; explanation?: string }>(`/posts/${id}/audience-controls`),
+    setAudiencePref: (input: {
+      post_id: string
+      token: string
+      muted?: boolean
+      hidden?: boolean
+      opt_out?: boolean
+      opt_out_past?: boolean
+    }) => api.put<AudiencePrefState>('/audience-prefs', input),
+    /** Every private audience I made a choice about, to review or undo. */
+    audiencePrefs: () => api.get<{ items: AudiencePrefRow[] }>('/audience-prefs'),
+    changeAudiencePref: (
+      id: number,
+      change: { muted?: boolean; hidden?: boolean; opt_out?: boolean; opt_out_past?: boolean },
+    ) => api.patch<AudiencePrefState | { removed: true }>(`/audience-prefs/${id}`, change),
     /** Share to your own audience. A body makes it a quote rather than a plain share. */
     /** Fix your own post, within its first 24 hours. */
     /**
@@ -3094,13 +3220,48 @@ export const kaluta = {
   },
 
   circles: {
-    list: () => api.get<Circle[]>('/circles'),
-    /** One circle and its members — its owner only. */
-    get: (id: string) => api.get<CircleDetail>(`/circles/${id}`),
-    create: (input: { name: string; kind?: string; color?: string; rule?: CircleRule }) =>
+    list: (opts: { sort?: CircleSort; archived?: boolean } = {}) =>
+      api.get<Circle[]>(
+        `/circles?sort=${opts.sort ?? 'created'}${opts.archived === undefined ? '' : `&archived=${opts.archived}`}`,
+      ),
+    /** One circle and its members — its owner only. `q` narrows the members. */
+    get: (id: string, q?: string) =>
+      api.get<CircleDetail>(`/circles/${id}${q ? `?q=${encodeURIComponent(q)}` : ''}`),
+    create: (input: { name: string; kind?: string; color?: string; rule?: CircleRule; description?: string; icon?: string }) =>
       api.post<CircleDetail>('/circles', { kind: 'custom', ...input }),
-    update: (id: string, patch: { name?: string; kind?: string; color?: string | null; rule?: CircleRule }) =>
-      api.patch<CircleDetail>(`/circles/${id}`, patch),
+    update: (
+      id: string,
+      patch: {
+        name?: string
+        kind?: string
+        color?: string | null
+        rule?: CircleRule
+        description?: string | null
+        icon?: string | null
+        archived?: boolean
+      },
+    ) => api.patch<CircleDetail>(`/circles/${id}`, patch),
+    bulk: (id: string, change: { add?: string[]; remove?: string[] }) =>
+      api.post<{ added: string[]; removed: number; refused: string[]; members_count: number }>(
+        `/circles/${id}/bulk-members`,
+        { add: change.add ?? [], remove: change.remove ?? [] },
+      ),
+    duplicate: (id: string, name: string) => api.post<CircleDetail>(`/circles/${id}/duplicate`, { name }),
+    exclusions: (id: string) => api.get<{ items: AudiencePerson[] }>(`/circles/${id}/exclusions`),
+    exclude: (id: string, memberId: string) =>
+      api.post<{ excluded: boolean; members_count: number }>(`/circles/${id}/exclusions/${memberId}`),
+    unexclude: (id: string, memberId: string) => api.delete<void>(`/circles/${id}/exclusions/${memberId}`),
+    /** Who a smart rule would reach right now, before saving it. */
+    smartPreview: (rule: CircleRule) =>
+      api.post<{ count: number; items: AudiencePerson[] }>('/circles/smart-preview', rule),
+    /** Who a post with this audience would reach — for its author. */
+    audiencePreview: (selection: AudienceSelection, q?: string) =>
+      api.post<AudiencePreview>(`/circles/audience-preview${q ? `?q=${encodeURIComponent(q)}` : ''}`, selection),
+    /** What I shared with one of my circles, scheduled posts included. */
+    posts: (id: string) =>
+      api.get<{ items: CirclePostRow[]; opted_out_count: number | null }>(`/me/circle-posts?circle_id=${id}`),
+    optOuts: (ids: string[]) =>
+      api.get<{ counts: Record<string, number | null> }>(`/me/circle-opt-outs?ids=${ids.join(',')}`),
     remove: (id: string) => api.delete<void>(`/circles/${id}`),
     addMember: (circleId: string, memberId: string) =>
       api.post<{ added: boolean; already?: boolean; members_count?: number }>(
@@ -4635,7 +4796,7 @@ export const kaluta = {
       /** The token of a short link the visitor arrived on. */
       referral_link?: string
     }) {
-      const result = await api.post<AuthResult>('/auth/register', input, { auth: false })
+      const result = await api.post<AuthResult>('/auth/register', input, { auth: false, credentials: 'include' })
       tokens.set(result.tokens)
       return result.user
     },
@@ -4681,6 +4842,26 @@ export const kaluta = {
       api.get<{ code: string; display_name: string; handle: string }>(
         `/auth/referral/${encodeURIComponent(code)}`,
         { auth: false },
+      ),
+    /**
+     * Hold an invitation for this browser. The server checks the inviter and
+     * keeps it in an HttpOnly cookie for the attribution window; a signed-in
+     * member is never captured (their sponsor is settled).
+     */
+    captureInvitation: (input: { code?: string; link?: string }) =>
+      api.post<{
+        captured: boolean
+        reason?: string
+        inviter?: { display_name: string; handle: string }
+        expires_at?: string
+      }>('/auth/invitation/capture', input, { credentials: 'include' }),
+    /** The invitation this browser holds, if any — what sign-up will apply. */
+    heldInvitation: () =>
+      api.get<{ inviter: { display_name: string; handle: string } | null; expires_at?: string }>(
+        '/auth/invitation',
+        // The invitation lives in an HttpOnly cookie; sent even where the API
+        // is on another origin (development), same-origin in production.
+        { auth: false, credentials: 'include' },
       ),
 
     /**

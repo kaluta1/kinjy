@@ -49,6 +49,11 @@ MIGRATIONS = [
     # chose Dark keeps a dark page rather than being dropped back onto a light
     # one - and the column stops holding a value the API no longer accepts.
     f"UPDATE {models.SCHEMA}.preferences SET display_mode = 'cloud' WHERE display_mode = 'dark'",
+    # Circles, 27/10: a private description, an icon, archiving, last use.
+    f"ALTER TABLE {models.SCHEMA}.circles ADD COLUMN IF NOT EXISTS description TEXT",
+    f"ALTER TABLE {models.SCHEMA}.circles ADD COLUMN IF NOT EXISTS icon VARCHAR(30)",
+    f"ALTER TABLE {models.SCHEMA}.circles ADD COLUMN IF NOT EXISTS archived_at TIMESTAMPTZ",
+    f"ALTER TABLE {models.SCHEMA}.circles ADD COLUMN IF NOT EXISTS last_used_at TIMESTAMPTZ",
 ]
 
 app = create_app(
@@ -199,6 +204,8 @@ class CircleIn(BaseModel):
     kind: str = Field(default="custom", pattern=CIRCLE_KINDS)
     color: str | None = Field(default=None, max_length=20)
     rule: CircleRule | None = None
+    description: str | None = Field(default=None, max_length=500)
+    icon: str | None = Field(default=None, max_length=30)
 
     @field_validator("name")
     @classmethod
@@ -211,6 +218,10 @@ class CirclePatch(BaseModel):
     kind: str | None = Field(default=None, pattern=CIRCLE_KINDS)
     color: str | None = Field(default=None, max_length=20)
     rule: CircleRule | None = None
+    description: str | None = Field(default=None, max_length=500)
+    icon: str | None = Field(default=None, max_length=30)
+    # True archives it (kept, no longer offered for new posts); False restores it.
+    archived: bool | None = None
 
     @field_validator("name")
     @classmethod
@@ -227,6 +238,12 @@ class CircleOut(BaseModel):
     rule: dict | None
     members_count: int
     created_at: datetime
+    description: str | None = None
+    icon: str | None = None
+    archived: bool = False
+    last_used_at: datetime | None = None
+    # Smart circles: the people the owner left out of the rule.
+    excluded_count: int = 0
 
 
 class CircleMemberOut(BaseModel):
@@ -844,7 +861,8 @@ def _circle_members(db: OrmSession, circle: models.Circle) -> list[tuple[str, bo
 
     if circle.kind == "smart":
         rule = _rule(circle) or {}
-        candidates = _rule_source(db, circle.owner_id, rule.get("source", "")) - {circle.owner_id} - blocked
+        excluded = set(db.scalars(select(models.CircleExclusion.member_id).where(models.CircleExclusion.circle_id == circle.id)).all())
+        candidates = _rule_source(db, circle.owner_id, rule.get("source", "")) - {circle.owner_id} - blocked - excluded
         if not candidates:
             return []
         profiles = {
@@ -894,9 +912,12 @@ def _circles_reaching(db: OrmSession, viewer_id: str) -> set[str]:
     owners = (connections | following | followers) - blocked - {viewer_id}
     if owners:
         me = db.get(models.Profile, viewer_id)
+        left_out = set(db.scalars(select(models.CircleExclusion.circle_id).where(models.CircleExclusion.member_id == viewer_id)).all())
         for circle in db.scalars(
             select(models.Circle).where(models.Circle.kind == "smart", models.Circle.owner_id.in_(owners))
         ).all():
+            if circle.id in left_out:
+                continue
             rule = _rule(circle) or {}
             owner_id = circle.owner_id
             related = {
@@ -922,6 +943,13 @@ def _circle_out(db: OrmSession, circle: models.Circle, members: list[tuple[str, 
         # Who a post shared to it would actually reach, not who was ever added.
         "members_count": sum(1 for _, active in members if active),
         "created_at": circle.created_at,
+        "description": circle.description,
+        "icon": circle.icon,
+        "archived": circle.archived_at is not None,
+        "last_used_at": circle.last_used_at,
+        "excluded_count": db.scalar(
+            select(func.count()).select_from(models.CircleExclusion).where(models.CircleExclusion.circle_id == circle.id)
+        ) or 0 if circle.kind == "smart" else 0,
     }
 
 
@@ -956,11 +984,28 @@ def _stored_rule(rule: CircleRule) -> str:
 
 
 @app.get("/circles", response_model=list[CircleOut], tags=["circles"])
-def list_circles(principal: CurrentUser, db: OrmSession = Depends(get_db)):
-    rows = db.scalars(
-        select(models.Circle).where(models.Circle.owner_id == principal.user_id).order_by(models.Circle.created_at)
-    ).all()
-    return [_circle_out(db, row) for row in rows]
+def list_circles(
+    principal: CurrentUser,
+    sort: str = "created",
+    archived: bool | None = None,
+    db: OrmSession = Depends(get_db),
+):
+    """My circles, sorted by name, recent use, size or creation. ``archived``
+    true/false narrows to archived or active ones; absent, both."""
+    stmt = select(models.Circle).where(models.Circle.owner_id == principal.user_id)
+    if archived is True:
+        stmt = stmt.where(models.Circle.archived_at.is_not(None))
+    elif archived is False:
+        stmt = stmt.where(models.Circle.archived_at.is_(None))
+    rows = db.scalars(stmt.order_by(models.Circle.created_at)).all()
+    out = [_circle_out(db, row) for row in rows]
+    if sort == "name":
+        out.sort(key=lambda c: c["name"].casefold())
+    elif sort == "recent":
+        out.sort(key=lambda c: (c["last_used_at"] is None, -(c["last_used_at"].timestamp() if c["last_used_at"] else 0)))
+    elif sort == "size":
+        out.sort(key=lambda c: -c["members_count"])
+    return out
 
 
 @app.post("/circles", response_model=CircleDetailOut, status_code=201, tags=["circles"])
@@ -983,6 +1028,8 @@ def create_circle(payload: CircleIn, principal: CurrentUser, db: OrmSession = De
         kind=payload.kind,
         color=payload.color,
         rule=_stored_rule(payload.rule) if payload.rule else None,
+        description=(payload.description or "").strip() or None,
+        icon=payload.icon,
     )
     db.add(circle)
     db.commit()
@@ -991,10 +1038,18 @@ def create_circle(payload: CircleIn, principal: CurrentUser, db: OrmSession = De
 
 
 @app.get("/circles/{circle_id}", response_model=CircleDetailOut, tags=["circles"])
-def get_circle(circle_id: str, principal: CurrentUser, db: OrmSession = Depends(get_db)):
+def get_circle(circle_id: str, principal: CurrentUser, q: str | None = None, db: OrmSession = Depends(get_db)):
     """One circle and its members — for its owner only. Being in someone's
-    circle does not entitle you to see who else is."""
-    return _circle_detail(db, _own_circle(db, circle_id, principal.user_id))
+    circle does not entitle you to see who else is. ``q`` filters the members
+    by name, handle or city."""
+    detail = _circle_detail(db, _own_circle(db, circle_id, principal.user_id))
+    if q and q.strip():
+        needle = q.strip().casefold()
+        detail["members"] = [
+            m for m in detail["members"]
+            if needle in (m["display_name"] or "").casefold() or needle in (m["handle"] or "").casefold() or needle in (m["city"] or "").casefold()
+        ]
+    return detail
 
 
 @app.patch("/circles/{circle_id}", response_model=CircleDetailOut, tags=["circles"])
@@ -1011,6 +1066,12 @@ def update_circle(circle_id: str, payload: CirclePatch, principal: CurrentUser, 
         circle.name = payload.name
     if "color" in payload.model_fields_set:
         circle.color = payload.color
+    if "description" in payload.model_fields_set:
+        circle.description = (payload.description or "").strip() or None
+    if "icon" in payload.model_fields_set:
+        circle.icon = payload.icon
+    if payload.archived is not None:
+        circle.archived_at = (circle.archived_at or datetime.now(timezone.utc)) if payload.archived else None
 
     kind = payload.kind or circle.kind
     if kind == "smart":
@@ -1097,6 +1158,236 @@ def delete_circle(circle_id: str, principal: CurrentUser, db: OrmSession = Depen
     db.commit()
 
 
+class BulkMembersIn(BaseModel):
+    add: list[str] = Field(default_factory=list, max_length=500)
+    remove: list[str] = Field(default_factory=list, max_length=500)
+
+
+@app.post("/circles/{circle_id}/bulk-members", tags=["circles"])
+def bulk_members(circle_id: str, payload: BulkMembersIn, principal: CurrentUser, db: OrmSession = Depends(get_db)):
+    """Add and remove several people at once. Each person is checked as a single
+    add would be; the ones that cannot be added are named in the answer.
+    Nobody is told they were added or removed."""
+    circle = _own_circle(db, circle_id, principal.user_id)
+    if circle.kind == "smart" and payload.add:
+        raise HTTPException(status_code=400, detail="A smart circle is filled by its rule — change the rule instead.")
+    blocked = _blocked_with(db, principal.user_id)
+    connections = _connections_of(db, principal.user_id)
+    present = set(db.scalars(select(models.CircleMember.member_id).where(models.CircleMember.circle_id == circle_id)).all())
+    added, refused = [], []
+    for member_id in dict.fromkeys(payload.add):
+        if member_id in present or member_id == principal.user_id:
+            continue
+        try:
+            _ensure_profile(db, member_id)
+        except HTTPException:
+            refused.append(member_id)
+            continue
+        if member_id in blocked or not _reachable(principal.user_id, member_id, member_id in connections):
+            refused.append(member_id)
+            continue
+        if len(present) + len(added) >= MAX_MEMBERS_PER_CIRCLE:
+            refused.append(member_id)
+            continue
+        db.add(models.CircleMember(circle_id=circle_id, member_id=member_id))
+        added.append(member_id)
+    removed = 0
+    if payload.remove:
+        removed = db.execute(
+            delete(models.CircleMember).where(models.CircleMember.circle_id == circle_id, models.CircleMember.member_id.in_(payload.remove))
+        ).rowcount or 0
+    circle.members_count = max(0, circle.members_count + len(added) - removed)
+    db.commit()
+    return {"added": added, "removed": removed, "refused": refused, "members_count": _circle_out(db, circle)["members_count"]}
+
+
+class DuplicateIn(BaseModel):
+    name: str = Field(min_length=1, max_length=80)
+
+
+@app.post("/circles/{circle_id}/duplicate", response_model=CircleDetailOut, status_code=201, tags=["circles"])
+def duplicate_circle(circle_id: str, payload: DuplicateIn, principal: CurrentUser, db: OrmSession = Depends(get_db)):
+    """A new circle starting from one of mine: the same people (or rule and
+    exclusions). Only an owner can copy their own circle."""
+    source = _own_circle(db, circle_id, principal.user_id)
+    owned = db.scalar(select(func.count()).select_from(models.Circle).where(models.Circle.owner_id == principal.user_id)) or 0
+    if owned >= MAX_CIRCLES_PER_OWNER:
+        raise HTTPException(status_code=400, detail=f"You can have up to {MAX_CIRCLES_PER_OWNER} circles. Delete one to make another.")
+    copy = models.Circle(
+        id=new_id("cir"), owner_id=principal.user_id, name=_circle_name(payload.name), kind=source.kind,
+        color=source.color, rule=source.rule, description=source.description, icon=source.icon,
+    )
+    db.add(copy)
+    db.flush()
+    for member_id in db.scalars(select(models.CircleMember.member_id).where(models.CircleMember.circle_id == source.id)).all():
+        db.add(models.CircleMember(circle_id=copy.id, member_id=member_id))
+        copy.members_count += 1
+    for member_id in db.scalars(select(models.CircleExclusion.member_id).where(models.CircleExclusion.circle_id == source.id)).all():
+        db.add(models.CircleExclusion(circle_id=copy.id, member_id=member_id))
+    db.commit()
+    db.refresh(copy)
+    return _circle_detail(db, copy)
+
+
+@app.post("/circles/{circle_id}/exclusions/{member_id}", status_code=201, tags=["circles"])
+def exclude_from_smart(circle_id: str, member_id: str, principal: CurrentUser, db: OrmSession = Depends(get_db)):
+    """Leave somebody out of a smart circle whatever its rule says."""
+    circle = _own_circle(db, circle_id, principal.user_id)
+    if circle.kind != "smart":
+        raise HTTPException(status_code=400, detail="Only a smart circle has exclusions: remove the person instead.")
+    if not db.scalar(select(models.CircleExclusion).where(models.CircleExclusion.circle_id == circle_id, models.CircleExclusion.member_id == member_id)):
+        db.add(models.CircleExclusion(circle_id=circle_id, member_id=member_id))
+        try:
+            db.commit()
+        except IntegrityError:
+            db.rollback()
+    return {"excluded": True, "members_count": _circle_out(db, circle)["members_count"]}
+
+
+@app.delete("/circles/{circle_id}/exclusions/{member_id}", status_code=204, tags=["circles"])
+def include_in_smart(circle_id: str, member_id: str, principal: CurrentUser, db: OrmSession = Depends(get_db)):
+    _own_circle(db, circle_id, principal.user_id)
+    db.execute(delete(models.CircleExclusion).where(models.CircleExclusion.circle_id == circle_id, models.CircleExclusion.member_id == member_id))
+    db.commit()
+
+
+@app.get("/circles/{circle_id}/exclusions", tags=["circles"])
+def smart_exclusions(circle_id: str, principal: CurrentUser, db: OrmSession = Depends(get_db)):
+    _own_circle(db, circle_id, principal.user_id)
+    ids = db.scalars(select(models.CircleExclusion.member_id).where(models.CircleExclusion.circle_id == circle_id)).all()
+    profiles = {p.user_id: p for p in db.scalars(select(models.Profile).where(models.Profile.user_id.in_(ids))).all()} if ids else {}
+    return {"items": [{"user_id": i, "display_name": profiles[i].display_name if i in profiles else None, "handle": profiles[i].handle if i in profiles else None} for i in ids]}
+
+
+@app.post("/circles/smart-preview", tags=["circles"])
+def smart_preview(rule: CircleRule, principal: CurrentUser, db: OrmSession = Depends(get_db)):
+    """Who a smart rule would reach right now, before it is saved. Only the
+    owner's own relationships and what members state on their own profile."""
+    probe = models.Circle(id="preview", owner_id=principal.user_id, name="preview", kind="smart", rule=_stored_rule(rule))
+    members = _circle_members(db, probe)
+    profiles = {p.user_id: p for p in db.scalars(select(models.Profile).where(models.Profile.user_id.in_([m for m, _ in members]))).all()} if members else {}
+    return {
+        "count": len(members),
+        "items": [
+            {"user_id": m, "display_name": profiles[m].display_name if m in profiles else None, "handle": profiles[m].handle if m in profiles else None, "city": profiles[m].city if m in profiles else None}
+            for m, _ in members[:200]
+        ],
+    }
+
+
+def _resolve_audience(db: OrmSession, owner_id: str, circle_ids: list[str], include_ids: list[str], exclude_ids: list[str]) -> dict:
+    """Who a post with this audience reaches right now: everybody in the chosen
+    circles (once each), plus the people added by name, minus the people left
+    out - an exclusion wins over any circle. Blocks and the age rule apply to
+    the people added by name exactly as to circle members."""
+    circles = [c for c in db.scalars(select(models.Circle).where(models.Circle.id.in_(circle_ids), models.Circle.owner_id == owner_id)).all()]
+    if len(circles) != len(set(circle_ids)):
+        raise HTTPException(status_code=404, detail="Circle not found")
+    eligible: dict[str, list[str]] = {}
+    for circle in circles:
+        for member_id, active in _circle_members(db, circle):
+            if active:
+                eligible.setdefault(member_id, []).append(circle.id)
+    blocked = _blocked_with(db, owner_id)
+    connections = _connections_of(db, owner_id)
+    refused = []
+    for member_id in dict.fromkeys(include_ids):
+        if member_id == owner_id:
+            continue
+        try:
+            _ensure_profile(db, member_id)
+        except HTTPException:
+            refused.append(member_id)
+            continue
+        if member_id in blocked or not _reachable(owner_id, member_id, member_id in connections):
+            refused.append(member_id)
+            continue
+        eligible.setdefault(member_id, []).append("person")
+    excluded = [m for m in dict.fromkeys(exclude_ids) if m in eligible]
+    for member_id in exclude_ids:
+        eligible.pop(member_id, None)
+    return {
+        "ids": sorted(eligible),
+        "excluded": excluded,
+        "refused": refused,
+        "smart": any(c.kind == "smart" for c in circles),
+        "archived": [c.id for c in circles if c.archived_at is not None],
+        "names": {c.id: c.name for c in circles},
+    }
+
+
+class AudienceIn(BaseModel):
+    circle_ids: list[str] = Field(default_factory=list, max_length=20)
+    include_ids: list[str] = Field(default_factory=list, max_length=500)
+    exclude_ids: list[str] = Field(default_factory=list, max_length=500)
+
+
+@app.post("/circles/audience-preview", tags=["circles"])
+def audience_preview(payload: AudienceIn, principal: CurrentUser, q: str | None = None, db: OrmSession = Depends(get_db)):
+    """Who would see a post with this audience: the count, the people (searchable),
+    who is left out, and whether it can change later. For the author only."""
+    out = _resolve_audience(db, principal.user_id, payload.circle_ids, payload.include_ids, payload.exclude_ids)
+    ids = out["ids"]
+    profiles = {p.user_id: p for p in db.scalars(select(models.Profile).where(models.Profile.user_id.in_(ids + out["excluded"] + out["refused"]))).all()} if ids or out["excluded"] or out["refused"] else {}
+
+    def person(i: str) -> dict:
+        p = profiles.get(i)
+        return {"user_id": i, "display_name": p.display_name if p else None, "handle": p.handle if p else None, "avatar_url": p.avatar_url if p else None}
+
+    people = [person(i) for i in ids]
+    if q and q.strip():
+        needle = q.strip().casefold()
+        people = [x for x in people if needle in (x["display_name"] or "").casefold() or needle in (x["handle"] or "").casefold()]
+    return {
+        "count": len(ids),
+        "people": people[:300],
+        "excluded": [person(i) for i in out["excluded"]],
+        "refused": [person(i) for i in out["refused"]],
+        "includes_smart_circle": out["smart"],
+        "archived_circles": out["archived"],
+    }
+
+
+class ResolveIn(AudienceIn):
+    owner_id: str
+
+
+@app.post("/internal/audience/resolve", tags=["internal"])
+def internal_resolve(payload: ResolveIn, db: OrmSession = Depends(get_db)):
+    """social-service: who an audience reaches now (snapshots, previews, checks)."""
+    out = _resolve_audience(db, payload.owner_id, payload.circle_ids, payload.include_ids, payload.exclude_ids)
+    return {k: out[k] for k in ("ids", "excluded", "refused", "smart", "archived", "names")}
+
+
+class CirclesUsedIn(BaseModel):
+    owner_id: str
+    circle_ids: list[str] = Field(default_factory=list, max_length=20)
+
+
+@app.post("/internal/circles/check", tags=["internal"])
+def internal_circles_check(payload: CirclesUsedIn, db: OrmSession = Depends(get_db)):
+    """Whether these are the author's own, usable circles - and mark them used.
+    An archived circle is not offered for new posts."""
+    rows = db.scalars(select(models.Circle).where(models.Circle.id.in_(payload.circle_ids))).all()
+    if len(rows) != len(set(payload.circle_ids)) or any(r.owner_id != payload.owner_id for r in rows):
+        raise HTTPException(status_code=404, detail="Circle not found")
+    if any(r.archived_at for r in rows):
+        raise HTTPException(status_code=409, detail="An archived circle cannot be chosen for a new post. Restore it first.")
+    now = datetime.now(timezone.utc)
+    for r in rows:
+        r.last_used_at = now
+    db.commit()
+    return {"ok": True, "names": {r.id: r.name for r in rows}}
+
+
+@app.get("/internal/circles/names", tags=["internal"])
+def internal_circle_names(owner_id: str, ids: str, db: OrmSession = Depends(get_db)):
+    """Names of an owner's circles, for that owner's own screens only."""
+    wanted = [i for i in ids.split(",") if i][:50]
+    rows = db.scalars(select(models.Circle).where(models.Circle.id.in_(wanted), models.Circle.owner_id == owner_id)).all()
+    return {"names": {r.id: r.name for r in rows}}
+
+
 @app.get("/internal/circles/{circle_id}/owner", tags=["internal"])
 def circle_owner(circle_id: str, db: OrmSession = Depends(get_db)):
     """Who owns a circle — so a post can only be shared to its author's own.
@@ -1121,6 +1412,10 @@ def viewer_audience(user_id: str, db: OrmSession = Depends(get_db)):
     return {
         "following": sorted(_following_of(db, user_id) - blocked),
         "circles": sorted(_circles_reaching(db, user_id)),
+        # Connections-only posts, and who has a block with this member (a post
+        # kept for its audience at publication still closes on a block).
+        "connections": sorted(_connections_of(db, user_id) - blocked),
+        "blocked": sorted(blocked),
     }
 
 

@@ -1707,6 +1707,11 @@ class RenderShortIn(BaseModel):
     text: str = Field(default="", max_length=20000)
     image_ids: list[str] = Field(default_factory=list, max_length=10)
     byline: str | None = Field(default=None, max_length=120)
+    # The post's language: the narration reads it in that language.
+    lang: str | None = Field(default=None, max_length=5)
+    # Read the cards aloud. Rendering fails, with the reason, rather than
+    # quietly returning a silent video when it cannot.
+    narrate: bool = True
 
 
 # One encode at a time: it is the heaviest thing this service does, and the
@@ -1717,11 +1722,16 @@ _render_lock = threading.Lock()
 @app.get("/internal/media/render-capabilities", tags=["internal"])
 def render_capabilities():
     ok, reason = shortvideo.available()
+    narration, why = shortvideo.narration_available("en")
     return {
         "short_video": {
             "available": ok,
             "reason": reason,
             "unsupported_langs": list(shortvideo.UNSUPPORTED_LANGS),
+            # Whether videos are read aloud here, and in which languages.
+            "narration": narration,
+            "narration_reason": why,
+            "narration_langs": sorted(shortvideo.VOICES) if narration else [],
         }
     }
 
@@ -1772,7 +1782,9 @@ def render_short(payload: RenderShortIn, db: OrmSession = Depends(get_db)):
     )
     if existing is not None and existing.storage_path and os.path.exists(existing.storage_path):
         info = shortvideo.probe(Path(existing.storage_path))
-        return {"asset_id": existing.id, "url": existing.url, **info, "reused": True}
+        # A file made before narration existed is not handed back as narrated.
+        if info.get("narrated") or not payload.narrate:
+            return {"asset_id": existing.id, "url": existing.url, **info, "reused": True}
 
     pictures: list[models.Asset] = []
     for asset_id in dict.fromkeys(payload.image_ids):
@@ -1796,7 +1808,10 @@ def render_short(payload: RenderShortIn, db: OrmSession = Depends(get_db)):
     try:
         with _render_lock:
             sources = [src for src in (_picture_source(a, workdir) for a in pictures) if src]
-            info = shortvideo.render(shortvideo.scenes_from_text(payload.text), sources, destination, workdir, byline=payload.byline)
+            info = shortvideo.render(
+                shortvideo.scenes_from_text(payload.text), sources, destination, workdir,
+                byline=payload.byline, lang=payload.lang, narrate=payload.narrate,
+            )
     except shortvideo.RenderError as exc:
         destination.unlink(missing_ok=True)
         raise HTTPException(status_code=422, detail=str(exc)) from exc

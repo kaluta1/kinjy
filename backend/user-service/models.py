@@ -85,6 +85,29 @@ class Circle(Base):
     rule: Mapped[str | None] = mapped_column(Text)
     members_count: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    # 27/10. All private to the owner, like the name.
+    description: Mapped[str | None] = mapped_column(Text)
+    icon: Mapped[str | None] = mapped_column(String(30))
+    # Archived: kept, and still the audience of what was shared with it, but
+    # no longer offered for new posts.
+    archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # When a post last went to it, for "sort by recent use".
+    last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class CircleExclusion(Base):
+    """Somebody a smart circle's rule would include, whom its owner left out."""
+
+    __tablename__ = "circle_exclusions"
+    __table_args__ = (
+        UniqueConstraint("circle_id", "member_id", name="uq_circle_exclusion"),
+        {"schema": SCHEMA},
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    circle_id: Mapped[str] = mapped_column(ForeignKey(f"{SCHEMA}.circles.id", ondelete="CASCADE"), index=True)
+    member_id: Mapped[str] = mapped_column(String(40), index=True)
+    added_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
 
 class CircleMember(Base):

@@ -69,7 +69,11 @@ export default function ReferralWatch() {
       .then((link) => {
         // Only an invitation link is an invitation; a neutral one leaves
         // whatever is already held exactly as it was.
-        if (!cancelled && link.invitation) rememberLink(link.token, link.destination, link.inviter?.display_name ?? null)
+        if (cancelled || !link.invitation) return
+        rememberLink(link.token, link.destination, link.inviter?.display_name ?? null)
+        // And held by the server for the attribution window, so the sign-up
+        // form cannot drop it. Best-effort: the browser copy still works.
+        void kaluta.auth.captureInvitation({ link: link.token }).catch(() => undefined)
       })
       .catch((err: unknown) => {
         // 404 is an answer: not one of ours. Anything else (offline, a 5xx)
@@ -95,10 +99,16 @@ export default function ReferralWatch() {
     let cancelled = false
     void (async () => {
       try {
-        const inviter = await kaluta.auth.referral(candidate)
-        if (cancelled) return
-        rememberRef(inviter.code)
-        rememberInviter(inviter.display_name)
+        // Checked and held by the server (an HttpOnly cookie for the
+        // attribution window), which is what applies it at sign-up whatever
+        // the form says. A signed-in member is not captured: their sponsor
+        // was settled when they joined.
+        const held = await kaluta.auth.captureInvitation({ code: candidate })
+        if (cancelled || held.reason === 'signed_in') return
+        // Under the "first link wins" policy an earlier invitation is kept and
+        // this one is not; the browser copy follows what the server held.
+        if (held.captured) rememberRef(candidate)
+        if (held.inviter) rememberInviter(held.inviter.display_name)
       } catch (err) {
         if (cancelled) return
         // Two failures that look alike and are not, which is the distinction

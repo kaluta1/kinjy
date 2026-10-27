@@ -34,6 +34,7 @@ const PostPage = lazy(() => import('./pages/PostPage'))
 const Dashboard = lazy(() => import('./pages/Dashboard'))
 const SocialHub = lazy(() => import('./pages/SocialHub'))
 const Circles = lazy(() => import('./pages/app/Circles'))
+const AudienceSettings = lazy(() => import('./pages/app/AudienceSettings'))
 const Connections = lazy(() => import('./pages/app/Connections'))
 const Communities = lazy(() => import('./pages/app/Communities'))
 const Forums = lazy(() => import('./pages/app/Forums'))
@@ -175,6 +176,7 @@ export default function App() {
           <Route path="/hub" element={<SocialHub />} />
           {/* Universal Navigation destinations, per the blueprint */}
           <Route path="/circles" element={<Circles />} />
+          <Route path="/settings/audiences" element={<AudienceSettings />} />
           <Route path="/connections" element={<Connections />} />
           <Route path="/communities" element={<Communities />} />
           {/* One community, by slug. The directory and the community are the

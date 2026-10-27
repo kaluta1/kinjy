@@ -321,7 +321,17 @@ export function OneToManyPanel({ postId, lang }: { postId: string; lang: string 
                     <RotateCcw size={12} aria-hidden="true" /> Make again from the edited post
                   </button>
                 )}
+                {!video.stale && video.narrated === false && (
+                  // Made before narration existed: silent. Remade only when the author asks.
+                  <button type="button" disabled={busy} onClick={() => retry(video)}
+                    className="inline-flex items-center gap-1 rounded-full bg-gold/15 px-2.5 py-1 text-xs font-semibold text-gold-soft disabled:opacity-40">
+                    <RotateCcw size={12} aria-hidden="true" /> Make again with narration
+                  </button>
+                )}
               </div>
+              {video.narrated === false && (
+                <p className="text-xs text-warning">This video was made before narration was added, so it has no voice.</p>
+              )}
               <p className="text-xs text-text-low">Only you can play this. It is yours to post or share as you choose.</p>
             </>
           )}

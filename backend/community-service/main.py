@@ -2645,6 +2645,19 @@ def member_communities(user_id: str, db: OrmSession = Depends(get_db)):
     return {"communities": list(ids)}
 
 
+class CommunityNamesIn(BaseModel):
+    ids: list[str] = Field(default_factory=list, max_length=200)
+
+
+@app.post("/internal/communities/names", tags=["internal"])
+def community_names(payload: CommunityNamesIn, db: OrmSession = Depends(get_db)):
+    """Name and slug of several communities, for labelling posts already
+    allowed to their reader. A community that no longer exists is absent."""
+    ids = [i for i in dict.fromkeys(payload.ids) if i.startswith("cmy_")]
+    rows = db.scalars(select(models.Community).where(models.Community.id.in_(ids))).all() if ids else []
+    return {"items": {c.id: {"name": c.name, "slug": c.slug} for c in rows}}
+
+
 @app.get("/internal/communities/{community_id}", tags=["internal"])
 def community_summary(community_id: str, db: OrmSession = Depends(get_db)):
     """What another service needs to judge access: the kind, and who runs it.

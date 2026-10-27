@@ -126,6 +126,18 @@ REFERRAL_POOL_ENTRY_USD = _dec("REFERRAL_POOL_ENTRY_USD", "100")
 REFERRAL_POOL_CAP = _int("REFERRAL_POOL_CAP", 10000)
 REFERRAL_POOL_MAX_UNITS_PER_PURCHASE = _int("REFERRAL_POOL_MAX_UNITS_PER_PURCHASE", 100)
 
+# Invitation attribution: how long a followed invitation link is held for the
+# visitor (an HttpOnly cookie naming a server-side capture), and which link
+# wins when several arrive in that window. "last" keeps the rule Kinjy has
+# always applied in the browser (the newest invitation link wins); "first"
+# keeps the first one for the whole window. Either way the invitee cannot
+# drop it from the sign-up form, and an existing member's sponsor never moves.
+REFERRAL_ATTRIBUTION_DAYS = _int("REFERRAL_ATTRIBUTION_DAYS", 30)
+REFERRAL_ATTRIBUTION_POLICY = _str("REFERRAL_ATTRIBUTION_POLICY", "last")
+# Set to ".kinjy.com" to share the invitation across Kinjy subdomains; empty
+# keeps the cookie on the exact host that set it.
+REFERRAL_COOKIE_DOMAIN = _str("REFERRAL_COOKIE_DOMAIN", "")
+
 # --- Marketplace payments ---------------------------------------------------
 # A buyer's payment is held (with Kaluta Pay, in Kinjy's escrow there) until the
 # purchase is final: the buyer's confirmation, or an ebook's first successful

@@ -1,9 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
-import { Link } from 'react-router'
 import {
   FileText,
   Globe2,
+  Handshake,
   Image as ImageIcon,
   Loader2,
   Lock,
@@ -20,6 +20,8 @@ import { useAuth } from '@/hooks/useAuth'
 import { useMyProfile } from '@/hooks/useMyProfile'
 import { useAppTheme } from '@/components/appdemo/theme'
 import MemberAvatar from './MemberAvatar'
+import AudiencePicker from './AudiencePicker'
+import { audienceIsEmpty, EMPTY_AUDIENCE, type AudienceDraft } from '@/lib/audience'
 import {
   ApiError,
   kaluta,
@@ -75,7 +77,9 @@ const PROVENANCE = [
 const VISIBILITY = [
   { id: 'public', label: 'Anyone', icon: Globe2 },
   { id: 'followers', label: 'Followers', icon: Users },
-  { id: 'circle', label: 'A circle', icon: Lock },
+  // People you are connected with, both ways.
+  { id: 'connections', label: 'Connections', icon: Handshake },
+  { id: 'circle', label: 'Circles & people', icon: Lock },
   // Visible to the author alone: a note, a draft to come back to, a memory.
   { id: 'private', label: 'Only me', icon: UserRound },
 ] as const
@@ -147,6 +151,7 @@ export default function Composer({
   collapsed = false,
   openSignal = 0,
   community,
+  shareWithCircle,
 }: {
   onPosted: (post: Post) => void
   collapsed?: boolean
@@ -167,6 +172,8 @@ export default function Composer({
     /** Whether this member's posts wait for a moderator. */
     requiresApproval?: boolean
   }
+  /** Open straight onto a post for this circle ("Share a post with this circle"). */
+  shareWithCircle?: string | null
 }) {
   const { i18n } = useTranslation()
   const { user } = useAuth()
@@ -192,7 +199,7 @@ export default function Composer({
   // A picture still uploading inside the article: posting now would lose it.
   const [articleUploading, setArticleUploading] = useState(false)
   const [visibility, setVisibility] = useState<string>(community ? 'community' : 'public')
-  const [circleId, setCircleId] = useState('')
+  const [audience, setAudience] = useState<AudienceDraft>(EMPTY_AUDIENCE)
   const [extras, setExtras] = useState<OneToManyTarget[]>([])
   const [oneToMany, setOneToMany] = useState<OneToManyCapabilities | null>(null)
   const [provenance, setProvenance] = useState<string>('original')
@@ -262,9 +269,18 @@ export default function Composer({
   // something to report. Showing that as an error would misrepresent it.
   const [note, setNote] = useState<string | null>(null)
 
-  const circles = useApi(() => kaluta.circles.list(), [])
+  // Recently used first: the circle you post to most is the one to find fastest.
+  const circles = useApi(() => kaluta.circles.list({ sort: 'recent', archived: false }), [])
   // A circle made on the Circles page is offered here without a reload.
   useEffect(() => onChange('circles', circles.reload), [circles.reload])
+
+  // Arriving from a circle's page: open on a post for that circle alone.
+  useEffect(() => {
+    if (!shareWithCircle || community) return
+    setVisibility('circle')
+    setAudience({ ...EMPTY_AUDIENCE, circleIds: [shareWithCircle] })
+    setOpen(true)
+  }, [shareWithCircle, community])
 
   // In a community the button has to name the community. Left to the audience
   // state it read "Post to Anyone" on a post going to one group, which is both
@@ -272,12 +288,16 @@ export default function Composer({
   const audienceLabel = community
     ? community.name
     : visibility === 'circle'
-      ? (circles.data ?? []).find((c) => c.id === circleId)?.name ?? 'a circle'
+      ? audience.circleIds.length + audience.include.length === 1 && audience.circleIds.length === 1
+        ? (circles.data ?? []).find((c) => c.id === audience.circleIds[0])?.name ?? 'a circle'
+        : 'your chosen people'
       : visibility === 'followers'
         ? 'Followers'
-        : visibility === 'private'
-          ? 'Only me'
-          : 'Anyone'
+        : visibility === 'connections'
+          ? 'Connections'
+          : visibility === 'private'
+            ? 'Only me'
+            : 'Anyone'
 
   // Tags from the body plus anything typed in the topics field, so the chips
   // show everything the post will actually carry.
@@ -349,6 +369,8 @@ export default function Composer({
     setShowDetails(false)
     setScheduleOn(false)
     setScheduleAt('')
+    // Who saw the last post is not a default for the next one.
+    setAudience(EMPTY_AUDIENCE)
     setError(null)
     setNote(null)
   }
@@ -361,8 +383,8 @@ export default function Composer({
   const submit = async (event: React.FormEvent) => {
     event.preventDefault()
     if (!canPost) return
-    if (!community && visibility === 'circle' && !circleId) {
-      setError('Pick which circle this goes to.')
+    if (!community && visibility === 'circle' && audienceIsEmpty(audience)) {
+      setError('Pick at least one circle or person.')
       return
     }
     if (kind === 'article' && !headline.trim()) {
@@ -399,7 +421,15 @@ export default function Composer({
         community_id: community?.id,
         space: community && space ? space : undefined,
         publish_at: publishAt,
-        circle_id: !community && visibility === 'circle' ? circleId : undefined,
+        ...(!community && visibility === 'circle'
+          ? {
+              circle_ids: audience.circleIds,
+              include_ids: audience.include.map((p) => p.user_id),
+              exclude_ids: audience.exclude.map((p) => p.user_id),
+              audience_mode: audience.mode,
+              notify_audience: audience.notify,
+            }
+          : {}),
         provenance,
         mature,
         lang,
@@ -578,38 +608,7 @@ export default function Composer({
             </div>
 
             {!community && visibility === 'circle' && (
-              <div className="mt-3">
-                {(circles.data ?? []).length === 0 ? (
-                  <p className="rounded-card-sm border border-amber-400/25 bg-amber-500/10 px-3 py-2 text-xs text-amber-200">
-                    You have no circles yet —{' '}
-                    <Link to="/circles" className="font-semibold underline underline-offset-2">
-                      create one
-                    </Link>{' '}
-                    before posting to it.
-                  </p>
-                ) : (
-                  <select
-                    value={circleId}
-                    onChange={(e) => setCircleId(e.target.value)}
-                    aria-label="Circle"
-                    className={field}
-                  >
-                    <option value="">Choose a circle…</option>
-                    {(circles.data ?? []).map((c) => (
-                      <option key={c.id} value={c.id}>
-                        {c.name} · {c.members_count} member{c.members_count === 1 ? '' : 's'}
-                      </option>
-                    ))}
-                  </select>
-                )}
-                {/* Said before posting, not discovered afterwards: a circle that
-                    reaches nobody makes the post private to its author. */}
-                {(circles.data ?? []).find((c) => c.id === circleId)?.members_count === 0 && (
-                  <p className="mt-2 text-xs text-warning">
-                    Nobody is in this circle yet — only you will see this post.
-                  </p>
-                )}
-              </div>
+              <AudiencePicker circles={circles.data} value={audience} onChange={setAudience} scheduled={scheduleOn} />
             )}
 
             {kind === 'article' && (

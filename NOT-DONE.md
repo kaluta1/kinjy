@@ -1609,3 +1609,94 @@ Not done / to decide:
   step beyond that confirmation.
 - **Pre-existing, unrelated**: `e2e_discovery_forums.py` fails on community
   suggestions (top 10 only, depends on local data volume).
+
+## Circles: several circles per post, people added or left out, recipient controls (27/10)
+
+Done: a post can go to one or more circles plus people picked by name, minus
+people left out (an exclusion always wins); a new "Connections" audience; two
+audience modes, "follow my circles" (live, which is how every existing circle
+post behaves and keeps behaving) and "only the people in them now" (fixed at
+publication, or when a scheduled post publishes); the author may tell the
+audience ("shared a post with you", never a circle name); a preview of who a
+selection reaches; the author's Audience dialog on each post (who can see it
+now, leave someone out, change it, with a confirmation before anybody new can
+see it; people who lose access lose its notifications); circles with a
+description and an icon, sorting, archive/restore, duplicate, bulk add/remove,
+member search, smart-circle preview and exclusions, the posts shared with a
+circle, "Share a post with this circle"; for recipients, mute / hide / opt out
+(future, or past too) per private audience under an anonymous label, all
+reversible in Settings > Private audiences (/settings/audiences); mentions in
+a non-public post reach only people who can see it, without an excerpt.
+Existing posts: all kept `live`, and the 52 circle posts were copied into the
+new post_circles table, so nobody gains or loses access.
+
+Not done / to decide:
+- **Other content types** (events, family tree, marketplace, forums, group
+  chats) keep their own permission systems; circles apply to posts.
+- **The opt-out count** shown to an owner appears only from 3 people, so it
+  cannot point at one person; below that nothing is shown.
+- **Previews** list the first 300 people (the count is exact); a search box
+  finds anyone beyond.
+- **Reshare** stays disabled for non-public posts (as before); a screenshot
+  cannot be prevented, which the composer says.
+- **Already-read content**: removing someone stops further access and
+  withdraws notifications; what they already read or copied cannot be taken
+  back (said in the Audience dialog).
+- **Pre-existing, unrelated**: a React "two children with the same key 52"
+  warning on /hub with a large local feed (present before this change);
+  `e2e_community_posts.py` expects 404 where the service answers 403 since
+  79b6cd2.
+
+## Invitation attribution held by the server (27/10)
+
+Done: an invitation link followed while signed out is checked by auth-service
+and held for REFERRAL_ATTRIBUTION_DAYS (30) in an HttpOnly, signed cookie
+naming a server-side capture; registration applies it whatever the code field
+says (clearing or changing the field no longer drops the inviter), and the
+sign-up page says "Your account will be linked to X, who invited you" instead
+of offering an optional box. Only active members can be captured or typed;
+signed-in members are never captured; the capture is spent at registration;
+every registration writes referral_attributions (method, inviter, capture and
+expiry times); administrators correct a sponsor through
+POST /admin/referrals/{user}/sponsor with a reason, audited in
+sponsor_corrections. The gateway no longer keeps a cookie jar (it would have
+replayed one visitor's cookie on everyone's requests).
+
+Not done / to decide:
+- **Policy when several links arrive**: kept Kinjy's existing rule, the
+  newest invitation link wins (REFERRAL_ATTRIBUTION_POLICY=last). Set it to
+  "first" to keep the first link for the 30 days.
+- **Cookie consent**: Kinjy has no consent banner or consent setting. The
+  invitation cookie is first-party, holds only a signed reference (no code,
+  name or visitor data) and is used for nothing but attribution; whether it
+  needs consent in a given country is a legal call. Deleting cookies removes
+  the invitation and nothing recreates it.
+- **Other domains**: Kinjy signs people up on kinjy.com only (kalutagroup.com
+  and kalutakyc.com are other products, no Kinjy sign-up). Set
+  REFERRAL_COOKIE_DOMAIN=.kinjy.com if sign-up ever moves to a subdomain; no
+  cross-domain hand-off was built because there is no second sign-up domain.
+  There is no Kinjy mobile app with its own sign-up.
+- **Admin screen**: the correction is an admin API; there is no button for it
+  in the admin dashboard yet.
+- **Already-registered members** who lost an inviter before this fix are not
+  re-attributed automatically: an administrator can correct them one by one.
+
+## Short videos read aloud; community name on posts (27/10)
+
+Done: One-to-Many short videos are narrated (espeak-ng, local, in the post's
+language: English, French, Swahili); each title card stays up as long as it
+is read; the file is checked for an audible AAC track and refused otherwise;
+a language with no voice is not offered, with the reason. Old silent videos
+are marked in the "Other formats" panel with "Make again with narration".
+Community posts show their community's name, linked to it.
+
+Not done / to decide:
+- **Voice quality**: espeak-ng is clear but robotic. A natural voice needs a
+  neural engine (local, e.g. Piper with downloaded voices, or a paid vendor):
+  a choice of quality, cost and where the text goes.
+- **Arabic and Chinese** videos stay unavailable (title cards could not be
+  drawn before either).
+- **Existing silent videos** are not remade automatically: the author clicks
+  "Make again with narration" (local engine, no vendor cost).
+- **Renamed communities** show the new name within two minutes (name cached
+  briefly in social-service).

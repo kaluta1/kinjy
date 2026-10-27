@@ -170,6 +170,14 @@ def capabilities(source_lang: str | None) -> dict:
             out["short_video"]["reason"] = "Video rendering is not set up on this server yet."
         elif source_lang in (media.get("unsupported_langs") or []):
             out["short_video"]["reason"] = "Title cards cannot be drawn in this language yet."
+        elif not media.get("narration"):
+            # Not offered as a silent video: a short video is a narrated one.
+            out["short_video"]["reason"] = (
+                "Voice narration is not set up on this server yet, so videos cannot be made."
+                if "narration" in media else "The video renderer needs updating before it can narrate videos."
+            )
+        elif (source_lang or "en") not in (media.get("narration_langs") or []):
+            out["short_video"]["reason"] = "Voice narration is not available in this language yet."
         else:
             out["short_video"] = {"available": True, "reason": None}
     except Exception as exc:
@@ -280,6 +288,9 @@ def produce_short(source: dict, output: models.PublishingOutput, revision: str) 
                 "text": text[:20000],
                 "image_ids": pictures[:10],
                 "byline": (source.get("author_name") or "")[:120] or None,
+                # Read aloud in the post's own language.
+                "lang": source.get("lang") or output.lang,
+                "narrate": True,
             },
             timeout=300,
         )
@@ -292,12 +303,18 @@ def produce_short(source: dict, output: models.PublishingOutput, revision: str) 
     data = response.json()
     if not data.get("asset_id") or not data.get("duration_s"):
         raise Retryable("The renderer returned no video.")
+    if not data.get("narrated"):
+        # Checked here too: a video without its voice is not the output asked for.
+        discard_video(source["author_id"], data["asset_id"])
+        raise Permanent("The video came back without narration. It was not kept.")
     return {
         "media_id": data["asset_id"],
         "media_url": data["url"],
         "duration_s": data["duration_s"],
         "provenance": "ai_assisted",
-        "provider": "kinjy-render",
+        # "+voice": read aloud. Videos made before narration existed say
+        # "kinjy-render" alone, which is how the panel tells them apart.
+        "provider": "kinjy-render+voice",
     }
 
 
@@ -536,6 +553,8 @@ def output_view(output: models.PublishingOutput, viewer: str, current_revision: 
         "updated_at": (output.updated_at or output.created_at).isoformat() if (output.updated_at or output.created_at) else None,
         "completed_at": output.completed_at.isoformat() if output.completed_at else None,
         "stale": bool(status == "completed" and output.source_revision and current_revision and output.source_revision != current_revision),
+        # A short video made before narration existed has no voice track.
+        "narrated": output.target == "short_video" and (output.provider or "").endswith("+voice"),
         "legacy": output.pipeline != "v2",
         "user_edited": bool(output.user_edited),
         "content": None,
