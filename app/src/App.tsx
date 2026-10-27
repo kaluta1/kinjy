@@ -40,6 +40,8 @@ const Forums = lazy(() => import('./pages/app/Forums'))
 const Messages = lazy(() => import('./pages/app/Messages'))
 const Team = lazy(() => import('./pages/app/Team'))
 const JoinGroup = lazy(() => import('./pages/app/JoinGroup'))
+const MessagesInvites = lazy(() => import('./pages/app/MessagesInvites'))
+const MessagesSaved = lazy(() => import('./pages/app/MessagesSaved'))
 const FamilyTreeApp = lazy(() => import('./pages/app/FamilyTree'))
 const Graveyard = lazy(() => import('./pages/app/Graveyard'))
 const MemorialPublic = lazy(() => import('./pages/MemorialPublic'))
@@ -181,6 +183,8 @@ export default function App() {
           <Route path="/forums" element={<Forums />} />
           <Route path="/messages" element={<Messages />} />
           <Route path="/messages/join/:code" element={<JoinGroup />} />
+          <Route path="/messages/invites" element={<MessagesInvites />} />
+          <Route path="/messages/saved" element={<MessagesSaved />} />
           <Route path="/tree" element={gated('familyTreeApp', <FamilyTreeApp />, '/hub')} />
           <Route path="/graveyard" element={<Graveyard />} />
           {/* Where a memorial's QR code leads. Public: whoever scans a headstone

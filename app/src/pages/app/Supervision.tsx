@@ -20,6 +20,8 @@ const SETTING_LABELS: Record<string, string> = {
   who_can_invite: 'Who can send you invitations',
   who_can_add_family: 'Who can add you to a family tree',
   who_can_add_community: 'Who can add you to a community',
+  who_can_add_group: 'Who can add you to a group chat',
+  who_can_invite_group: 'Who can invite you to a group chat',
   who_can_see_family: 'Who can see your family tree',
   discoverable: 'Appear in search and suggestions',
 }

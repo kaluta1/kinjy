@@ -884,6 +884,9 @@ export interface Privacy {
   who_can_message: string
   who_can_add_family: string
   who_can_add_community: string
+  /** Group chats in Messages: being put straight into one, and being invited. */
+  who_can_add_group?: string
+  who_can_invite_group?: string
   discoverable: boolean
 }
 
@@ -1145,13 +1148,159 @@ export interface PersonBrief {
 }
 
 /** Somebody in a group, with what they may do in it. */
+export type GroupRole = 'owner' | 'admin' | 'moderator' | 'member'
+
 export interface GroupMember {
   user_id: string
-  role: 'owner' | 'admin' | 'member'
+  role: GroupRole
   joined_at: string
   handle: string | null
   display_name: string
   avatar_url: string | null
+  /** The viewer has a block with this member (either side). */
+  blocked?: boolean
+}
+
+/** A member's own notifications for one conversation. */
+export interface ConversationNotifications {
+  level: 'all' | 'mentions' | 'announcements'
+  muted_until: string | null
+  muted_forever: boolean
+  read_receipts: boolean
+}
+
+export interface GroupInviteLink {
+  enabled: boolean
+  expires_at: string | null
+  max_uses: number | null
+  uses: number
+  path?: string | null
+}
+
+export interface GroupPoll {
+  id: string
+  question: string
+  multiple: boolean
+  results: 'always' | 'after_vote' | 'after_close'
+  closes_at: string | null
+  closed: boolean
+  /** Counts are null while the poll's setting keeps them hidden from this member. */
+  options: Array<{ id: number; text: string; votes: number | null }>
+  voters: number | null
+  my_votes: number[]
+  results_visible: boolean
+  can_close: boolean
+}
+
+export interface GroupEvent {
+  id: string
+  title: string
+  description: string | null
+  starts_at: string
+  ends_at: string | null
+  /** Where it happens (IANA zone); the instant is starts_at. */
+  timezone: string
+  location: string | null
+  online_url: string | null
+  cancelled: boolean
+  counts: { going: number; maybe: number; not_going: number }
+  my_response: 'going' | 'maybe' | 'not_going' | null
+  can_manage: boolean
+  message_id?: string
+}
+
+export interface GroupTask {
+  id: string
+  title: string
+  assignee_id: string | null
+  assignee_name: string | null
+  due_at: string | null
+  done: boolean
+  done_at: string | null
+  can_complete: boolean
+  can_edit: boolean
+  message_id?: string
+}
+
+/** A message as lists show it (pins, saved, replies, search). */
+export interface MessageBrief {
+  id: string
+  conversation_id: string
+  sender_id: string
+  kind: string
+  body: string | null
+  encrypted: boolean
+  deleted: boolean
+  media_url?: string | null
+  media_kind?: string | null
+  media_name?: string | null
+  media_type?: string | null
+  media_size?: number | null
+  media_withheld?: boolean
+  created_at: string
+}
+
+export interface GroupInvitation {
+  id: number
+  conversation_id: string
+  title: string | null
+  description: string | null
+  rules: string | null
+  avatar_url: string | null
+  members_count: number
+  invited_by: string | null
+  created_at: string
+}
+
+export interface GroupAuditEntry {
+  id: number
+  action: string
+  summary: string
+  detail: string | null
+  actor_id: string
+  target_id: string | null
+  created_at: string
+}
+
+export interface LinkedGroupChat {
+  id: string
+  title: string | null
+  description: string | null
+  avatar_url: string | null
+  privacy: 'public' | 'private'
+  members_count: number
+  my_state: 'member' | 'pending' | 'none'
+  join_path: string | null
+}
+
+export type ReportReason = 'spam' | 'harassment' | 'hate' | 'violence' | 'sexual' | 'child_safety' | 'scam' | 'other'
+
+export interface MessageReportItem {
+  id: number
+  conversation_id: string
+  conversation_title: string | null
+  conversation_kind: string | null
+  target_kind: 'message' | 'member' | 'group'
+  target_id: string
+  target_name: string | null
+  message: {
+    id?: string
+    sender_id?: string
+    sender_name?: string | null
+    body?: string | null
+    encrypted?: boolean
+    deleted?: boolean
+    media_kind?: string | null
+    created_at?: string
+    gone?: boolean
+  } | null
+  reason: ReportReason
+  note: string | null
+  reporter_name: string | null
+  status: 'open' | 'closed'
+  resolution: string | null
+  created_at: string
+  closed_at: string | null
 }
 
 export interface Conversation {
@@ -1165,8 +1314,23 @@ export interface Conversation {
   cover_url?: string | null
   /** The one room everybody is in. It cannot be left behind by somebody else. */
   is_welcome?: boolean
-  /** What the viewer may do here: owner and admin run it, member does not. */
-  my_role?: 'owner' | 'admin' | 'member'
+  /** What the viewer may do in it: owner and admin run it, a moderator keeps order. */
+  my_role?: GroupRole
+  /** Groups: the rules, shown before joining. */
+  rules?: string | null
+  /** Groups: "admins" is announcement mode - only admins and moderators write. */
+  posting?: 'all' | 'admins'
+  /** Groups: who sees the member list. */
+  members_visible?: 'all' | 'admins'
+  /** Groups: who starts polls. */
+  polls_by?: 'all' | 'admins'
+  /** Groups: the Community this chat is linked to (a pointer; it grants nothing). */
+  community_id?: string | null
+  disappear_after_seconds?: number
+  /** Groups, for the people who run them: the share link's limits. */
+  invite_link?: GroupInviteLink | null
+  /** The viewer's own notification settings for this conversation. */
+  notifications?: ConversationNotifications
   /** Groups: what the share link does. Public lets people in, private asks an admin. */
   privacy?: 'public' | 'private' | null
   /** Groups: whether members added later read the earlier messages. */
@@ -1242,6 +1406,19 @@ export interface Message {
   /** Which one is mine, if any. */
   my_reaction?: string | null
   created_at: string
+  /** Groups: taken down by a moderator (or by Kinjy) rather than deleted by its sender. */
+  removed?: boolean
+  /** Groups: marked as an announcement by an admin. */
+  announcement?: boolean
+  pinned?: boolean
+  /** Bookmarked by the reader. Private to them. */
+  saved?: boolean
+  /** Groups: how many replies it has (the side thread). */
+  reply_count?: number
+  /** The card a message of kind poll, event or task carries. */
+  poll?: GroupPoll
+  event?: GroupEvent
+  task?: GroupTask
 }
 
 export interface Sticker {
@@ -2440,6 +2617,9 @@ export const kaluta = {
   },
 
   people: {
+    /** Block somebody: no messages, invitations or group additions either way. */
+    block: (userId: string) => api.post<{ blocked: boolean }>(`/users/${userId}/block`),
+    unblock: (userId: string) => api.delete<void>(`/users/${userId}/block`),
     /**
      * Find someone to message. Honours their `discoverable` setting, so a
      * member who opted out simply does not appear.
@@ -2702,7 +2882,7 @@ export const kaluta = {
      * English, so it cannot tell Swahili from French. Passing the author's
      * declared language avoids a confidently wrong guess.
      */
-    translate: (text: string, target_lang: string, source_lang?: string) =>
+    translate: (text: string, target_lang: string, source_lang?: string, requireLive = false) =>
       api.post<{
         translated: string
         source_lang: string
@@ -2710,7 +2890,12 @@ export const kaluta = {
         mock?: boolean
         cached: boolean
         noop?: boolean
-      }>('/ai/translate', { text, target_lang, source_lang }, { auth: false }),
+      }>(
+        '/ai/translate',
+        // require_live: answer 503 rather than a placeholder when no model is configured.
+        { text, target_lang, source_lang, ...(requireLive ? { require_live: true } : {}) },
+        { auth: false },
+      ),
   },
 
   social: {
@@ -2759,6 +2944,16 @@ export const kaluta = {
   },
 
   communities: {
+    /**
+     * Group chats (in Messages) linked to a community. Shown to whoever may
+     * enter the community; the link grants nothing either way.
+     */
+    groupChats: (handle: string) =>
+      api.get<{ items: LinkedGroupChat[]; can_manage: boolean }>(`/communities/${handle}/group-chats`),
+    linkGroupChat: (handle: string, conversationId: string) =>
+      api.post<{ linked: boolean }>(`/communities/${handle}/group-chats`, { conversation_id: conversationId }),
+    unlinkGroupChat: (handle: string, conversationId: string) =>
+      api.delete<{ linked: boolean }>(`/communities/${handle}/group-chats/${conversationId}`),
     /**
      * One community. A secret one answers 404 unless you are a member, or
      * unless `invite` is the code a member's share link carries.
@@ -3152,13 +3347,27 @@ export const kaluta = {
         // an encrypted conversation, and no key exchange is implemented yet.
         encrypted: false,
       }),
-    /** A named room. Groups are never end to end: there is no group key. */
-    createGroup: (input: { title: string; description?: string; participantIds: string[] }) =>
-      api.post<{ id: string; encrypted: boolean }>('/conversations', {
+    /**
+     * A named room. Groups are never end to end: there is no group key.
+     * People who only accept invitations from the creator are invited, not
+     * added (`invited`); anybody who accepts neither makes it fail.
+     */
+    createGroup: (input: {
+      title: string
+      description?: string
+      rules?: string
+      participantIds: string[]
+      avatarAssetId?: string | null
+      coverAssetId?: string | null
+    }) =>
+      api.post<{ id: string; encrypted: boolean; invited?: string[] }>('/conversations', {
         participant_ids: input.participantIds,
         kind: 'group',
         title: input.title,
         description: input.description,
+        rules: input.rules,
+        avatar_asset_id: input.avatarAssetId || undefined,
+        cover_asset_id: input.coverAssetId || undefined,
         encrypted: false,
       }),
     /**
@@ -3168,9 +3377,15 @@ export const kaluta = {
      * first, so the first page is the part anybody actually reads.
      */
     participants: (conversationId: string, offset = 0) =>
-      api.get<{ total: number; items: GroupMember[]; offset: number; has_more: boolean }>(
-        `/conversations/${conversationId}/participants?offset=${offset}`,
-      ),
+      api.get<{
+        total: number
+        items: GroupMember[]
+        offset: number
+        has_more: boolean
+        /** The group's real size, and whether the list is only the people who run it. */
+        members_count?: number
+        limited?: boolean
+      }>(`/conversations/${conversationId}/participants?offset=${offset}`),
     /**
      * Rename a group, say what it is for, or change its photo and banner.
      * Admins only. An image is applied by the asset id the upload returned;
@@ -3181,6 +3396,7 @@ export const kaluta = {
       input: {
         title?: string
         description?: string
+        rules?: string
         avatar_asset_id?: string | null
         cover_asset_id?: string | null
       },
@@ -3191,9 +3407,11 @@ export const kaluta = {
         description: string | null
         avatar_url: string | null
         cover_url: string | null
+        rules?: string | null
       }>(`/conversations/${conversationId}`, input),
+    /** Adds whoever allows it; invites whoever only accepts invitations. */
     addMembers: (conversationId: string, userIds: string[]) =>
-      api.post<{ added: string[] }>(`/conversations/${conversationId}/participants`, {
+      api.post<{ added: string[]; invited?: string[] }>(`/conversations/${conversationId}/participants`, {
         user_ids: userIds,
       }),
     removeMember: (conversationId: string, userId: string) =>
@@ -3223,6 +3441,9 @@ export const kaluta = {
         privacy: 'public' | 'private'
         members_count: number
         my_state: 'member' | 'pending' | 'none'
+        rules?: string | null
+        /** Why the link cannot be used now (off, expired, used up), or null. */
+        unavailable?: string | null
       }>(`/conversations/join/${encodeURIComponent(code)}`),
     joinByLink: (code: string) =>
       api.post<{ status: 'member' | 'pending'; conversation_id: string | null }>(
@@ -3238,7 +3459,7 @@ export const kaluta = {
     pin: (conversationId: string) =>
       api.post<{ pinned: boolean; already?: boolean; count?: number }>(`/conversations/${conversationId}/pin`),
     unpin: (conversationId: string) => api.delete<{ pinned: boolean }>(`/conversations/${conversationId}/pin`),
-    setRole: (conversationId: string, userId: string, role: 'admin' | 'member') =>
+    setRole: (conversationId: string, userId: string, role: 'admin' | 'moderator' | 'member') =>
       api.post<{ user_id: string; role: string }>(
         `/conversations/${conversationId}/participants/${userId}/role`,
         { role },
@@ -3252,7 +3473,13 @@ export const kaluta = {
       if (options.after) query.set('after', options.after)
       if (options.before) query.set('before', options.before)
       const qs = query.toString()
-      return api.get<{ items: Message[]; profiles?: Record<string, PersonBrief>; mentions?: Record<string, string> }>(
+      return api.get<{
+        items: Message[]
+        profiles?: Record<string, PersonBrief>
+        mentions?: Record<string, string>
+        /** Groups: senders on this page the reader has a block with. */
+        blocked?: string[]
+      }>(
         `/conversations/${conversationId}/messages${qs ? `?${qs}` : ''}`,
       )
     },
@@ -3295,7 +3522,7 @@ export const kaluta = {
 
     /** Delete your own message. The row stays, the words go. */
     remove: (conversationId: string, messageId: string) =>
-      api.delete<{ id: string; deleted: boolean }>(
+      api.delete<{ id: string; deleted: boolean; removed?: boolean }>(
         `/conversations/${conversationId}/messages/${messageId}`,
       ),
 
@@ -3316,6 +3543,136 @@ export const kaluta = {
       api.get<{ items: Record<string, Presence> }>(
         `/presence?ids=${encodeURIComponent(userIds.join(','))}`,
       ),
+
+    /** What works here: translation needs a real model; group calls a media server. */
+    capabilities: () =>
+      api.get<{ translate: boolean; group_calls: boolean; summaries: boolean }>('/conversations/capabilities'),
+
+    // --- groups: settings, the link, ownership --------------------------------
+    /** Announcement mode, who sees the member list, who starts polls. Admins. */
+    setGroupSettings: (
+      conversationId: string,
+      input: { posting?: 'all' | 'admins'; members_visible?: 'all' | 'admins'; polls_by?: 'all' | 'admins' },
+    ) => api.patch<{ posting: string; members_visible: string; polls_by: string }>(`/conversations/${conversationId}/settings`, input),
+    /** Turn the link on or off, or limit it. null removes a limit. Admins. */
+    setInviteLink: (
+      conversationId: string,
+      input: { enabled?: boolean; expires_at?: string | null; max_uses?: number | null },
+    ) => api.patch<GroupInviteLink>(`/conversations/${conversationId}/invite-link`, input),
+    /** A new link; the old one stops working. Admins. */
+    resetInviteLink: (conversationId: string) =>
+      api.post<GroupInviteLink>(`/conversations/${conversationId}/invite-link/reset`),
+    /** Hand the group on. The owner stays as an admin. */
+    transferOwnership: (conversationId: string, userId: string) =>
+      api.post<{ owner: string; your_role: string }>(`/conversations/${conversationId}/transfer`, { user_id: userId }),
+    /** Delete the group for everybody. The owner, typing its name. */
+    deleteGroup: (conversationId: string, confirmTitle: string) =>
+      api.post<{ deleted: boolean }>(`/conversations/${conversationId}/delete`, { confirm_title: confirmTitle }),
+    audit: (conversationId: string) =>
+      api.get<{ items: GroupAuditEntry[] }>(`/conversations/${conversationId}/audit`),
+
+    // --- invitations ------------------------------------------------------------
+    invite: (conversationId: string, userIds: string[]) =>
+      api.post<{ invited: string[] }>(`/conversations/${conversationId}/invites`, { user_ids: userIds }),
+    pendingInvites: (conversationId: string) =>
+      api.get<{ items: Array<GroupMember & { invited_by: string; created_at: string }> }>(
+        `/conversations/${conversationId}/invites`,
+      ),
+    cancelInvite: (conversationId: string, userId: string) =>
+      api.delete<{ cancelled: boolean }>(`/conversations/${conversationId}/invites/${userId}`),
+    myInvites: () => api.get<{ items: GroupInvitation[] }>('/conversations/invites'),
+    answerInvite: (inviteId: number, action: 'accept' | 'decline') =>
+      api.post<{ status: string; conversation_id?: string }>(`/conversations/invites/${inviteId}`, { action }),
+
+    // --- per member -------------------------------------------------------------
+    setNotifications: (
+      conversationId: string,
+      input: { level?: 'all' | 'mentions' | 'announcements'; mute?: '1h' | '8h' | '1d' | '1w' | 'forever' | 'off'; read_receipts?: boolean },
+    ) => api.patch<ConversationNotifications>(`/conversations/${conversationId}/notifications`, input),
+    receipts: (conversationId: string, messageId: string) =>
+      api.get<{ read: number; members: number; readers: Array<{ user_id: string; display_name: string }> | null }>(
+        `/conversations/${conversationId}/messages/${messageId}/receipts`,
+      ),
+
+    // --- messages: pins, saved, announcements, replies, search, files --------------
+    pinMessage: (conversationId: string, messageId: string) =>
+      api.post<{ pinned: boolean }>(`/conversations/${conversationId}/messages/${messageId}/pin`),
+    unpinMessage: (conversationId: string, messageId: string) =>
+      api.delete<{ pinned: boolean }>(`/conversations/${conversationId}/messages/${messageId}/pin`),
+    pins: (conversationId: string) =>
+      api.get<{ items: MessageBrief[]; profiles: Record<string, PersonBrief> }>(`/conversations/${conversationId}/pins`),
+    saveMessage: (conversationId: string, messageId: string) =>
+      api.post<{ saved: boolean }>(`/conversations/${conversationId}/messages/${messageId}/save`),
+    unsaveMessage: (conversationId: string, messageId: string) =>
+      api.delete<{ saved: boolean }>(`/conversations/${conversationId}/messages/${messageId}/save`),
+    saved: () =>
+      api.get<{
+        items: Array<MessageBrief & { saved_at: string; conversation_title: string | null; conversation_kind: string }>
+        profiles: Record<string, PersonBrief>
+      }>('/conversations/saved'),
+    markAnnouncement: (conversationId: string, messageId: string) =>
+      api.post<{ announcement: boolean; notified?: number }>(`/conversations/${conversationId}/messages/${messageId}/announcement`),
+    unmarkAnnouncement: (conversationId: string, messageId: string) =>
+      api.delete<{ announcement: boolean }>(`/conversations/${conversationId}/messages/${messageId}/announcement`),
+    replies: (conversationId: string, messageId: string) =>
+      api.get<{ root: MessageBrief; items: MessageBrief[]; profiles: Record<string, PersonBrief> }>(
+        `/conversations/${conversationId}/messages/${messageId}/replies`,
+      ),
+    search: (conversationId: string, q: string) =>
+      api.get<{
+        items: Array<{ id: string; sender_id: string; kind: string; snippet: string; media_kind: string | null; created_at: string }>
+        profiles: Record<string, PersonBrief>
+        partial: boolean
+      }>(`/conversations/${conversationId}/search?q=${encodeURIComponent(q)}`),
+    files: (conversationId: string, kind: 'media' | 'files' | 'links') =>
+      api.get<{
+        items: Array<Partial<MessageBrief> & { id: string; sender_id: string; created_at: string; url?: string }>
+        profiles: Record<string, PersonBrief>
+      }>(`/conversations/${conversationId}/files?kind=${kind}`),
+
+    // --- polls, events, tasks -----------------------------------------------------
+    createPoll: (
+      conversationId: string,
+      input: { question: string; options: string[]; multiple: boolean; results: GroupPoll['results']; closes_at?: string | null },
+    ) => api.post<{ message_id: string; poll: GroupPoll }>(`/conversations/${conversationId}/polls`, input),
+    poll: (conversationId: string, pollId: string) => api.get<GroupPoll>(`/conversations/${conversationId}/polls/${pollId}`),
+    vote: (conversationId: string, pollId: string, optionIds: number[]) =>
+      api.post<GroupPoll>(`/conversations/${conversationId}/polls/${pollId}/vote`, { option_ids: optionIds }),
+    closePoll: (conversationId: string, pollId: string) =>
+      api.post<GroupPoll>(`/conversations/${conversationId}/polls/${pollId}/close`),
+    createEvent: (
+      conversationId: string,
+      input: {
+        title: string
+        description?: string
+        starts_at: string
+        ends_at?: string | null
+        timezone: string
+        location?: string
+        online_url?: string
+      },
+    ) => api.post<{ message_id: string; event: GroupEvent }>(`/conversations/${conversationId}/events`, input),
+    respondEvent: (conversationId: string, eventId: string, response: 'going' | 'maybe' | 'not_going') =>
+      api.post<GroupEvent>(`/conversations/${conversationId}/events/${eventId}/response`, { response }),
+    cancelEvent: (conversationId: string, eventId: string) =>
+      api.post<GroupEvent>(`/conversations/${conversationId}/events/${eventId}/cancel`),
+    events: (conversationId: string, upcoming = true) =>
+      api.get<{ items: GroupEvent[] }>(`/conversations/${conversationId}/events?upcoming=${upcoming}`),
+    createTask: (conversationId: string, input: { title: string; assignee_id?: string | null; due_at?: string | null }) =>
+      api.post<{ message_id: string; task: GroupTask }>(`/conversations/${conversationId}/tasks`, input),
+    updateTask: (
+      conversationId: string,
+      taskId: string,
+      input: { done?: boolean; title?: string; assignee_id?: string | null; due_at?: string | null },
+    ) => api.patch<GroupTask>(`/conversations/${conversationId}/tasks/${taskId}`, input),
+    tasks: (conversationId: string, openOnly = false) =>
+      api.get<{ items: GroupTask[] }>(`/conversations/${conversationId}/tasks?open_only=${openOnly}`),
+
+    /** Report a message, a member or the group to Kinjy's moderators (not to its admins). */
+    report: (
+      conversationId: string,
+      input: { target_kind: 'message' | 'member' | 'group'; target_id: string; reason: ReportReason; note?: string },
+    ) => api.post<{ received: boolean }>(`/conversations/${conversationId}/reports`, input),
   },
 
   family: {
@@ -3743,6 +4100,14 @@ export const kaluta = {
     lookupPayments: (ids: string[]) =>
       api.post<{ payments: Record<string, AdminPaymentBrief> }>('/admin/payments/lookup', { ids }),
     fraud: (days = 30) => api.get<FraudSignals>(`/admin/fraud/signals?days=${days}`),
+    /** Reports from Messages: group messages, members and groups. */
+    messageReports: (status: 'open' | 'closed' = 'open') =>
+      api.get<{ items: MessageReportItem[] }>(`/admin/message-reports?status=${status}`),
+    closeMessageReport: (reportId: number, resolution: string, removeMessage: boolean) =>
+      api.post<{ closed: boolean; removed: boolean }>(`/admin/message-reports/${reportId}/close`, {
+        resolution,
+        remove_message: removeMessage,
+      }),
     contactRisk: () =>
       api.get<{
         window_days: number

@@ -3,8 +3,16 @@ import { Link, useNavigate, useSearchParams } from 'react-router'
 import {
   AlertCircle,
   ArrowLeft,
+  Bookmark,
+  BookmarkCheck,
   Check,
   CheckCheck,
+  Flag,
+  Inbox,
+  Languages,
+  Megaphone,
+  MessagesSquare,
+  PinOff,
   Clock,
   Download,
   File as FileIcon,
@@ -55,6 +63,9 @@ import {
 import { ConversationSkeleton, ThreadSkeleton } from '@/components/social/MessageSkeleton'
 import MemberAvatar from '@/components/social/MemberAvatar'
 import GroupPanel, { NewGroupDialog } from '@/components/social/GroupPanel'
+import { EventCard, EventForm, PollCard, PollForm, TaskCard, TaskForm } from '@/components/social/group/GroupCards'
+import { ReportDialog } from '@/components/social/group/GroupBits'
+import { CardMenuButton, GroupSeenBy, PinnedBar, RepliesPanel, SearchPanel } from '@/components/social/group/ThreadTools'
 import { useApi } from '@/hooks/useApi'
 import { useRealtime } from '@/hooks/useRealtime'
 import { useAuth } from '@/hooks/useAuth'
@@ -577,6 +588,20 @@ export default function Messages() {
   const [creatingGroup, setCreatingGroup] = useState(false)
   // The group's own screen: who is in it, who runs it, what it is for.
   const [showGroup, setShowGroup] = useState(false)
+  // Groups, 27/10: senders the reader has a block with (their messages fold
+  // away), the ones unfolded anyway, the open forms and side panels.
+  const [blockedSenders, setBlockedSenders] = useState<Set<string>>(new Set())
+  const [revealed, setRevealed] = useState<Set<string>>(new Set())
+  const [cardForm, setCardForm] = useState<'poll' | 'event' | 'task' | null>(null)
+  const [searching, setSearching] = useState(false)
+  const [repliesFor, setRepliesFor] = useState<string | null>(null)
+  const [reportFor, setReportFor] = useState<ChatMessage | null>(null)
+  const [pinsVersion, setPinsVersion] = useState(0)
+  const [receiptsVersion, setReceiptsVersion] = useState(0)
+  // Translations the reader asked for, by message id. Never stored.
+  const [translations, setTranslations] = useState<Record<string, string>>({})
+  const capabilities = useApi(() => kaluta.messages.capabilities(), [])
+  const groupInvites = useApi(() => kaluta.messages.myInvites(), [])
   // Narrowing the list you already have: nothing is fetched.
   const [chatQuery, setChatQuery] = useState('')
   const [unreadOnly, setUnreadOnly] = useState(false)
@@ -712,6 +737,9 @@ export default function Messages() {
         scrollMode.current = 'opened'
         setSenders(page.profiles ?? {})
         setMentionNames(page.mentions ?? {})
+        setBlockedSenders(new Set(page.blocked ?? []))
+        setRevealed(new Set())
+        setTranslations({})
         setMessages(page.items)
         setHasOlder(page.items.length >= PAGE)
         markRead(conversationId)
@@ -766,6 +794,7 @@ export default function Messages() {
       // Older history can be from people who have not spoken since.
       setSenders((current) => ({ ...current, ...(page.profiles ?? {}) }))
       setMentionNames((current) => ({ ...current, ...(page.mentions ?? {}) }))
+      if (page.blocked?.length) setBlockedSenders((current) => new Set([...current, ...(page.blocked ?? [])]))
       const el = listRef.current
       scrollMode.current = { restoreFrom: el ? el.scrollHeight - el.scrollTop : 0 }
       setMessages((current) => mergeMessages(current, page.items))
@@ -1240,11 +1269,12 @@ export default function Messages() {
     if (!conversationId) return
     setConfirmDelete(null)
     try {
-      await kaluta.messages.remove(conversationId, message.id)
+      const done = await kaluta.messages.remove(conversationId, message.id)
+      const removed = Boolean(done.removed)
       setMessages((current) =>
         current.map((m) =>
           m.id === message.id
-            ? { ...m, deleted: true, body: null, media_kind: null, media_url: null, sticker: null, reactions: {}, my_reaction: null }
+            ? { ...m, deleted: true, removed, body: null, media_kind: null, media_url: null, sticker: null, reactions: {}, my_reaction: null, poll: undefined, event: undefined, task: undefined }
             : m,
         ),
       )
@@ -1281,6 +1311,9 @@ export default function Messages() {
                 media_size: event.media_size ?? null,
                 media_withheld: Boolean(event.media_withheld),
                 created_at: event.created_at ?? new Date().toISOString(),
+                ...(event.poll ? { poll: event.poll } : {}),
+                ...(event.event ? { event: event.event } : {}),
+                ...(event.task ? { task: event.task } : {}),
               },
             ]),
           )
@@ -1341,17 +1374,64 @@ export default function Messages() {
         setMessages((current) =>
           current.map((m) =>
             m.id === removed
-              ? { ...m, deleted: true, body: null, media_kind: null, media_url: null, sticker: null, reactions: {}, my_reaction: null }
+              ? { ...m, deleted: true, removed: Boolean(event.removed), body: null, media_kind: null, media_url: null, sticker: null, reactions: {}, my_reaction: null, poll: undefined, event: undefined, task: undefined }
               : m,
           ),
         )
+        setPinsVersion((v) => v + 1)
         conversations.reload()
+        break
+      }
+      case 'message_pinned': {
+        if (event.conversation_id !== activeIdRef.current || !event.message_id) break
+        const { message_id: pinnedId } = event
+        setMessages((current) => current.map((m) => (m.id === pinnedId ? { ...m, pinned: Boolean(event.pinned) } : m)))
+        setPinsVersion((v) => v + 1)
+        break
+      }
+      case 'message_announcement': {
+        if (event.conversation_id !== activeIdRef.current || !event.message_id) break
+        const { message_id: announced } = event
+        setMessages((current) => current.map((m) => (m.id === announced ? { ...m, announcement: Boolean(event.announcement) } : m)))
+        break
+      }
+      case 'poll_updated':
+      case 'event_updated':
+      case 'task_updated': {
+        // Each member sees their own view of a card (their vote, what they may
+        // do), so it is fetched again rather than taken from the frame.
+        const cid = event.conversation_id
+        if (!cid || cid !== activeIdRef.current || !event.message_id) break
+        const target = event.message_id
+        const refresh =
+          event.type === 'poll_updated' && event.poll_id
+            ? kaluta.messages.poll(cid, event.poll_id).then((poll) => ({ poll }))
+            : event.type === 'event_updated'
+              ? kaluta.messages.events(cid, false).then((r) => ({ event: r.items.find((e) => e.message_id === target) }))
+              : kaluta.messages.tasks(cid).then((r) => ({ task: r.items.find((t) => t.message_id === target) }))
+        void refresh
+          .then((patch) => {
+            if (activeIdRef.current !== cid) return
+            setMessages((current) => current.map((m) => (m.id === target ? { ...m, ...patch } : m)))
+          })
+          .catch(() => undefined)
+        break
+      }
+      case 'conversation': {
+        conversations.reload()
+        if (event.deleted && event.conversation_id === activeIdRef.current) {
+          setShowGroup(false)
+          setActiveId(null)
+          setMessages([])
+          setError('This group was deleted by its owner.')
+        }
         break
       }
       case 'read': {
         if (!event.conversation_id || !event.user_id || !event.read_at) break
         const { conversation_id: cid, user_id: uid, read_at } = event
         setReads((current) => ({ ...current, [cid]: { ...current[cid], [uid]: read_at } }))
+        if (cid === activeIdRef.current) setReceiptsVersion((v) => v + 1)
         // My own read, from this tab or another: the unread badge is stale.
         if (uid === user?.id) conversations.reload()
         break
@@ -1437,6 +1517,19 @@ export default function Messages() {
     }
   }, [active?.id, active?.kind, active?.is_welcome])
   const activeOthers = active ? active.participants.filter((p) => p !== user?.id) : []
+  const isGroup = active?.kind === 'group'
+  const myRole = active?.my_role ?? 'member'
+  const moderates = isGroup && (myRole === 'owner' || myRole === 'admin' || myRole === 'moderator')
+  const runsGroup = isGroup && (myRole === 'owner' || myRole === 'admin')
+  // Announcement mode: everybody else reads and reacts.
+  const mayWrite = !isGroup || active?.posting !== 'admins' || moderates
+  const ROLE_RANK: Record<string, number> = { owner: 0, admin: 1, moderator: 2, member: 3 }
+  /** A moderator removes the messages of people below them; nobody removes the owner's. */
+  const mayRemove = (message: ChatMessage) => {
+    if (!moderates || message.sender_id === user?.id || !message.sender_id) return false
+    const theirs = roomPeople.find((p) => p.user_id === message.sender_id) as (PersonBrief & { role?: string }) | undefined
+    return ROLE_RANK[theirs?.role ?? 'member'] > ROLE_RANK[myRole]
+  }
 
   const readAt = useCallback(
     (conversation: Conversation, uid: string): string | null =>
@@ -1525,6 +1618,80 @@ export default function Messages() {
   }
 
   /**
+   * Go to a message wherever it is: from a pin, a search result, an event.
+   * Pages back through the history until it is on screen - a few pages at
+   * most, so a very old message says so instead of loading the whole room.
+   */
+  const jumpToAnywhere = async (id: string) => {
+    const conversationId = activeIdRef.current
+    if (!conversationId) return
+    for (let page = 0; page < 10; page++) {
+      if (messagesRef.current.some((m) => m.id === id)) {
+        window.setTimeout(() => jumpTo(id), 50)
+        return
+      }
+      const oldest = messagesRef.current.find((m) => !m.status)
+      if (!oldest) break
+      const older = await kaluta.messages.list(conversationId, { before: oldest.id }).catch(() => null)
+      if (!older || older.items.length === 0 || activeIdRef.current !== conversationId) break
+      setSenders((current) => ({ ...current, ...(older.profiles ?? {}) }))
+      messagesRef.current = mergeMessages(messagesRef.current, older.items)
+      setMessages(messagesRef.current)
+      setHasOlder(older.items.length >= PAGE)
+    }
+    if (messagesRef.current.some((m) => m.id === id)) window.setTimeout(() => jumpTo(id), 50)
+    else setError('That message is further back than this thread can show at once.')
+  }
+
+  /** Translate one message for the reader, on request. The text goes to Kinjy's AI service. */
+  const translate = async (message: ChatMessage) => {
+    if (!message.body) return
+    try {
+      const result = await kaluta.ai.translate(message.body, locale, undefined, true)
+      setTranslations((current) => ({ ...current, [message.id]: result.translated }))
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Translation is not available right now.')
+    }
+  }
+
+  const toggleSaved = async (message: ChatMessage) => {
+    const conversationId = activeIdRef.current
+    if (!conversationId) return
+    try {
+      if (message.saved) await kaluta.messages.unsaveMessage(conversationId, message.id)
+      else await kaluta.messages.saveMessage(conversationId, message.id)
+      setMessages((current) => current.map((m) => (m.id === message.id ? { ...m, saved: !message.saved } : m)))
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Could not save that message.')
+    }
+  }
+
+  const togglePinned = async (message: ChatMessage) => {
+    const conversationId = activeIdRef.current
+    if (!conversationId) return
+    try {
+      if (message.pinned) await kaluta.messages.unpinMessage(conversationId, message.id)
+      else await kaluta.messages.pinMessage(conversationId, message.id)
+      setMessages((current) => current.map((m) => (m.id === message.id ? { ...m, pinned: !message.pinned } : m)))
+      setPinsVersion((v) => v + 1)
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Could not change the pin.')
+    }
+  }
+
+  const toggleAnnouncement = async (message: ChatMessage) => {
+    const conversationId = activeIdRef.current
+    if (!conversationId) return
+    try {
+      if (message.announcement) await kaluta.messages.unmarkAnnouncement(conversationId, message.id)
+      else await kaluta.messages.markAnnouncement(conversationId, message.id)
+      setMessages((current) => current.map((m) => (m.id === message.id ? { ...m, announcement: !message.announcement } : m)))
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Could not change the announcement.')
+    }
+  }
+
+  /**
    * The first message that arrived after the member last read this thread.
    *
    * Null when they were up to date, which is the common case and draws
@@ -1571,7 +1738,9 @@ export default function Messages() {
     // No "N online" either - presence is not polled for a whole room, so the
     // honest answer is none and the honest thing is not to claim a number.
     const total = active.participant_count ?? activeOthers.length + 1
-    return `${total} ${total === 1 ? 'member' : 'members'}`
+    const label = `${total} ${total === 1 ? 'member' : 'members'}`
+    // Said in the header so a group chat is not taken for a Community.
+    return active.posting === 'admins' ? `Group chat · announcements · ${label}` : `Group chat · ${label}`
   })()
 
   return (
@@ -1638,13 +1807,32 @@ export default function Messages() {
                 <button
                   type="button"
                   onClick={() => setCreatingGroup(true)}
-                  aria-label="New group"
-                  title="New group"
+                  aria-label="New group chat"
+                  title="New group chat"
                   className="grid h-9 w-9 place-items-center rounded-full bg-text-hi/[0.07] text-text-hi transition-colors hover:bg-text-hi/[0.1]"
                 >
                   <Users size={16} aria-hidden="true" />
                 </button>
               </div>
+            </div>
+            <div className="flex flex-wrap gap-1.5">
+              <Link
+                to="/messages/invites"
+                className="inline-flex items-center gap-1.5 rounded-full bg-text-hi/[0.07] px-3 py-1 text-xs font-semibold text-text-mid hover:text-text-hi"
+              >
+                <Inbox size={12} aria-hidden="true" />
+                Group invitations
+                {(groupInvites.data?.items.length ?? 0) > 0 && (
+                  <span className="rounded-full bg-gold px-1.5 text-[0.65rem] font-bold text-ink">{groupInvites.data?.items.length}</span>
+                )}
+              </Link>
+              <Link
+                to="/messages/saved"
+                className="inline-flex items-center gap-1.5 rounded-full bg-text-hi/[0.07] px-3 py-1 text-xs font-semibold text-text-mid hover:text-text-hi"
+              >
+                <Bookmark size={12} aria-hidden="true" />
+                Saved messages
+              </Link>
             </div>
 
             <label className="relative flex items-center">
@@ -1981,6 +2169,7 @@ export default function Messages() {
             meId={user.id}
             onClose={() => setShowGroup(false)}
             onChanged={() => conversations.reload()}
+            onJump={(id) => void jumpToAnywhere(id)}
           />
         )}
 
@@ -2090,6 +2279,15 @@ export default function Messages() {
                     {headerSubtitle}
                   </p>
                 </div>
+                <button
+                  type="button"
+                  onClick={() => setSearching(true)}
+                  aria-label="Search this conversation"
+                  title="Search this conversation"
+                  className="ms-auto shrink-0 rounded-full p-2 text-text-mid hover:bg-text-hi/[0.07] hover:text-text-hi"
+                >
+                  <Search size={16} aria-hidden="true" />
+                </button>
                 {/* Three different promises, and the label says exactly which
                     one holds: "encrypted" alone would let storage encryption
                     pass for end-to-end, which it is not. */}
@@ -2101,13 +2299,13 @@ export default function Messages() {
                         ? 'Encrypted on our servers'
                         : 'Not encrypted'
                   }
-                  className="caption ms-auto hidden shrink-0 items-center gap-1 sm:inline-flex"
+                  className="caption hidden shrink-0 items-center gap-1 sm:inline-flex"
                   title={
                     active.encrypted
                       ? 'End-to-end encrypted — only the people in this conversation can read it.'
                       : active.sealed_at_rest
-                        ? 'Messages and files are stored encrypted on Kinjy’s servers, so a copy of the database reveals nothing. This is not end-to-end encryption: Kinjy’s servers can read them.'
-                        : 'Stored without encryption on Kinjy’s servers.'
+                        ? 'Messages travel encrypted and are stored encrypted on Kinjy’s servers, so a copy of the database reveals nothing. This is not end-to-end encryption: Kinjy’s servers can read them, which is what makes search, reports and moderation possible.'
+                        : 'Messages travel encrypted but are stored without encryption on Kinjy’s servers.'
                   }
                 >
                   {active.encrypted || active.sealed_at_rest ? (
@@ -2122,6 +2320,7 @@ export default function Messages() {
                       wants to know which of the three promises holds. */}
                 </span>
               </header>
+              {isGroup && <PinnedBar conversationId={active.id} version={pinsVersion} onJump={(id) => void jumpToAnywhere(id)} />}
 
               {/* justify-start with a top margin that collapses, not
                   justify-end: a flex column that justifies to the end makes
@@ -2167,6 +2366,25 @@ export default function Messages() {
                       </p>
                     )
                   }
+                  if (
+                    isGroup &&
+                    message.sender_id !== user?.id &&
+                    blockedSenders.has(message.sender_id) &&
+                    !revealed.has(message.id)
+                  ) {
+                    return (
+                      <p key={message.client_id ?? message.id} className="my-2 text-center text-[0.72rem] text-text-low">
+                        A message from somebody you blocked ·{' '}
+                        <button
+                          type="button"
+                          onClick={() => setRevealed((current) => new Set([...current, message.id]))}
+                          className="font-semibold underline"
+                        >
+                          Show
+                        </button>
+                      </p>
+                    )
+                  }
                   const mine = message.sender_id === user?.id
                   const sender = personIn(message.sender_id)
                   const previous = messages[index - 1]
@@ -2179,7 +2397,9 @@ export default function Messages() {
                     !newDay &&
                     previous.sender_id === message.sender_id &&
                     new Date(message.created_at).getTime() - new Date(previous.created_at).getTime() < BURST_MS
-                  const hasText = !message.encrypted && Boolean(message.body?.trim())
+                  // A poll, an event or a task: drawn as its card, not as text.
+                  const card = message.deleted ? null : (message.poll ?? message.event ?? message.task ?? null)
+                  const hasText = !card && !message.encrypted && Boolean(message.body?.trim())
                   const mediaOnly = Boolean(message.media_kind) && !hasText
                   // A sticker stands on its own, without a bubble, unless it answers a message
                   // (then the quote needs one to sit in).
@@ -2272,6 +2492,22 @@ export default function Messages() {
                         {!mine && active.kind === 'group' && !burst && (
                           <span className="mb-0.5 ms-9 text-xs text-text-low">{sender?.display_name ?? 'Member'}</span>
                         )}
+                        {(message.announcement || message.pinned) && !message.deleted && (
+                          <span className={cn('mb-0.5 inline-flex items-center gap-2 text-[0.7rem] font-semibold text-gold-soft', !mine && 'ms-9')}>
+                            {message.announcement && (
+                              <span className="inline-flex items-center gap-1">
+                                <Megaphone size={11} aria-hidden="true" />
+                                Announcement
+                              </span>
+                            )}
+                            {message.pinned && (
+                              <span className="inline-flex items-center gap-1">
+                                <Pin size={11} aria-hidden="true" />
+                                Pinned
+                              </span>
+                            )}
+                          </span>
+                        )}
                         <div className={cn('flex w-full items-end gap-2', mine ? 'justify-end' : 'justify-start')}>
                         {!mine && (
                           <span className="w-7 shrink-0" aria-hidden={burstNext ? 'true' : undefined}>
@@ -2331,8 +2567,32 @@ export default function Messages() {
                           )}
                           {message.deleted && (
                             <p className={cn('text-[15px] italic leading-snug', mine ? 'text-ink/60' : 'text-text-low')}>
-                              This message was deleted
+                              {message.removed ? 'This message was removed by a moderator' : 'This message was deleted'}
                             </p>
+                          )}
+                          {message.poll && card && (
+                            <PollCard
+                              key={`${message.poll.voters}-${message.poll.closed}-${message.poll.my_votes.join(',')}-${message.poll.results_visible}`}
+                              conversationId={active.id}
+                              poll={message.poll}
+                              mine={mine}
+                            />
+                          )}
+                          {message.event && card && (
+                            <EventCard
+                              key={`${message.event.counts.going}-${message.event.counts.maybe}-${message.event.counts.not_going}-${message.event.cancelled}-${message.event.my_response}`}
+                              conversationId={active.id}
+                              event={message.event}
+                              mine={mine}
+                            />
+                          )}
+                          {message.task && card && (
+                            <TaskCard
+                              key={`${message.task.done}-${message.task.assignee_id}-${message.task.due_at}`}
+                              conversationId={active.id}
+                              task={message.task}
+                              mine={mine}
+                            />
                           )}
                           {sticker && (
                             <span role="img" aria-label={sticker.label} title={sticker.label} className="block">
@@ -2404,6 +2664,28 @@ export default function Messages() {
                               <LinkPreview url={linkInBody} />
                             </div>
                           )}
+                          {translations[message.id] && !message.deleted && (
+                            <div className={cn('mt-1.5 border-t pt-1.5 text-[14px] leading-snug', mine ? 'border-ink/20' : 'border-white/10')}>
+                              <p className={cn('mb-0.5 inline-flex items-center gap-1 text-[0.7rem] font-semibold', mine ? 'text-ink/70' : 'text-text-low')}>
+                                <Languages size={11} aria-hidden="true" />
+                                Translated by Kinjy’s AI service ·{' '}
+                                <button
+                                  type="button"
+                                  className="underline"
+                                  onClick={() =>
+                                    setTranslations((current) => {
+                                      const next = { ...current }
+                                      delete next[message.id]
+                                      return next
+                                    })
+                                  }
+                                >
+                                  Show original only
+                                </button>
+                              </p>
+                              <p className="whitespace-pre-wrap">{translations[message.id]}</p>
+                            </div>
+                          )}
                         </div>
                         </SwipeToReply>
                         </div>
@@ -2416,6 +2698,16 @@ export default function Messages() {
                             onToggle={(emoji) => void react(message, emoji)}
                           />
                         )}
+                        {Boolean(message.reply_count) && (
+                          <button
+                            type="button"
+                            onClick={() => setRepliesFor(message.id)}
+                            className={cn('mt-0.5 inline-flex items-center gap-1 text-xs font-semibold text-gold-soft hover:underline', !mine && 'ms-9')}
+                          >
+                            <MessagesSquare size={12} aria-hidden="true" />
+                            {message.reply_count} {message.reply_count === 1 ? 'reply' : 'replies'}
+                          </button>
+                        )}
                         {message.status === 'failed' && (
                           <button
                             type="button"
@@ -2426,7 +2718,10 @@ export default function Messages() {
                             Not sent — tap to retry
                           </button>
                         )}
-                        {lastMine && message.id === lastMine.id && (
+                        {lastMine && message.id === lastMine.id && isGroup && !active.is_welcome && (
+                          <GroupSeenBy conversationId={active.id} messageId={message.id} version={receiptsVersion} />
+                        )}
+                        {lastMine && message.id === lastMine.id && !isGroup && (
                           <span className="caption mt-0.5 inline-flex items-center gap-1">
                             {seenBy.length ? (
                               <>
@@ -2555,6 +2850,12 @@ export default function Messages() {
               {replyTo && (
                 <ReplyBanner name={nameOf(replyTo)} message={replyTo} onCancel={() => setReplyTo(null)} />
               )}
+              {!mayWrite ? (
+                <p className="mx-3 my-3 flex items-center gap-2 rounded-card-sm border border-[var(--cloud-border)] px-3 py-2.5 text-xs text-text-mid sm:mx-5">
+                  <Megaphone size={14} className="shrink-0 text-gold-soft" aria-hidden="true" />
+                  Only the group’s admins and moderators write here. You can react to messages.
+                </p>
+              ) : (
               <form onSubmit={send} className={cn('relative flex items-center gap-1.5 px-3 py-3 sm:px-5', FEATURES.assistant && 'pe-14 lg:pe-12')}>
                 {recordingSince !== null ? (
                   <>
@@ -2587,6 +2888,12 @@ export default function Messages() {
                         index={mention.index}
                         onPick={mention.pick}
                         onHover={mention.setIndex}
+                      />
+                    )}
+                    {isGroup && !active.is_welcome && (
+                      <CardMenuButton
+                        canPoll={(active.polls_by ?? 'all') === 'all' || moderates}
+                        onPick={setCardForm}
                       />
                     )}
                     <AttachmentMenu onFiles={stage} />
@@ -2652,6 +2959,7 @@ export default function Messages() {
                   </>
                 )}
               </form>
+              )}
             </>
           )}
           {error && (
@@ -2666,6 +2974,36 @@ export default function Messages() {
         if (!target || target.deleted) return null
         const own = target.sender_id === user?.id
         const text = target.encrypted ? '' : (target.body ?? '')
+        const isCard = ['poll', 'event', 'task'].includes(target.kind)
+        const extra: Array<{ label: string; icon: React.ReactNode; onClick: () => void; danger?: boolean }> = []
+        if (moderates) {
+          extra.push({
+            label: target.pinned ? 'Unpin' : 'Pin for everybody',
+            icon: target.pinned ? <PinOff size={14} aria-hidden="true" /> : <Pin size={14} aria-hidden="true" />,
+            onClick: () => void togglePinned(target),
+          })
+        }
+        if (runsGroup) {
+          extra.push({
+            label: target.announcement ? 'Unmark announcement' : 'Mark as announcement',
+            icon: <Megaphone size={14} aria-hidden="true" />,
+            onClick: () => void toggleAnnouncement(target),
+          })
+        }
+        extra.push({
+          label: target.saved ? 'Remove from saved' : 'Save',
+          icon: target.saved ? <BookmarkCheck size={14} aria-hidden="true" /> : <Bookmark size={14} aria-hidden="true" />,
+          onClick: () => void toggleSaved(target),
+        })
+        if (isGroup && target.reply_count) {
+          extra.push({ label: 'View replies', icon: <MessagesSquare size={14} aria-hidden="true" />, onClick: () => setRepliesFor(target.id) })
+        }
+        if (capabilities.data?.translate && !isCard && text.trim() && !translations[target.id]) {
+          extra.push({ label: 'Translate', icon: <Languages size={14} aria-hidden="true" />, onClick: () => void translate(target) })
+        }
+        if (!own && active) {
+          extra.push({ label: 'Report to Kinjy', icon: <Flag size={14} aria-hidden="true" />, onClick: () => setReportFor(target), danger: true })
+        }
         return (
           <MessageMenu
             anchor={`bubble-${menuFor}`}
@@ -2673,8 +3011,10 @@ export default function Messages() {
             // Text the server can read: not a sticker, not an end-to-end
             // encrypted message. The server refuses both anyway; the point is
             // not to offer what will fail.
-            canEdit={own && !target.encrypted && target.kind !== 'sticker' && Boolean(text.trim())}
-            canDelete={own}
+            canEdit={own && !target.encrypted && target.kind !== 'sticker' && !isCard && Boolean(text.trim())}
+            canDelete={own || mayRemove(target)}
+            deleteLabel={own ? 'Delete' : 'Remove'}
+            extra={extra}
             onPick={(emoji) => void react(target, emoji)}
             onReply={() => startReply(target)}
             onCopy={text.trim() ? () => void copyText(text) : undefined}
@@ -2697,19 +3037,55 @@ export default function Messages() {
       <ConfirmDialog
         open={Boolean(confirmDelete)}
         onOpenChange={(open) => !open && setConfirmDelete(null)}
-        title="Delete this message?"
-        description="The text is removed for everyone in this conversation, not hidden. It cannot be recovered."
-        confirmLabel="Delete message"
+        title={confirmDelete && confirmDelete.sender_id !== user?.id ? 'Remove this message?' : 'Delete this message?'}
+        description={
+          confirmDelete && confirmDelete.sender_id !== user?.id
+            ? 'Its words and any file are removed for everyone, not hidden; the thread says a moderator removed it. The removal is recorded in the group’s activity log.'
+            : 'The text is removed for everyone in this conversation, not hidden. It cannot be recovered.'
+        }
+        confirmLabel={confirmDelete && confirmDelete.sender_id !== user?.id ? 'Remove message' : 'Delete message'}
         onConfirm={() => confirmDelete && void removeMessage(confirmDelete)}
       />
       {creatingGroup && (
         <NewGroupDialog
           onClose={() => setCreatingGroup(false)}
-          onCreated={(id) => {
+          onCreated={(id, invited) => {
             setCreatingGroup(false)
             conversations.reload()
             setParams({ c: id })
+            if (invited) {
+              setPinNote(
+                `${invited} ${invited === 1 ? 'person was' : 'people were'} invited rather than added: they join when they accept.`,
+              )
+            }
           }}
+        />
+      )}
+      {active && cardForm === 'poll' && <PollForm conversationId={active.id} onClose={() => setCardForm(null)} />}
+      {active && cardForm === 'event' && <EventForm conversationId={active.id} onClose={() => setCardForm(null)} />}
+      {active && cardForm === 'task' && (
+        <TaskForm
+          conversationId={active.id}
+          members={roomPeople.map((p) => ({ user_id: p.user_id, display_name: p.display_name ?? 'Member' }))}
+          onClose={() => setCardForm(null)}
+        />
+      )}
+      {active && searching && (
+        <SearchPanel conversationId={active.id} onClose={() => setSearching(false)} onJump={(id) => void jumpToAnywhere(id)} />
+      )}
+      {active && repliesFor && (
+        <RepliesPanel
+          conversationId={active.id}
+          messageId={repliesFor}
+          onClose={() => setRepliesFor(null)}
+          onJump={(id) => void jumpToAnywhere(id)}
+        />
+      )}
+      {active && reportFor && (
+        <ReportDialog
+          conversationId={active.id}
+          target={{ kind: 'message', id: reportFor.id, label: 'this message' }}
+          onClose={() => setReportFor(null)}
         />
       )}
     </AppShell>

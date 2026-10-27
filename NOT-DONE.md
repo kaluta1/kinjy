@@ -1530,3 +1530,39 @@ Every section reads live data. Limits of that data:
   - Chargebacks / reversals from the provider are not received or handled.
   - Courier access: none; the seller checks the order on their own account.
   - Legal review of the policy wording (finality, no arbitration, consumer rights).
+
+## Group chats in Messages: the 27/10 upgrade
+
+Done: roles (owner, admin, moderator, member) enforced by the server; rules
+shown before joining; invitations a member accepts or declines; two new
+privacy settings (who may add me to a group chat, who may invite me); the
+link's limits (on/off, end date, number of uses, replace); ownership transfer
+and deletion; announcement mode and announcements; pinned and saved messages;
+search; photos/files/links view; replies view; polls, events (time zone,
+reminders) and tasks; "Seen by" with a personal opt-out; notification levels
+and mute; @everyone (admins and moderators, once an hour); reports to Kinjy's
+moderators (admin console, Moderation); an activity log; linking a chat to a
+Community (a pointer, no access granted either way).
+
+Not done / to decide:
+- **Group voice and video calls**: need a media server (SFU) and a TURN relay,
+  neither deployed. Hidden; the server refuses a group call offer.
+- **End-to-end encryption for groups**: not implemented. Groups travel over
+  TLS and are sealed at rest; Kinjy's servers can read them (search, reports
+  and moderation depend on it). A real design (MLS or sender keys, per-device
+  keys, membership changes, recovery, history for newcomers) is a project of
+  its own.
+- **Translation of messages**: the button appears only when ai-service has a
+  live translation model (`/internal/ai/capabilities`). None is configured
+  locally; in production it depends on the provider key (see One-to-Many).
+- **Conversation summaries**: not implemented. Need an AI provider and a
+  consent design (who may summarise what other members wrote).
+- **Sub-groups / topics**: not implemented; replies have their own view
+  instead.
+- **Delivery receipts**: not tracked separately ("Sent" = stored on the server).
+- **Search** opens the newest 5,000 messages of a conversation (text is sealed
+  per message, so the database cannot index it).
+- **Existing groups whose owner already left** have no owner; the new rule only
+  stops it happening again. No automatic promotion.
+- Pre-existing, unrelated: `e2e_group_privacy.py` fails on Community privacy
+  (a moderator can no longer make a community public).

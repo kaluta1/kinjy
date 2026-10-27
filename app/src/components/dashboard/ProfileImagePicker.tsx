@@ -23,7 +23,8 @@ interface ProfileImagePickerProps {
   /** For the initials shown when there is no avatar. */
   displayName: string
   /** Puts the asset on the profile (or removes it, with null). Throws on refusal. */
-  onChange: (assetId: string | null) => Promise<void>
+  /** The uploaded image's url comes second, for a caller that shows it before saving. */
+  onChange: (assetId: string | null, url?: string | null) => Promise<void>
   disabled?: boolean
 }
 
@@ -99,7 +100,7 @@ export default function ProfileImagePicker({
         },
       })
       setPhase({ kind: 'saving' })
-      await onChange(image.asset_id)
+      await onChange(image.asset_id, image.url)
     } catch (err) {
       if (!controller.signal.aborted) {
         setError(err instanceof ApiError ? err.message : 'The image could not be uploaded.')

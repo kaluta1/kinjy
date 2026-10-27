@@ -2436,3 +2436,87 @@ def membership_of(community_id: str, user_id: str, db: OrmSession = Depends(get_
     if row is None:
         return {"member": False, "role": None, "status": None}
     return {"member": row.status == "active", "role": row.role, "status": row.status}
+
+
+# --- group chats linked to a community (27/10) -------------------------------
+#
+# A group chat lives in Messages; a community may point at some. The link is
+# shown on the community to whoever may enter the community, and it grants
+# nothing: joining a chat does not make anybody a member here, and being a
+# member here does not put anybody in a chat. The chat's own door (its link,
+# public or by request) is the only way in.
+
+
+class GroupChatLinkIn(BaseModel):
+    conversation_id: str = Field(min_length=3, max_length=40)
+
+
+def _community_or_404(db: OrmSession, handle: str) -> models.Community:
+    community = _resolve(db, handle)
+    if community is None:
+        raise HTTPException(status_code=404, detail="Community not found")
+    return community
+
+
+def _messaging(method: str, path: str, **kwargs) -> dict:
+    try:
+        response = httpx.request(method, f"{MESSAGING_URL}{path}", timeout=6, **kwargs)
+    except httpx.HTTPError:
+        raise HTTPException(status_code=503, detail="Group chats cannot be reached right now. Try again shortly.")
+    if response.status_code >= 400:
+        try:
+            detail = response.json().get("detail")
+        except ValueError:
+            detail = None
+        raise HTTPException(status_code=response.status_code, detail=detail or "Group chats refused the request")
+    return response.json()
+
+
+@app.get("/communities/{handle}/group-chats", tags=["communities"])
+def community_group_chats(handle: str, principal: MaybeUser, db: OrmSession = Depends(get_db)):
+    """The group chats linked to a community - for whoever may enter it."""
+    community = _community_or_404(db, handle)
+    _community_door(db, community.id, principal)
+    data = _messaging(
+        "GET",
+        f"/internal/communities/{community.id}/groups",
+        params={"viewer": principal.user_id} if principal else None,
+    )
+    membership = _membership(db, community.id, principal.user_id) if principal else None
+    return {
+        "items": data.get("items", []),
+        "can_manage": membership is not None
+        and membership.status == "active"
+        and membership.role in ("owner", "moderator"),
+    }
+
+
+@app.post("/communities/{handle}/group-chats", status_code=201, tags=["communities"])
+def link_group_chat(handle: str, payload: GroupChatLinkIn, principal: CurrentUser, db: OrmSession = Depends(get_db)):
+    """Link a group chat to the community. The community's owner or a
+    moderator who also runs the chat (messaging-service checks that part)."""
+    community = _community_or_404(db, handle)
+    _require_steward(db, community.id, principal.user_id)
+    result = _messaging(
+        "POST",
+        f"/internal/groups/{payload.conversation_id}/community",
+        json={"actor_id": principal.user_id, "community_id": community.id},
+    )
+    _audit(db, community.id, principal.user_id, "group_chat_linked", "conversation", payload.conversation_id)
+    db.commit()
+    return result
+
+
+@app.delete("/communities/{handle}/group-chats/{conversation_id}", tags=["communities"])
+def unlink_group_chat(handle: str, conversation_id: str, principal: CurrentUser, db: OrmSession = Depends(get_db)):
+    """Take a chat off the community. The community's owner or a moderator."""
+    community = _community_or_404(db, handle)
+    _require_steward(db, community.id, principal.user_id)
+    result = _messaging(
+        "POST",
+        f"/internal/groups/{conversation_id}/community",
+        json={"actor_id": principal.user_id, "unlink_from": community.id},
+    )
+    _audit(db, community.id, principal.user_id, "group_chat_unlinked", "conversation", conversation_id)
+    db.commit()
+    return result

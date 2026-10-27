@@ -103,6 +103,8 @@ SUPERVISED_SETTINGS = {
     "who_can_invite": {"everyone"},
     "who_can_add_family": {"everyone"},
     "who_can_add_community": {"everyone"},
+    "who_can_add_group": {"everyone"},
+    "who_can_invite_group": {"everyone"},
     "discoverable": {True},
     "who_can_see_family": {"everyone"},
 }
@@ -265,6 +267,8 @@ def revert_to_strictest(db: OrmSession, teen_id: str) -> None:
         "who_can_invite": "connections",
         "who_can_add_family": "connections",
         "who_can_add_community": "connections",
+        "who_can_add_group": "connections",
+        "who_can_invite_group": "connections",
         "who_can_see_family": "family",
         "discoverable": False,
     }

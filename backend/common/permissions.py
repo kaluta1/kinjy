@@ -27,6 +27,8 @@ def get(actor: str, target: str) -> dict | None:
             "can_message": True,
             "can_add_family": True,
             "can_add_community": True,
+            "can_add_group": True,
+            "can_invite_group": True,
             "reason": "self",
         }
     try:

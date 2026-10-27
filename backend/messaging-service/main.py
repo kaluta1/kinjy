@@ -142,6 +142,36 @@ MIGRATIONS = [
         ALTER TABLE {models.SCHEMA}.message_reactions RENAME TO message_reactions_legacy;
       END IF;
     END $$""",
+    # Groups, 27/10: rules, roles' reach, the link's own limits, notification
+    # levels, announcements. All additive, with defaults that keep every
+    # existing group behaving exactly as it did.
+    *(
+        f"ALTER TABLE {models.SCHEMA}.conversations ADD COLUMN IF NOT EXISTS {column}"
+        for column in (
+            "rules TEXT",
+            "posting VARCHAR(10) DEFAULT 'all'",
+            "members_visible VARCHAR(10) DEFAULT 'all'",
+            "polls_by VARCHAR(10) DEFAULT 'all'",
+            "invite_enabled BOOLEAN DEFAULT TRUE",
+            "invite_expires_at TIMESTAMPTZ",
+            "invite_max_uses INTEGER",
+            "invite_uses INTEGER DEFAULT 0",
+            "community_id VARCHAR(40)",
+            "last_everyone_at TIMESTAMPTZ",
+            "deleted_at TIMESTAMPTZ",
+        )
+    ),
+    f"CREATE INDEX IF NOT EXISTS ix_conversations_community_id ON {models.SCHEMA}.conversations (community_id)",
+    *(
+        f"ALTER TABLE {models.SCHEMA}.participants ADD COLUMN IF NOT EXISTS {column}"
+        for column in (
+            "notify_level VARCHAR(15) DEFAULT 'all'",
+            "muted_until TIMESTAMPTZ",
+            "read_receipts BOOLEAN DEFAULT TRUE",
+        )
+    ),
+    f"ALTER TABLE {models.SCHEMA}.messages ADD COLUMN IF NOT EXISTS announcement_at TIMESTAMPTZ",
+    f"ALTER TABLE {models.SCHEMA}.messages ADD COLUMN IF NOT EXISTS removed_by VARCHAR(40)",
 ]
 
 
@@ -157,12 +187,15 @@ def _rebuild_reactions() -> None:
         log.exception("could not rebuild the reactions table after the migrations")
 
 
+# A list the group features add their reminder worker to (group_features.py).
+STARTUP = [_rebuild_reactions, lambda: _start_sealing()]
+
 app = create_app(
     name="messaging-service",
     schema=models.SCHEMA,
     migrations=MIGRATIONS,
     description="End-to-end encrypted direct messages, group conversations, notifications.",
-    on_startup=[_rebuild_reactions, lambda: _start_sealing()],
+    on_startup=STARTUP,
 )
 
 # --- the realtime hub ------------------------------------------------------
@@ -346,6 +379,35 @@ async def _blocked_with(user_id: str) -> set[str] | None:
         return None
 
 
+def _blocked_with_sync(user_id: str) -> set[str] | None:
+    """`_blocked_with` for code that is not async. None if unknown."""
+    try:
+        response = httpx.get(f"{USER_URL}/internal/blocks/{user_id}", timeout=3)
+        response.raise_for_status()
+        return set(response.json()["ids"])
+    except Exception as exc:
+        log.warning("block list unavailable for %s: %s", user_id, exc)
+        return None
+
+
+# What a member hears about, by their level for the room (Participant.notify_level).
+# Muting silences all of it until it runs out.
+HEARS = {
+    "all": {"message", "mention", "reply", "announcement", "reminder", "invite"},
+    "mentions": {"mention", "reply", "announcement", "reminder", "invite"},
+    "announcements": {"announcement", "reminder", "invite"},
+}
+
+
+def _wants(participant: models.Participant | None, what: str) -> bool:
+    """Whether this member wants to be notified of `what` in this room."""
+    if participant is None:
+        return False
+    if participant.muted_until and participant.muted_until > datetime.now(timezone.utc):
+        return False
+    return what in HEARS.get(participant.notify_level or "all", HEARS["all"])
+
+
 async def _announce_presence(user_id: str, online: bool) -> None:
     seen = _last_seen.get(user_id)
     await _publish_to_users(
@@ -386,6 +448,10 @@ class ConversationIn(BaseModel):
     title: str | None = Field(default=None, max_length=140)
     description: str | None = Field(default=None, max_length=2_000)
     encrypted: bool = True
+    # Groups: the rules, and a photo and banner uploaded beforehand.
+    rules: str | None = Field(default=None, max_length=4_000)
+    avatar_asset_id: str | None = Field(default=None, max_length=40)
+    cover_asset_id: str | None = Field(default=None, max_length=40)
 
 
 class MessageIn(BaseModel):
@@ -425,12 +491,32 @@ def _purge_expired(db: OrmSession, conversation_id: str | None = None) -> int:
     if conversation_id:
         expired = expired.where(models.Message.conversation_id == conversation_id)
         stmt = stmt.where(models.Message.conversation_id == conversation_id)
-    # A reaction must not outlive the message it is under.
+    # A reaction must not outlive the message it is under, nor a pin, a
+    # bookmark, or the poll, event or task the message carried.
     db.execute(delete(models.MessageReaction).where(models.MessageReaction.message_id.in_(expired)))
+    _drop_attached(db, expired)
     removed = db.execute(stmt).rowcount or 0
     if removed:
         db.commit()
     return removed
+
+
+def _drop_attached(db: OrmSession, message_ids) -> None:
+    """Delete the pins, bookmarks, polls, events and tasks of some messages.
+
+    ``message_ids`` is a list or a select of ids. Used when messages expire,
+    are deleted or are removed: none of these may outlive what they point at.
+    """
+    db.execute(delete(models.PinnedMessage).where(models.PinnedMessage.message_id.in_(message_ids)))
+    db.execute(delete(models.SavedMessage).where(models.SavedMessage.message_id.in_(message_ids)))
+    polls = select(models.Poll.id).where(models.Poll.message_id.in_(message_ids))
+    db.execute(delete(models.PollVote).where(models.PollVote.poll_id.in_(polls)))
+    db.execute(delete(models.PollOption).where(models.PollOption.poll_id.in_(polls)))
+    db.execute(delete(models.Poll).where(models.Poll.message_id.in_(message_ids)))
+    events = select(models.GroupEvent.id).where(models.GroupEvent.message_id.in_(message_ids))
+    db.execute(delete(models.EventResponse).where(models.EventResponse.event_id.in_(events)))
+    db.execute(delete(models.GroupEvent).where(models.GroupEvent.message_id.in_(message_ids)))
+    db.execute(delete(models.GroupTask).where(models.GroupTask.message_id.in_(message_ids)))
 
 
 def _member(db: OrmSession, conversation_id: str, user_id: str) -> models.Participant:
@@ -443,6 +529,25 @@ def _member(db: OrmSession, conversation_id: str, user_id: str) -> models.Partic
     if participant is None:
         raise HTTPException(status_code=404, detail="Conversation not found")
     return participant
+
+
+def _visible_from(room: models.Conversation | None, me: models.Participant) -> datetime | None:
+    """The earliest moment of the room this member may read, or None for all.
+
+    A group that keeps its history from newcomers shows a member only what was
+    said from when they joined; admins read everything. Every path that serves
+    a message - the thread, search, pins, saved messages, the files view, polls,
+    events and tasks - goes through this, so the rule is the same everywhere.
+    """
+    if (
+        room is not None
+        and room.kind == "group"
+        and (room.history_for_new or "all") == "from_join"
+        and me.role not in ("owner", "admin")
+        and me.joined_at is not None
+    ):
+        return me.joined_at
+    return None
 
 
 def _arrival_accepted(user_id: str) -> bool:
@@ -548,16 +653,30 @@ def create_conversation(payload: ConversationIn, principal: CurrentUser, db: Orm
     members = sorted({*payload.participant_ids, principal.user_id})
     if payload.kind == "direct" and len(members) != 2:
         raise HTTPException(status_code=400, detail="A direct conversation has exactly two participants")
+    if payload.kind == "group" and not (payload.title or "").strip():
+        raise HTTPException(status_code=422, detail="A group needs a name")
 
     # Whether you may message someone is their decision, not ours. user-service
     # owns that rule; asking it here is what makes the privacy setting real
     # rather than a checkbox the UI honours and the API ignores.
+    #
+    # A group asks two questions instead: may this person be put straight
+    # into a group by you, and if not, may you invite them. Somebody who
+    # allows neither is refused and nothing is created.
+    invited: list[str] = []
     for member in members:
         if member == principal.user_id:
             continue
-        allowed, reason = permissions.check(principal.user_id, member, 'can_message', 'message this member')
-        if not allowed:
-            raise HTTPException(status_code=403, detail=reason)
+        if payload.kind == "group":
+            how, reason = _how_to_bring_in(principal.user_id, member)
+            if how == "refused":
+                raise HTTPException(status_code=403, detail=reason)
+            if how == "invite":
+                invited.append(member)
+        else:
+            allowed, reason = permissions.check(principal.user_id, member, 'can_message', 'message this member')
+            if not allowed:
+                raise HTTPException(status_code=403, detail=reason)
 
         # And the layer the recipient cannot set for themselves. A teenager who
         # has left their messages open to anyone has not thereby agreed to
@@ -580,11 +699,23 @@ def create_conversation(payload: ConversationIn, principal: CurrentUser, db: Orm
             if conversation and conversation.kind == "direct":
                 return {"id": cid, "existing": True}
 
+    images: dict[str, str | None] = {}
+    if payload.kind == "group":
+        for purpose in GROUP_IMAGES:
+            asset_id = getattr(payload, f"{purpose}_asset_id")
+            if asset_id:
+                images[purpose] = _ready_image_url(asset_id, principal.user_id, purpose)
+
     conversation = models.Conversation(
         id=new_id("cnv"),
         kind=payload.kind,
-        title=payload.title,
+        title=(payload.title or "").strip() or None if payload.kind == "group" else payload.title,
         description=payload.description if payload.kind == "group" else None,
+        rules=(payload.rules or "").strip() or None if payload.kind == "group" else None,
+        avatar_asset_id=payload.avatar_asset_id if "avatar" in images else None,
+        avatar_url=images.get("avatar"),
+        cover_asset_id=payload.cover_asset_id if "cover" in images else None,
+        cover_url=images.get("cover"),
         created_by=principal.user_id,
         # A group is never end-to-end encrypted, whatever the client asks for.
         # End-to-end for three or more people needs a group key agreement, and
@@ -596,7 +727,9 @@ def create_conversation(payload: ConversationIn, principal: CurrentUser, db: Orm
     )
     db.add(conversation)
     db.flush()
-    for uid in members:
+    for uid in invited:
+        db.add(models.GroupInvite(conversation_id=conversation.id, invitee_id=uid, inviter_id=principal.user_id))
+    for uid in (m for m in members if m not in invited):
         db.add(
             models.Participant(
                 conversation_id=conversation.id,
@@ -621,8 +754,19 @@ def create_conversation(payload: ConversationIn, principal: CurrentUser, db: Orm
                 ),
             )
         )
+    if payload.kind == "group":
+        _audit(db, conversation.id, principal.user_id, "created", detail=conversation.title)
+        for uid in invited:
+            _audit(db, conversation.id, principal.user_id, "invited", target_id=uid)
     db.commit()
-    return {"id": conversation.id, "encrypted": conversation.encrypted, "existing": False}
+    for uid in invited:
+        _tell_invited(conversation, uid, principal.user_id)
+    return {
+        "id": conversation.id,
+        "encrypted": conversation.encrypted,
+        "existing": False,
+        "invited": invited,
+    }
 
 
 # --- calls ------------------------------------------------------------------
@@ -713,6 +857,7 @@ def _discard_image(asset_id: str, owner_id: str) -> None:
 class GroupEdit(BaseModel):
     title: str | None = Field(default=None, max_length=140)
     description: str | None = Field(default=None, max_length=2_000)
+    rules: str | None = Field(default=None, max_length=4_000)
     # Uploaded through the same flow as a profile photo, and applied here by
     # id. None takes the picture off the group.
     avatar_asset_id: str | None = None
@@ -726,7 +871,7 @@ class MembersIn(BaseModel):
 
 
 class RoleIn(BaseModel):
-    role: str = Field(pattern="^(admin|member)$")
+    role: str = Field(pattern="^(admin|moderator|member)$")
 
 
 def _group(db: OrmSession, conversation_id: str, user_id: str) -> models.Conversation:
@@ -738,12 +883,92 @@ def _group(db: OrmSession, conversation_id: str, user_id: str) -> models.Convers
     return conversation
 
 
+# What each role may do, in one place (enforced by the helpers below):
+#
+#   owner      everything; the only one who appoints or removes admins,
+#              transfers ownership or deletes the group
+#   admin      the group's profile, rules and settings, the link, invitations,
+#              join requests, adding and removing members and moderators,
+#              appointing moderators, announcements, the audit log
+#   moderator  pinning messages, removing other people's messages, closing
+#              polls, writing in announcement mode
+#   member     talking, reacting, polls, events and tasks (as the group allows)
+RUNS = ("owner", "admin")
+MODERATES = ("owner", "admin", "moderator")
+
+
 def _runs_group(db: OrmSession, conversation_id: str, user_id: str) -> models.Participant:
     """Owner or admin. Everybody else is a member, and may read and write."""
     participant = _member(db, conversation_id, user_id)
-    if participant.role not in ("owner", "admin"):
+    if participant.role not in RUNS:
         raise HTTPException(status_code=403, detail="Only the group's admins can do that")
     return participant
+
+
+def _moderates(db: OrmSession, conversation_id: str, user_id: str) -> models.Participant:
+    """Owner, admin or moderator."""
+    participant = _member(db, conversation_id, user_id)
+    if participant.role not in MODERATES:
+        raise HTTPException(status_code=403, detail="Only the group's admins and moderators can do that")
+    return participant
+
+
+def _audit(
+    db: OrmSession,
+    conversation_id: str,
+    actor_id: str,
+    action: str,
+    target_id: str | None = None,
+    detail: str | None = None,
+) -> None:
+    """One line of the group's audit trail, in the caller's transaction."""
+    db.add(
+        models.GroupAudit(
+            conversation_id=conversation_id,
+            actor_id=actor_id,
+            action=action,
+            target_id=target_id,
+            detail=detail,
+        )
+    )
+
+
+def _how_to_bring_in(actor_id: str, user_id: str) -> tuple[str, str]:
+    """("add" | "invite" | "refused", reason) for putting somebody in a group.
+
+    Their own settings decide (user-service): somebody who lets you add them
+    is added; somebody who only lets you invite them gets an invitation they
+    answer; anybody else - and anybody on either side of a block - is refused.
+    Fails closed when user-service cannot answer.
+    """
+    data = permissions.get(actor_id, user_id)
+    if data is None:
+        return "refused", "Could not verify this member's settings. Try again shortly."
+    if data.get("reason") == "blocked":
+        return "refused", "You cannot add this member to a group."
+    if data.get("can_add_group"):
+        return "add", ""
+    if data.get("can_invite_group"):
+        return "invite", ""
+    return "refused", "This member does not accept group invitations from you."
+
+
+def _tell_invited(conversation: models.Conversation, invitee_id: str, inviter_id: str) -> None:
+    """Notify somebody of an invitation. Best effort: the invitation stands."""
+    try:
+        with SessionLocal() as db:
+            who = _display_names({inviter_id})[inviter_id]
+            db.add(
+                models.Notification(
+                    user_id=invitee_id,
+                    kind="group_invite",
+                    title=f"{who} invited you to the group {conversation.title or ''}".strip(),
+                    link="/messages/invites",
+                )
+            )
+            db.commit()
+    except Exception as exc:
+        log.warning("could not notify %s of a group invitation: %s", invitee_id, exc)
 
 
 def _display_names(user_ids: set[str]) -> dict[str, str]:
@@ -784,22 +1009,37 @@ def group_participants(
     the whole list is neither something anybody scrolls nor something that can
     be resolved to names in one request.
     """
-    _member(db, conversation_id, principal.user_id)
+    me = _member(db, conversation_id, principal.user_id)
+    room = db.get(models.Conversation, conversation_id)
     rows = db.scalars(
         select(models.Participant).where(models.Participant.conversation_id == conversation_id)
     ).all()
+    # A group can keep its member list to its admins. Everybody else still sees
+    # who runs it - you have to know whom to ask - and how many are in it.
+    hidden = (
+        room is not None
+        and room.kind == "group"
+        and (room.members_visible or "all") == "admins"
+        and me.role not in RUNS
+    )
+    total_all = len(rows)
+    if hidden:
+        rows = [r for r in rows if r.role in MODERATES or r.user_id == principal.user_id]
     # Admins first, then by name, which is the order this list is read in - so
     # the sort has to happen before the page is cut, and the names needed for
     # it come from the page's own rows. Roles are few: admins are fetched in
     # full, and the rest of the page is whoever the offset lands on.
-    order = {"owner": 0, "admin": 1, "member": 2}
+    order = {"owner": 0, "admin": 1, "moderator": 2, "member": 3}
     # By id after the role, not by joined_at: the column is nullable and
     # timezone-aware, and comparing it against a fallback is a TypeError
     # waiting for the first row that has none. Ids are time-ordered anyway.
-    rows = sorted(rows, key=lambda r: (order.get(r.role, 3), r.user_id))
+    rows = sorted(rows, key=lambda r: (order.get(r.role, 4), r.user_id))
     total = len(rows)
     page = rows[max(0, offset) : max(0, offset) + max(1, min(limit, 200))]
     people = _profiles({r.user_id for r in page})
+    # Who the viewer has a block with, so the list can say so. Unknown is
+    # treated as none: this only labels, it grants nothing.
+    blocked = _blocked_with_sync(principal.user_id) or set()
     items = sorted(
         (
             {
@@ -809,12 +1049,22 @@ def group_participants(
                 "handle": (people.get(r.user_id) or {}).get("handle"),
                 "display_name": (people.get(r.user_id) or {}).get("display_name") or r.user_id[:12],
                 "avatar_url": (people.get(r.user_id) or {}).get("avatar_url"),
+                "blocked": r.user_id in blocked,
             }
             for r in page
         ),
-        key=lambda p: (order.get(p["role"], 3), (p["display_name"] or "").lower()),
+        key=lambda p: (order.get(p["role"], 4), (p["display_name"] or "").lower()),
     )
-    return {"total": total, "items": items, "offset": offset, "has_more": offset + len(page) < total}
+    return {
+        "total": total,
+        "items": items,
+        "offset": offset,
+        "has_more": offset + len(page) < total,
+        # The real size of the group, and whether the list above is only the
+        # people who run it.
+        "members_count": total_all,
+        "limited": hidden,
+    }
 
 
 @app.patch("/conversations/{conversation_id}", tags=["groups"])
@@ -836,6 +1086,9 @@ async def edit_group(
     if payload.description is not None and payload.description.strip() != (conversation.description or ""):
         conversation.description = payload.description.strip() or None
         changed.append("changed the description")
+    if payload.rules is not None and payload.rules.strip() != (conversation.rules or ""):
+        conversation.rules = payload.rules.strip() or None
+        changed.append("updated the group rules" if conversation.rules else "removed the group rules")
 
     # The photo and the banner. Checked against media-service before they are
     # applied, and the one they replace is deleted afterwards - an image nobody
@@ -862,6 +1115,7 @@ async def edit_group(
     if changed:
         who = _display_names({principal.user_id})[principal.user_id]
         _system_message(db, conversation_id, who + " " + " and ".join(changed) + ".")
+        _audit(db, conversation_id, principal.user_id, "profile_changed", detail="; ".join(changed))
     db.commit()
     for asset_id in replaced:
         _discard_image(asset_id, principal.user_id)
@@ -875,6 +1129,7 @@ async def edit_group(
         "description": conversation.description,
         "avatar_url": conversation.avatar_url,
         "cover_url": conversation.cover_url,
+        "rules": conversation.rules,
     }
 
 
@@ -950,18 +1205,42 @@ async def add_participants(
     _group(db, conversation_id, principal.user_id)
     _runs_group(db, conversation_id, principal.user_id)
 
+    conversation = db.get(models.Conversation, conversation_id)
     present = set(_participant_ids(db, conversation_id))
-    added = []
+    # Everybody is checked before anybody is added: a batch with one refusal
+    # in it changes nothing, rather than half of it.
+    plan: dict[str, str] = {}
     for uid in dict.fromkeys(payload.user_ids):
         if uid in present:
             continue
-        allowed, reason = permissions.check(principal.user_id, uid, "can_message", "add this member")
-        if not allowed:
+        how, reason = _how_to_bring_in(principal.user_id, uid)
+        if how == "refused":
             raise HTTPException(status_code=403, detail=reason)
         age_ok, age_reason = agecheck.may_open_conversation(db, principal.user_id, uid)
         if not age_ok:
             db.commit()
             raise HTTPException(status_code=403, detail=age_reason)
+        plan[uid] = how
+
+    added = []
+    invited = []
+    for uid, how in plan.items():
+        if how == "invite":
+            row = db.scalar(
+                select(models.GroupInvite).where(
+                    models.GroupInvite.conversation_id == conversation_id,
+                    models.GroupInvite.invitee_id == uid,
+                )
+            )
+            if row is None:
+                db.add(models.GroupInvite(conversation_id=conversation_id, invitee_id=uid, inviter_id=principal.user_id))
+            elif row.status != "pending":
+                row.status, row.inviter_id, row.created_at, row.answered_at = "pending", principal.user_id, datetime.now(timezone.utc), None
+            else:
+                continue
+            _audit(db, conversation_id, principal.user_id, "invited", target_id=uid)
+            invited.append(uid)
+            continue
         db.add(
             models.Participant(
                 conversation_id=conversation_id,
@@ -971,6 +1250,7 @@ async def add_participants(
             )
         )
         added.append(uid)
+        _audit(db, conversation_id, principal.user_id, "added", target_id=uid)
 
     if added:
         names = ", ".join(_display_names(set(added)).values())
@@ -978,9 +1258,11 @@ async def add_participants(
         _system_message(db, conversation_id, who + " added " + names + ".")
     db.commit()
 
+    for uid in invited:
+        _tell_invited(conversation, uid, principal.user_id)
     if added:
         await _announce_joined(db, conversation_id, added, background)
-    return {"added": added}
+    return {"added": added, "invited": invited}
 
 
 @app.delete("/conversations/{conversation_id}/participants/{user_id}", tags=["groups"])
@@ -997,12 +1279,34 @@ async def remove_participant(
     """
     conversation = _group(db, conversation_id, principal.user_id)
     leaving = user_id == principal.user_id
+    actor = _member(db, conversation_id, principal.user_id)
     if not leaving:
         _runs_group(db, conversation_id, principal.user_id)
 
     target = _member(db, conversation_id, user_id)
     if target.role == "owner" and not leaving:
         raise HTTPException(status_code=403, detail="The owner cannot be removed")
+    if target.role == "admin" and not leaving and actor.role != "owner":
+        raise HTTPException(status_code=403, detail="Only the owner can remove an admin")
+    if leaving and target.role == "owner" and not conversation.is_welcome:
+        # A group is never left without an owner: they hand it on first, or
+        # delete it if they are the last one in it.
+        others = db.scalar(
+            select(func.count())
+            .select_from(models.Participant)
+            .where(
+                models.Participant.conversation_id == conversation_id,
+                models.Participant.user_id != principal.user_id,
+            )
+        ) or 0
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Make somebody else the owner before you leave."
+                if others
+                else "You are the only member. Delete the group instead."
+            ),
+        )
     if conversation.is_welcome and not leaving:
         # Everybody belongs to the welcome group by definition. Removing
         # somebody from it would be putting them outside the platform's front
@@ -1011,6 +1315,8 @@ async def remove_participant(
 
     names = _display_names({user_id, principal.user_id})
     db.delete(target)
+    if not leaving:
+        _audit(db, conversation_id, principal.user_id, "removed", target_id=user_id, detail=target.role)
     _system_message(
         db,
         conversation_id,
@@ -1034,23 +1340,30 @@ async def set_participant_role(
     principal: CurrentUser,
     db: OrmSession = Depends(get_db),
 ):
-    """Make somebody an admin, or take it back. Admins only; the owner stays the owner."""
+    """Appoint an admin or a moderator, or take it back.
+
+    Admins are the owner's to appoint and remove; moderators are any admin's.
+    The owner's own role changes only by handing the group on.
+    """
     _group(db, conversation_id, principal.user_id)
-    _runs_group(db, conversation_id, principal.user_id)
+    actor = _runs_group(db, conversation_id, principal.user_id)
     target = _member(db, conversation_id, user_id)
     if target.role == "owner":
-        raise HTTPException(status_code=403, detail="The owner's role cannot be changed")
+        raise HTTPException(status_code=403, detail="The owner's role changes only by handing the group on")
+    if (payload.role == "admin" or target.role == "admin") and actor.role != "owner":
+        raise HTTPException(status_code=403, detail="Only the owner can appoint or remove admins")
 
     if target.role != payload.role:
+        previous = target.role
         target.role = payload.role
         names = _display_names({user_id, principal.user_id})
-        _system_message(
-            db,
-            conversation_id,
-            names[principal.user_id] + " made " + names[user_id] + " an admin."
-            if payload.role == "admin"
-            else names[principal.user_id] + " removed " + names[user_id] + " as an admin.",
-        )
+        said = {
+            "admin": " made " + names[user_id] + " an admin.",
+            "moderator": " made " + names[user_id] + " a moderator.",
+            "member": " removed " + names[user_id] + (" as an admin." if previous == "admin" else " as a moderator."),
+        }[payload.role]
+        _system_message(db, conversation_id, names[principal.user_id] + said)
+        _audit(db, conversation_id, principal.user_id, "role_changed", target_id=user_id, detail=f"{previous} -> {payload.role}")
     db.commit()
     await _publish_to_users(
         _participant_ids(db, conversation_id),
@@ -1081,14 +1394,29 @@ class RequestActionIn(BaseModel):
     action: str = Field(pattern="^(approve|reject)$")
 
 
-def _by_code(db: OrmSession, code: str) -> models.Conversation:
+def _link_problem(conversation: models.Conversation) -> str | None:
+    """Why a group's link cannot be used right now, or None if it can."""
+    if conversation.invite_enabled is False:
+        return "This link has been turned off by the group's admins."
+    if conversation.invite_expires_at and conversation.invite_expires_at <= datetime.now(timezone.utc):
+        return "This link has expired."
+    if conversation.invite_max_uses and (conversation.invite_uses or 0) >= conversation.invite_max_uses:
+        return "This link has been used as many times as it allows."
+    return None
+
+
+def _by_code(db: OrmSession, code: str, usable: bool = True) -> models.Conversation:
     row = db.scalar(
         select(models.Conversation).where(
             models.Conversation.invite_code == code, models.Conversation.kind == "group"
         )
     ) if code else None
-    if row is None or row.is_welcome:
+    if row is None or row.is_welcome or row.deleted_at:
         raise HTTPException(status_code=404, detail="This link does not lead anywhere")
+    if usable:
+        problem = _link_problem(row)
+        if problem:
+            raise HTTPException(status_code=410, detail=problem)
     return row
 
 
@@ -1145,6 +1473,7 @@ async def set_group_history(
     if (conversation.history_for_new or "all") == payload.history:
         return {"history": payload.history, "changed": False}
     conversation.history_for_new = payload.history
+    _audit(db, conversation_id, principal.user_id, "history_changed", detail=payload.history)
     who = _display_names({principal.user_id})[principal.user_id]
     _system_message(
         db,
@@ -1181,6 +1510,7 @@ async def set_group_privacy(
         return {"privacy": payload.privacy, "changed": False, "admitted": 0}
 
     conversation.privacy = payload.privacy
+    _audit(db, conversation_id, principal.user_id, "privacy_changed", detail=payload.privacy)
     who = _display_names({principal.user_id})[principal.user_id]
     _system_message(
         db,
@@ -1211,14 +1541,24 @@ async def set_group_privacy(
 
 @app.post("/conversations/{conversation_id}/share-link", tags=["groups"])
 def group_share_link(conversation_id: str, principal: CurrentUser, db: OrmSession = Depends(get_db)):
-    """The link to send, public or private. Any member may share it."""
+    """The link to send, public or private. Any member may share it, while
+    the admins keep it on."""
     conversation = _group(db, conversation_id, principal.user_id)
     if conversation.is_welcome:
         raise HTTPException(status_code=400, detail="Everybody is in the welcome group already")
+    problem = _link_problem(conversation)
+    if problem:
+        raise HTTPException(status_code=409, detail=problem)
     if not conversation.invite_code:
         conversation.invite_code = secrets.token_urlsafe(12)
         db.commit()
-    return {"path": f"/messages/join/{conversation.invite_code}", "code": conversation.invite_code}
+    return {
+        "path": f"/messages/join/{conversation.invite_code}",
+        "code": conversation.invite_code,
+        "expires_at": conversation.invite_expires_at,
+        "max_uses": conversation.invite_max_uses,
+        "uses": conversation.invite_uses or 0,
+    }
 
 
 @app.get("/internal/groups/by-code/{code}", tags=["internal"])
@@ -1238,9 +1578,9 @@ def group_by_code(code: str, db: OrmSession = Depends(get_db)):
 
 @app.get("/conversations/join/{code}", tags=["groups"])
 def preview_by_link(code: str, principal: CurrentUser, db: OrmSession = Depends(get_db)):
-    """What somebody holding the link sees before they decide: the group's face
-    and what it is for, never its messages or its members."""
-    conversation = _by_code(db, code)
+    """What somebody holding the link sees before they decide: the group's face,
+    what it is for and its rules, never its messages or its members."""
+    conversation = _by_code(db, code, usable=False)
     member = db.scalar(
         select(models.Participant).where(
             models.Participant.conversation_id == conversation.id,
@@ -1262,6 +1602,9 @@ def preview_by_link(code: str, principal: CurrentUser, db: OrmSession = Depends(
         "privacy": conversation.privacy or "private",
         "members_count": len(_participant_ids(db, conversation.id)),
         "my_state": "member" if member else "pending" if pending else "none",
+        "rules": conversation.rules,
+        # Why the link cannot be used, said before anybody presses Join.
+        "unavailable": None if member else _link_problem(conversation),
     }
 
 
@@ -1282,6 +1625,7 @@ async def join_by_link(
 
     if (conversation.privacy or "private") == "public":
         _admit(db, conversation.id, principal.user_id)
+        conversation.invite_uses = (conversation.invite_uses or 0) + 1
         who = _display_names({principal.user_id})[principal.user_id]
         _system_message(db, conversation.id, who + " joined with the group's link.")
         db.commit()
@@ -1296,6 +1640,7 @@ async def join_by_link(
     )
     if exists is None:
         db.add(models.JoinRequest(conversation_id=conversation.id, user_id=principal.user_id))
+        conversation.invite_uses = (conversation.invite_uses or 0) + 1
         db.commit()
         admins = db.scalars(
             select(models.Participant.user_id).where(
@@ -1369,6 +1714,7 @@ async def answer_request(
         raise HTTPException(status_code=404, detail="No request from this member")
     if payload.action == "reject":
         db.delete(row)
+        _audit(db, conversation_id, principal.user_id, "request_rejected", target_id=user_id)
         db.commit()
         return {"user_id": user_id, "status": "rejected"}
 
@@ -1378,6 +1724,7 @@ async def answer_request(
             detail="This member cannot be let in from a link. Add them from the member list instead.",
         )
     _admit(db, conversation_id, user_id)
+    _audit(db, conversation_id, principal.user_id, "request_approved", target_id=user_id)
     names = _display_names({user_id, principal.user_id})
     _system_message(db, conversation_id, names[principal.user_id] + " let " + names[user_id] + " in.")
     db.commit()
@@ -1713,6 +2060,10 @@ async def set_disappearing(
     """
     _member(db, conversation_id, principal.user_id)
     conversation = db.get(models.Conversation, conversation_id)
+    if conversation.kind == "group":
+        # In a group it is a setting of the group, so it is the admins'.
+        _runs_group(db, conversation_id, principal.user_id)
+        _audit(db, conversation_id, principal.user_id, "disappearing_changed", detail=str(payload.seconds))
     conversation.disappear_after_seconds = payload.seconds
     db.commit()
 
@@ -1818,19 +2169,24 @@ def list_conversations(principal: CurrentUser, db: OrmSession = Depends(get_db))
     my_role: dict[str, str] = {}
     my_pin: dict[str, datetime] = {}
     my_accepted: dict[str, bool] = {}
+    my_row: dict[str, models.Participant] = {}
     for m in memberships:
         members.setdefault(m.conversation_id, []).append(m.user_id)
         if m.user_id == principal.user_id:
             my_role[m.conversation_id] = m.role
             my_accepted[m.conversation_id] = m.accepted_at is not None
+            my_row[m.conversation_id] = m
             if m.pinned_at is not None:
                 my_pin[m.conversation_id] = m.pinned_at
         # "Seen" is a thing you say about a direct conversation. In a group it
         # would be a row per member, which is both meaningless to draw and the
-        # same payload problem as the profiles above.
+        # same payload problem as the profiles above. A member who keeps their
+        # reading to themselves is left out (null reads as "not seen").
         if m.conversation_id not in group_ids:
             read_state.setdefault(m.conversation_id, {})[m.user_id] = (
-                m.last_read_at.isoformat() if m.last_read_at else None
+                m.last_read_at.isoformat()
+                if m.last_read_at and (m.read_receipts is not False or m.user_id == principal.user_id)
+                else None
             )
 
     # A group now holds everybody - the welcome group is the whole platform -
@@ -1891,6 +2247,32 @@ def list_conversations(principal: CurrentUser, db: OrmSession = Depends(get_db))
                 # fetch the member list to decide whether to show a settings
                 # button.
                 "my_role": my_role.get(r.id, "member"),
+                # Groups, 27/10: the rules and how the group runs.
+                **(
+                    {
+                        "rules": r.rules,
+                        "posting": r.posting or "all",
+                        "members_visible": r.members_visible or "all",
+                        "polls_by": r.polls_by or "all",
+                        "community_id": r.community_id,
+                        "disappear_after_seconds": r.disappear_after_seconds or 0,
+                        # The link's limits are for the people who manage it.
+                        "invite_link": (
+                            {
+                                "enabled": r.invite_enabled is not False,
+                                "expires_at": r.invite_expires_at,
+                                "max_uses": r.invite_max_uses,
+                                "uses": r.invite_uses or 0,
+                            }
+                            if my_role.get(r.id) in RUNS
+                            else None
+                        ),
+                    }
+                    if r.kind == "group"
+                    else {}
+                ),
+                # This member's own notifications for the room.
+                "notifications": _my_notifications(my_row.get(r.id)),
                 "encrypted": r.encrypted,
                 "last_message_at": r.last_message_at,
                 # Everybody for a direct conversation; a few faces for a group,
@@ -1921,6 +2303,19 @@ def list_conversations(principal: CurrentUser, db: OrmSession = Depends(get_db))
             }
             for r in rows
         ]
+    }
+
+
+def _my_notifications(row: models.Participant | None) -> dict:
+    """A member's notification settings for one room, as the client draws them."""
+    if row is None:
+        return {"level": "all", "muted_until": None, "muted_forever": False, "read_receipts": True}
+    muted = row.muted_until if row.muted_until and row.muted_until > datetime.now(timezone.utc) else None
+    return {
+        "level": row.notify_level or "all",
+        "muted_until": None if muted is None or muted >= models.MUTED_FOREVER else muted,
+        "muted_forever": muted is not None and muted >= models.MUTED_FOREVER,
+        "read_receipts": row.read_receipts is not False,
     }
 
 
@@ -2067,6 +2462,8 @@ def _media_fields(message: models.Message) -> dict:
     }
 
 
+CARD_LABELS = {"poll": "Poll", "event": "Event", "task": "Task"}
+
 MEDIA_LABELS = {"image": "a photo", "video": "a video", "audio": "a voice or audio message",
                 "document": "a document", "file": "a file"}
 
@@ -2079,6 +2476,8 @@ def _preview(message: models.Message) -> str:
     if message.encrypted:
         return "Encrypted message"
     text = (_plain(message)[0] or "").strip()
+    if message.kind in CARD_LABELS:
+        return f"{CARD_LABELS[message.kind]}: {text}"
     if message.media_kind:
         label = MEDIA_LABELS.get(message.media_kind, "a file")
         return f"Sent {label}" + (f": {text}" if text else "")
@@ -2142,6 +2541,8 @@ async def edit_message(
             status_code=409, detail="An end-to-end encrypted message cannot be edited")
     if message.kind == "sticker":
         raise HTTPException(status_code=409, detail="A sticker has no text to edit")
+    if message.kind in ("poll", "event", "task", "system"):
+        raise HTTPException(status_code=409, detail="This message is changed from its own card, not edited")
 
     # The attachment's name is kept: editing a caption must not erase what the file is called.
     _seal(message, payload.body, _plain(message)[1])
@@ -2175,15 +2576,33 @@ async def delete_message(
     Reactions to it go too: a row of thumbs-ups attached to nothing is a
     reminder of what was there, which is the opposite of deleting it.
     """
-    _member(db, conversation_id, principal.user_id)
+    me = _member(db, conversation_id, principal.user_id)
+    conversation = db.get(models.Conversation, conversation_id)
     message = db.get(models.Message, message_id)
-    if message is None or message.conversation_id != conversation_id:
+    if message is None or message.conversation_id != conversation_id or message.kind == "system":
         raise HTTPException(status_code=404, detail="Message not found")
-    if message.sender_id != principal.user_id:
-        raise HTTPException(status_code=403, detail="You can only delete your own messages")
+    removing = message.sender_id != principal.user_id
+    if removing:
+        # In a group, the people who keep order take down what breaks it: the
+        # owner, admins and moderators - but not the owner's own messages, and
+        # a moderator not an admin's.
+        if conversation.kind != "group" or me.role not in MODERATES:
+            raise HTTPException(status_code=403, detail="You can only delete your own messages")
+        author = db.scalar(
+            select(models.Participant.role).where(
+                models.Participant.conversation_id == conversation_id,
+                models.Participant.user_id == message.sender_id,
+            )
+        )
+        rank = {"owner": 0, "admin": 1, "moderator": 2}
+        if author in rank and rank[author] <= rank[me.role]:
+            raise HTTPException(status_code=403, detail="You cannot remove a message from someone at your level or above")
     if message.deleted_at:
         return {"id": message.id, "deleted": True, "already": True}
 
+    if removing:
+        message.removed_by = principal.user_id
+        _audit(db, conversation_id, principal.user_id, "message_removed", target_id=message.sender_id, detail=message.id)
     message.deleted_at = datetime.now(timezone.utc)
     message.body = None
     message.ciphertext = None
@@ -2195,13 +2614,16 @@ async def delete_message(
     message.media_size = None
     message.sticker_id = None
     message.sealed_with = None
+    message.announcement_at = None
     db.execute(delete(models.MessageReaction).where(models.MessageReaction.message_id == message.id))
+    _drop_attached(db, [message.id])
     db.commit()
 
     await _tell_room(db, conversation_id, {
         "type": "message_deleted", "conversation_id": conversation_id, "message_id": message.id,
+        "removed": removing,
     })
-    return {"id": message.id, "deleted": True}
+    return {"id": message.id, "deleted": True, "removed": removing}
 
 
 @app.post("/conversations/{conversation_id}/messages/{message_id}/reactions", tags=["messages"])
@@ -2296,6 +2718,11 @@ async def send_message(
     sender = _member(db, conversation_id, principal.user_id)
     conversation = db.get(models.Conversation, conversation_id)
     _purge_expired(db, conversation_id)
+    if conversation.kind == "group" and (conversation.posting or "all") == "admins" and sender.role not in MODERATES:
+        raise HTTPException(
+            status_code=403,
+            detail="Only the group's admins and moderators can write here. You can still react to messages.",
+        )
 
     if conversation.kind == "direct":
         # Asked on every message, not only when the thread was created: a
@@ -2494,7 +2921,18 @@ async def send_message(
     # opening Messages on the off chance. One waiting notification per thread
     # is enough: ten messages in a row are one reason to come back, not ten.
     link = f"/messages?c={conversation_id}"
-    offline = [uid for uid in participants if uid != principal.user_id and not deliveries.get(uid)]
+    # Each member's own wishes for this room, in one query.
+    wishes = {
+        p.user_id: p
+        for p in db.scalars(
+            select(models.Participant).where(models.Participant.conversation_id == conversation_id)
+        ).all()
+    }
+    offline = [
+        uid
+        for uid in participants
+        if uid != principal.user_id and not deliveries.get(uid) and _wants(wishes.get(uid), "message")
+    ]
     # Resolved once for the whole fan-out, and only when there is somebody to
     # notify: a name lookup per recipient would be a request per member.
     # `_profiles` rather than `_display_names`, which falls back to a truncated
@@ -2534,9 +2972,14 @@ async def send_message(
     if offline:
         db.commit()
 
-    await _notify_mentions(db, conversation, message, principal.user_id, sender_name, participants, background)
+    everyone = await _notify_mentions(
+        db, conversation, message, principal.user_id, sender_name, participants, background, wishes, sender.role
+    )
 
-    return {"id": message.id, "created_at": message.created_at, "client_id": message.client_id}
+    out = {"id": message.id, "created_at": message.created_at, "client_id": message.client_id}
+    if everyone:
+        out["everyone"] = everyone
+    return out
 
 
 # How a handle is written in a message: the same shape the post composer and
@@ -2547,12 +2990,18 @@ MENTION_RE = re.compile(r"(?:^|(?<=\s))@([a-z0-9_.]{2,40})", re.IGNORECASE)
 MAX_MENTIONS = 10
 
 
+# @everyone: the owner, admins and moderators of a group, once an hour at most.
+EVERYONE = "everyone"
+EVERYONE_EVERY = timedelta(hours=1)
+
+
 def _handles_in(texts, limit: int = 50) -> list[str]:
     handles: list[str] = []
     for text in texts:
         for raw in MENTION_RE.findall(text or ""):
             handle = raw.rstrip(".").lower()
-            if handle and handle not in handles:
+            # "@everyone" is the room, never a member who chose that handle.
+            if handle and handle != EVERYONE and handle not in handles:
                 handles.append(handle)
     return handles[:limit]
 
@@ -2591,8 +3040,11 @@ async def _notify_mentions(
     sender_name: str | None,
     participants: list[str],
     background: BackgroundTasks,
-) -> None:
-    """Tell whoever was @mentioned, if they are in the room.
+    wishes: dict[str, models.Participant] | None = None,
+    sender_role: str = "member",
+) -> str | None:
+    """Tell whoever was @mentioned, if they are in the room - and the author
+    of the message this one replies to. Returns what became of an @everyone.
 
     Somebody outside the conversation is never told: a mention is not a way to
     reach a person the room's own rules keep out, nor to announce to them that
@@ -2603,28 +3055,73 @@ async def _notify_mentions(
     The server reads the text only when it can: an end-to-end encrypted
     message carries no plaintext here, so its mentions stay between the
     devices. The notification never quotes the message either.
+
+    Each person's own settings for the room decide (muted, or a level that
+    leaves mentions out), and nobody hears from somebody they have a block
+    with. One notification per person: named and replied to is still one.
     """
     if message.encrypted or message.kind == "system":
-        return
+        return None
     text = _plain(message)[0] or ""
-    if "@" not in text:
-        return
     present = set(participants)
-    named = {uid: h for uid, h in _mentioned_ids(text).items() if uid in present and uid != sender_id}
-    if not named:
-        return
+    wishes = wishes or {}
+
+    def wants(uid: str, what: str) -> bool:
+        # Direct conversations have no levels to speak of; a group's members do.
+        return _wants(wishes.get(uid), what) if conversation.kind == "group" else True
+
+    targets: dict[str, str] = {}
+    if "@" in text:
+        for uid in _mentioned_ids(text):
+            if uid in present and uid != sender_id and wants(uid, "mention"):
+                targets[uid] = "mention"
+    if message.reply_to_id and conversation.kind == "group":
+        author = db.scalar(select(models.Message.sender_id).where(models.Message.id == message.reply_to_id))
+        if author and author in present and author != sender_id and author not in targets and wants(author, "reply"):
+            targets[author] = "reply"
+
+    everyone: str | None = None
+    if conversation.kind == "group" and re.search(r"(?:^|(?<=\s))@everyone\b", text, re.IGNORECASE):
+        now = datetime.now(timezone.utc)
+        if sender_role not in MODERATES:
+            everyone = "not_allowed"
+        elif conversation.last_everyone_at and now - conversation.last_everyone_at < EVERYONE_EVERY:
+            everyone = "rate_limited"
+        else:
+            everyone = "sent"
+            conversation.last_everyone_at = now
+            db.commit()
+            for uid in present:
+                if uid != sender_id and uid not in targets and wants(uid, "mention"):
+                    targets[uid] = "everyone"
+
+    if not targets:
+        return everyone
+    blocked = await _blocked_with(sender_id)
+    if blocked is None:
+        # Cannot tell who has a block with the sender: tell nobody rather than
+        # risk ringing somebody about the person they blocked.
+        return everyone
     who = sender_name or (_profiles({sender_id}).get(sender_id) or {}).get("display_name") or "Someone"
     where = conversation.title if conversation.kind == "group" and conversation.title else None
-    for uid in named:
+    titles = {
+        "mention": f"{who} mentioned you",
+        "reply": f"{who} replied to you",
+        "everyone": f"{who} notified everyone",
+    }
+    for uid, why in targets.items():
+        if uid in blocked:
+            continue
         await internal_notify(
             user_id=uid,
             background=background,
-            kind="mention",
-            title=f"{who} mentioned you" + (f" in {where}" if where else ""),
+            kind="mention" if why != "reply" else "reply",
+            title=titles[why] + (f" in {where}" if where else ""),
             body=None,
             link=f"/messages?c={conversation.id}",
             db=db,
         )
+    return everyone
 
 
 # --- reactions -----------------------------------------------------------------
@@ -2678,8 +3175,9 @@ async def mark_conversation_read(
     participant = _member(db, conversation_id, principal.user_id)
     participant.last_read_at = datetime.now(timezone.utc)
     db.commit()
+    # A member who keeps their reading to themselves tells only their own tabs.
     await _publish_to_users(
-        _participant_ids(db, conversation_id),
+        _participant_ids(db, conversation_id) if participant.read_receipts is not False else [principal.user_id],
         {
             "type": "read",
             "conversation_id": conversation_id,
@@ -2717,14 +3215,9 @@ def list_messages(
     # A group that keeps its history from newcomers: what was said before this
     # member joined is not theirs to read. Admins read everything.
     room = db.get(models.Conversation, conversation_id)
-    if (
-        room is not None
-        and room.kind == "group"
-        and (room.history_for_new or "all") == "from_join"
-        and me.role not in ("owner", "admin")
-        and me.joined_at is not None
-    ):
-        stmt = stmt.where(models.Message.created_at >= me.joined_at)
+    since = _visible_from(room, me)
+    if since is not None:
+        stmt = stmt.where(models.Message.created_at >= since)
     if before:
         stmt = stmt.where(models.Message.id < before)
     if after:
@@ -2769,6 +3262,11 @@ def list_messages(
     ids = [r.id for r in rows]
     counts = _reaction_counts(db, ids)
     mine = _my_reactions(db, principal.user_id, ids)
+    # Groups: the cards (polls, events, tasks), pins, the reader's bookmarks
+    # and how many replies each message has - a few queries for the page.
+    import group_features
+
+    extras = group_features.page_extras(db, room, me, rows)
 
     # Fetching is not reading. A catch-up in a background tab, or a page of
     # history, must not tell the other side "Seen": the client posts /read
@@ -2797,6 +3295,10 @@ def list_messages(
                 "reactions": counts.get(r.id, {}),
                 "my_reaction": mine.get(r.id),
                 "created_at": r.created_at,
+                # Taken down by a moderator rather than deleted by its sender.
+                "removed": bool(r.removed_by) and bool(r.deleted_at),
+                "announcement": bool(r.announcement_at) and not r.deleted_at,
+                **extras.get(r.id, {}),
             }
             for r in rows
         ],
@@ -2808,6 +3310,14 @@ def list_messages(
         # handle -> name for everybody @mentioned on this page, in one call.
         "mentions": _mention_names(
             _plain(r)[0] for r in rows if not r.encrypted and not r.deleted_at and r.kind != "system"
+        ),
+        # Senders on this page the reader has a block with, so the thread can
+        # fold their messages away. Groups only: a direct conversation with a
+        # block in it is closed already.
+        "blocked": sorted(
+            ({r.sender_id for r in rows if r.sender_id} & (_blocked_with_sync(principal.user_id) or set()))
+            if room is not None and room.kind == "group"
+            else set()
         ),
     }
 
@@ -3255,3 +3765,9 @@ async def internal_notify(
         },
     )
     return {"id": notification.id, "unread": unread, "redacted": redacted}
+
+
+# The rest of the group features (invitations, pins, saved messages, search,
+# files, polls, events, tasks, reports, the audit trail, ownership and
+# deletion) live in their own module and register their routes on `app`.
+import group_features  # noqa: E402,F401

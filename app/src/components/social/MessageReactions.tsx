@@ -1,3 +1,4 @@
+import type { ReactNode } from 'react'
 import { Copy, MoreHorizontal, Pencil, Reply, Trash2 } from 'lucide-react'
 import FloatingPanel from '@/components/social/FloatingPanel'
 import { MESSAGE_REACTIONS } from '@/lib/api'
@@ -108,6 +109,8 @@ export function MessageMenu({
   onEdit,
   onDelete,
   onClose,
+  extra = [],
+  deleteLabel = 'Delete',
 }: {
   /** The id of the bubble this is about, so the menu sits over it. */
   anchor: string
@@ -122,6 +125,10 @@ export function MessageMenu({
   onEdit: () => void
   onDelete: () => void
   onClose: () => void
+  /** More actions for this message (pin, save, report...), between Edit and Delete. */
+  extra?: Array<{ label: string; icon: ReactNode; onClick: () => void; danger?: boolean }>
+  /** "Remove" when a moderator takes down somebody else's message. */
+  deleteLabel?: string
 }) {
   const item = 'flex w-full items-center gap-2.5 rounded-card-sm px-2.5 py-2 text-sm hover:bg-white/10'
   const run = (action: () => void) => () => {
@@ -166,10 +173,21 @@ export function MessageMenu({
             Edit
           </button>
         )}
+        {extra.map((action) => (
+          <button
+            key={action.label}
+            type="button"
+            onClick={run(action.onClick)}
+            className={cn(item, action.danger ? 'text-red-300' : 'text-text-hi')}
+          >
+            {action.icon}
+            {action.label}
+          </button>
+        ))}
         {canDelete && (
           <button type="button" onClick={run(onDelete)} className={cn(item, 'text-red-300')}>
             <Trash2 size={14} aria-hidden="true" />
-            Delete
+            {deleteLabel}
           </button>
         )}
       </div>

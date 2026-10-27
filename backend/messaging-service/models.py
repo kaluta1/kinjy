@@ -53,6 +53,31 @@ class Conversation(Base):
     # or "from_join", only what is said after they arrive. A group's admins
     # choose; admins themselves always read everything.
     history_for_new: Mapped[str] = mapped_column(String(10), default="all")
+    # The group's rules, shown before anybody joins or accepts an invitation.
+    rules: Mapped[str | None] = mapped_column(Text)
+    # Who may write: "all", or "admins" (owner, admins and moderators) - the
+    # announcement mode, where everybody else reads and reacts.
+    posting: Mapped[str] = mapped_column(String(10), default="all")
+    # Who sees the member list: "all" members, or only "admins" (everybody
+    # else sees the people who run the group and the count).
+    members_visible: Mapped[str] = mapped_column(String(10), default="all")
+    # Who may start a poll: "all" members or only "admins".
+    polls_by: Mapped[str] = mapped_column(String(10), default="all")
+    # The share link's own rules. Off means the code leads nowhere until an
+    # admin turns it back on; the count is of people admitted through it.
+    invite_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    invite_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    invite_max_uses: Mapped[int | None] = mapped_column(Integer)
+    invite_uses: Mapped[int] = mapped_column(Integer, default=0)
+    # The Community this group chat is linked to, set by somebody who runs
+    # both. A pointer only: it grants nothing in either direction.
+    community_id: Mapped[str | None] = mapped_column(String(40), index=True)
+    # When an admin last used @everyone, which is limited so it cannot become
+    # a way to ring every phone in the room on repeat.
+    last_everyone_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Deleted by its owner. The row stays (with no members and no messages)
+    # so the audit trail of a deleted group still points somewhere.
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_message_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
@@ -77,6 +102,14 @@ class Participant(Base):
     joined_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
     # Pinned to the top of this member's list, and when. Groups only.
     pinned_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # This member's notifications for this group: "all", "mentions"
+    # (mentions and replies to them), or "announcements". Muting is separate
+    # and wins over the level until it runs out; MUTED_FOREVER means until the
+    # member turns it back on.
+    notify_level: Mapped[str] = mapped_column(String(15), default="all")
+    muted_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Whether this member's reading counts in "Seen by" for others.
+    read_receipts: Mapped[bool] = mapped_column(Boolean, default=True)
 
 
 class JoinRequest(Base):
@@ -160,6 +193,12 @@ class Message(Base):
     # is the server's, so a message cannot point at an arbitrary image, and a
     # sticker withdrawn from the catalogue stops rendering everywhere at once.
     sticker_id: Mapped[str | None] = mapped_column(String(40))
+    # Marked as an announcement by an admin: drawn apart in the thread, and
+    # what members who only want announcements are notified of.
+    announcement_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Removed by a moderator rather than deleted by its sender. Same effect on
+    # the words (gone); the thread says it was removed.
+    removed_by: Mapped[str | None] = mapped_column(String(40))
     delivered: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, index=True)
 
@@ -263,3 +302,223 @@ class PushSubscription(Base):
     failures: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
     last_sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+# --- groups: invitations, pins, saved, audit, reports ------------------------
+
+MUTED_FOREVER = datetime(9999, 1, 1, tzinfo=timezone.utc)
+
+
+class GroupInvite(Base):
+    """An invitation to a group, which the invitee answers.
+
+    Kept apart from Participant for the same reason JoinRequest is: having a
+    participant row means reading the room, and nobody reads it before they
+    said yes.
+    """
+
+    __tablename__ = "group_invites"
+    __table_args__ = (
+        UniqueConstraint("conversation_id", "invitee_id", name="uq_group_invite"),
+        {"schema": SCHEMA},
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    conversation_id: Mapped[str] = mapped_column(String(40), index=True)
+    invitee_id: Mapped[str] = mapped_column(String(40), index=True)
+    inviter_id: Mapped[str] = mapped_column(String(40))
+    # pending | accepted | declined | cancelled
+    status: Mapped[str] = mapped_column(String(12), default="pending", index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    answered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class PinnedMessage(Base):
+    __tablename__ = "pinned_messages"
+    __table_args__ = (
+        UniqueConstraint("message_id", name="uq_pinned_message"),
+        {"schema": SCHEMA},
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    conversation_id: Mapped[str] = mapped_column(String(40), index=True)
+    message_id: Mapped[str] = mapped_column(String(40))
+    pinned_by: Mapped[str] = mapped_column(String(40))
+    pinned_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
+class SavedMessage(Base):
+    """A member's private bookmark. Nobody else is told, or can see it."""
+
+    __tablename__ = "saved_messages"
+    __table_args__ = (
+        UniqueConstraint("user_id", "message_id", name="uq_saved_message"),
+        {"schema": SCHEMA},
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[str] = mapped_column(String(40), index=True)
+    conversation_id: Mapped[str] = mapped_column(String(40), index=True)
+    message_id: Mapped[str] = mapped_column(String(40))
+    saved_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
+class GroupAudit(Base):
+    """Who did what to the group: roles, removals, ownership, settings.
+
+    Written in the same transaction as the change, so the log cannot say
+    something happened that did not, or miss something that did. Never edited.
+    """
+
+    __tablename__ = "group_audit"
+    __table_args__ = (
+        Index("ix_group_audit_conversation", "conversation_id", "created_at"),
+        {"schema": SCHEMA},
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    conversation_id: Mapped[str] = mapped_column(String(40))
+    actor_id: Mapped[str] = mapped_column(String(40))
+    action: Mapped[str] = mapped_column(String(40))
+    target_id: Mapped[str | None] = mapped_column(String(40))
+    detail: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
+class MessageReport(Base):
+    """A member telling Kinjy's moderators about a message, a member or a group.
+
+    One per reporter per target. A report goes to Kinjy, not to the group's
+    admins: somebody reporting an admin must not have to send it to them.
+    """
+
+    __tablename__ = "message_reports"
+    __table_args__ = (
+        UniqueConstraint("reporter_id", "target_kind", "target_id", "conversation_id", name="uq_message_report"),
+        {"schema": SCHEMA},
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    reporter_id: Mapped[str] = mapped_column(String(40), index=True)
+    conversation_id: Mapped[str] = mapped_column(String(40), index=True)
+    # message | member | group
+    target_kind: Mapped[str] = mapped_column(String(10))
+    target_id: Mapped[str] = mapped_column(String(40))
+    # spam | harassment | hate | violence | sexual | child_safety | scam | other
+    reason: Mapped[str] = mapped_column(String(20))
+    note: Mapped[str | None] = mapped_column(Text)
+    # open | closed
+    status: Mapped[str] = mapped_column(String(10), default="open", index=True)
+    resolution: Mapped[str | None] = mapped_column(Text)
+    closed_by: Mapped[str | None] = mapped_column(String(40))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+# --- groups: polls, events, tasks ---------------------------------------------
+#
+# Each is posted into the thread as a message of its own kind, so it sits in
+# order with the conversation and is held to the same rules as one: the same
+# members, the same history rule, the same removal.
+
+
+class Poll(Base):
+    __tablename__ = "polls"
+    __table_args__ = {"schema": SCHEMA}
+
+    id: Mapped[str] = mapped_column(String(40), primary_key=True, default=lambda: new_id("pol"))
+    conversation_id: Mapped[str] = mapped_column(String(40), index=True)
+    message_id: Mapped[str] = mapped_column(String(40), unique=True)
+    created_by: Mapped[str] = mapped_column(String(40))
+    question: Mapped[str] = mapped_column(Text)
+    multiple: Mapped[bool] = mapped_column(Boolean, default=False)
+    # always | after_vote | after_close
+    results: Mapped[str] = mapped_column(String(12), default="always")
+    closes_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    closed_by: Mapped[str | None] = mapped_column(String(40))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
+class PollOption(Base):
+    __tablename__ = "poll_options"
+    __table_args__ = {"schema": SCHEMA}
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    poll_id: Mapped[str] = mapped_column(String(40), index=True)
+    position: Mapped[int] = mapped_column(Integer)
+    text: Mapped[str] = mapped_column(String(200))
+
+
+class PollVote(Base):
+    __tablename__ = "poll_votes"
+    __table_args__ = (
+        UniqueConstraint("poll_id", "option_id", "user_id", name="uq_poll_vote"),
+        {"schema": SCHEMA},
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    poll_id: Mapped[str] = mapped_column(String(40), index=True)
+    option_id: Mapped[int] = mapped_column(Integer)
+    user_id: Mapped[str] = mapped_column(String(40), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
+class GroupEvent(Base):
+    """Something the group is doing at a time.
+
+    `starts_at` is the instant (UTC); `timezone` is where it happens, so it can
+    be shown in the event's own time as well as in each reader's.
+    """
+
+    __tablename__ = "group_events"
+    __table_args__ = {"schema": SCHEMA}
+
+    id: Mapped[str] = mapped_column(String(40), primary_key=True, default=lambda: new_id("gev"))
+    conversation_id: Mapped[str] = mapped_column(String(40), index=True)
+    message_id: Mapped[str] = mapped_column(String(40), unique=True)
+    created_by: Mapped[str] = mapped_column(String(40))
+    title: Mapped[str] = mapped_column(String(200))
+    description: Mapped[str | None] = mapped_column(Text)
+    starts_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    ends_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    timezone: Mapped[str] = mapped_column(String(64), default="UTC")
+    location: Mapped[str | None] = mapped_column(String(300))
+    online_url: Mapped[str | None] = mapped_column(String(500))
+    cancelled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Reminders already sent, so a restart never sends one twice.
+    reminded_day_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    reminded_hour_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
+class EventResponse(Base):
+    __tablename__ = "group_event_responses"
+    __table_args__ = (
+        UniqueConstraint("event_id", "user_id", name="uq_group_event_response"),
+        {"schema": SCHEMA},
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    event_id: Mapped[str] = mapped_column(String(40), index=True)
+    user_id: Mapped[str] = mapped_column(String(40), index=True)
+    # going | maybe | not_going
+    response: Mapped[str] = mapped_column(String(10))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
+class GroupTask(Base):
+    __tablename__ = "group_tasks"
+    __table_args__ = {"schema": SCHEMA}
+
+    id: Mapped[str] = mapped_column(String(40), primary_key=True, default=lambda: new_id("gtk"))
+    conversation_id: Mapped[str] = mapped_column(String(40), index=True)
+    message_id: Mapped[str] = mapped_column(String(40), unique=True)
+    created_by: Mapped[str] = mapped_column(String(40))
+    title: Mapped[str] = mapped_column(String(300))
+    assignee_id: Mapped[str | None] = mapped_column(String(40), index=True)
+    due_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    done_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    done_by: Mapped[str | None] = mapped_column(String(40))
+    reminded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)

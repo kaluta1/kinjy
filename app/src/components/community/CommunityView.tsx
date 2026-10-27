@@ -9,6 +9,7 @@ import { AuditDialog, PendingPostsDialog } from '@/components/community/Communit
 import { AnalyticsDialog, PaidAccessDialog } from '@/components/community/CommunityOwnerTools'
 import CommunityEvents from '@/components/community/CommunityEvents'
 import CommunityForums from '@/components/community/CommunityForums'
+import CommunityGroupChats from '@/components/community/CommunityGroupChats'
 import CommunityMarket from '@/components/community/CommunityMarket'
 import CommunityMembership from '@/components/community/CommunityMembership'
 import { useApi } from '@/hooks/useApi'
@@ -68,7 +69,7 @@ export default function CommunityView({
   // Which space is shown (all of them by default) and in what order.
   const [space, setSpace] = useState<CommunityPostSpace | ''>('')
   // Events and the marketplace are sections of their own, not streams of posts.
-  const [section, setSection] = useState<'posts' | 'events' | 'marketplace' | 'forums'>('posts')
+  const [section, setSection] = useState<'posts' | 'events' | 'marketplace' | 'forums' | 'chats'>('posts')
   const [showPaid, setShowPaid] = useState(false)
   const [showAnalytics, setShowAnalytics] = useState(false)
   const [sort, setSort] = useState<'latest' | 'top'>('latest')
@@ -83,6 +84,13 @@ export default function CommunityView({
     [communityId],
   )
   const forumsCount = forums.data?.items.length ?? 0
+  // Group chats in Messages linked to it. Refused (somebody who may not enter
+  // the community) reads as none, like the forums.
+  const groupChats = useApi(
+    () => (communityId ? kaluta.communities.groupChats(handle).catch(() => null) : Promise.resolve(null)),
+    [communityId, handle],
+  )
+  const chatsCount = groupChats.data?.items.length ?? 0
   const [showQueue, setShowQueue] = useState(false)
   const [showAudit, setShowAudit] = useState(false)
   const [busy, setBusy] = useState(false)
@@ -658,6 +666,20 @@ export default function CommunityView({
                     Forums{forumsCount > 0 ? ` (${forumsCount})` : ''}
                   </button>
                 )}
+                {(chatsCount > 0 || groupChats.data?.can_manage) && (
+                  <button
+                    type="button"
+                    role="tab"
+                    aria-selected={section === 'chats'}
+                    onClick={() => setSection('chats')}
+                    className={cn(
+                      'rounded-full px-3.5 py-1.5 text-xs font-semibold',
+                      section === 'chats' ? 'bg-gold text-ink' : 'bg-text-hi/[0.06] text-text-mid hover:bg-text-hi/[0.1]',
+                    )}
+                  >
+                    Group chats{chatsCount > 0 ? ` (${chatsCount})` : ''}
+                  </button>
+                )}
               </div>
               {section === 'posts' && (
               <label className="inline-flex items-center gap-1.5 text-xs text-text-low">
@@ -680,7 +702,14 @@ export default function CommunityView({
 
           {/* A 404 here is the private-community answer, not a broken page: the
               posts exist and are not for this viewer yet. */}
-          {section === 'forums' ? (
+          {section === 'chats' && groupChats.data ? (
+            <CommunityGroupChats
+              slug={community.slug ?? community.id}
+              chats={groupChats.data.items}
+              canManage={groupChats.data.can_manage}
+              onChanged={groupChats.reload}
+            />
+          ) : section === 'forums' ? (
             <CommunityForums
               communityId={community.id}
               steward={isSteward}

@@ -9,6 +9,7 @@ import {
   type AdminJournal,
   type AdminMemberBrief,
   type AdminPaymentBrief,
+  type MessageReportItem,
   type Order,
   type SupportCase,
 } from '@/lib/api'
@@ -952,7 +953,94 @@ export function Moderation() {
           <li><Link to="/trust-safety" className={BTN}><ExternalLink size={12} aria-hidden="true" /> Review console</Link></li>
         </ul>
       </Panel>
+      <MessageReports />
     </div>
+  )
+}
+
+/** Reports from Messages: group messages, members and groups, sent to Kinjy rather than to a group's admins. */
+function MessageReports() {
+  const [status, setStatus] = useState<'open' | 'closed'>('open')
+  const reports = useApi(() => kaluta.adminConsole.messageReports(status), [status])
+  const [msg, setMsg] = useState<Msg>(null)
+  const [notes, setNotes] = useState<Record<number, string>>({})
+
+  const close = async (r: MessageReportItem, remove: boolean) => {
+    const resolution = (notes[r.id] ?? '').trim()
+    if (!resolution) {
+      setMsg({ ok: false, text: 'Write what was decided first.' })
+      return
+    }
+    try {
+      const out = await kaluta.adminConsole.closeMessageReport(r.id, resolution, remove)
+      setMsg({ ok: true, text: out.removed ? 'Closed, and the message was removed.' : 'Closed.' })
+      reports.reload()
+    } catch (err) {
+      setMsg({ ok: false, text: err instanceof ApiError ? err.message : 'Could not close the report' })
+    }
+  }
+
+  return (
+    <Panel
+      title="Reports from Messages"
+      subtitle="Group messages are not end-to-end encrypted, so a reported one can be read here. An end-to-end encrypted message cannot be read by anybody at Kinjy."
+    >
+      <Chips options={[{ id: 'open', label: 'Open' }, { id: 'closed', label: 'Closed' }] as const} value={status} onChange={setStatus} />
+      <Message msg={msg} />
+      <PanelState loading={reports.loading} error={reports.error}>
+        {reports.data && reports.data.items.length === 0 && <p className="text-sm text-text-low">No {status} report.</p>}
+        <ul className="space-y-2">
+          {reports.data?.items.map((r) => (
+            <Row key={r.id}>
+              <p className="text-sm text-text-hi">
+                <Badge tone="warn">{r.reason.replace('_', ' ')}</Badge>{' '}
+                {r.target_kind === 'message' ? 'A message' : r.target_kind === 'member' ? `The member ${r.target_name ?? r.target_id}` : 'The group'}
+                {' in '}
+                {r.conversation_kind === 'group' ? `the group “${r.conversation_title ?? 'untitled'}”` : 'a direct conversation'}
+              </p>
+              {r.message && (
+                <blockquote className="mt-2 rounded-xl border-s-2 border-gold/50 bg-text-hi/[0.03] px-3 py-2 text-sm text-text-mid">
+                  {r.message.gone
+                    ? 'The message no longer exists.'
+                    : r.message.encrypted
+                      ? 'End-to-end encrypted: its content cannot be read here.'
+                      : r.message.deleted
+                        ? 'The message was deleted.'
+                        : (r.message.body ?? (r.message.media_kind ? `An attachment (${r.message.media_kind})` : ''))}
+                  {r.message.sender_name && <span className="mt-1 block text-xs text-text-low">— {r.message.sender_name}</span>}
+                </blockquote>
+              )}
+              {r.note && <p className="mt-1 text-xs text-text-low">Reporter’s note: {r.note}</p>}
+              <p className="mt-1 text-xs text-text-low">
+                Reported by {r.reporter_name ?? 'a member'} · {when(r.created_at)}
+              </p>
+              {r.status === 'open' ? (
+                <div className="mt-2 flex flex-wrap items-center gap-2">
+                  <input
+                    value={notes[r.id] ?? ''}
+                    onChange={(e) => setNotes((n) => ({ ...n, [r.id]: e.target.value }))}
+                    placeholder="What was decided"
+                    aria-label="What was decided"
+                    className={cn(INPUT, 'min-w-0 flex-1')}
+                  />
+                  <button type="button" className={BTN} onClick={() => void close(r, false)}>Close</button>
+                  {r.target_kind === 'message' && r.message && !r.message.gone && !r.message.deleted && (
+                    <ConfirmButton
+                      label="Remove the message and close"
+                      question="Remove this message for everybody in the conversation? Its words are deleted, not hidden."
+                      danger
+                      onConfirm={() => close(r, true)}
+                    />
+                  )}
+                </div>
+              ) : (
+                <p className="mt-1 text-xs text-text-mid">Decision: {r.resolution}</p>
+              )}
+            </Row>
+          ))}
+        </ul>
+      </PanelState>
+    </Panel>
   )
 }
 

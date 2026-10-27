@@ -62,6 +62,18 @@ const ALL_CONTROLS: Control[] = [
     hint: 'Stops someone dropping you into a group you never asked for.',
   },
   {
+    key: 'who_can_add_group',
+    icon: MessageSquare,
+    title: 'Add you straight into a group chat',
+    hint: 'In Messages. Anybody else can only invite you, if you allow it below, and you join when you accept.',
+  },
+  {
+    key: 'who_can_invite_group',
+    icon: MessageSquare,
+    title: 'Invite you to a group chat',
+    hint: 'An invitation shows the group and its rules; you accept or decline it. Blocked people can never invite you.',
+  },
+  {
     key: 'who_can_see_family',
     icon: TreeDeciduous,
     title: 'See your family tree',

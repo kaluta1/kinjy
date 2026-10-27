@@ -183,6 +183,8 @@ r = c.post(f"/conversations/{gid}/pin", headers=H(p_t))
 check("a group you are not in cannot be pinned", r.status_code in (403, 404), r.text)
 c.delete(f"/conversations/{rooms[0]}/pin", headers=H(p_t))
 check("unpinning frees a slot", c.post(f"/conversations/{rooms[3]}/pin", headers=H(p_t)).status_code == 200)
+# Since 27/10 an owner hands the group on before leaving it.
+c.post(f"/conversations/{rooms[1]}/transfer", headers=H(p_t), json={"user_id": mate["id"]})
 c.delete(f"/conversations/{rooms[1]}/participants/{p['id']}", headers=H(p_t))  # leave
 check("leaving drops the pin",
       c.post(f"/conversations/{rooms[0]}/pin", headers=H(p_t)).status_code == 200)

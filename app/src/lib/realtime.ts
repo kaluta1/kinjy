@@ -59,6 +59,19 @@ export interface RealtimeEvent {
   thread_id?: string
   reply_id?: string
   replies_count?: number
+  /** groups: the card a new poll, event or task message carries */
+  poll?: import('./api').GroupPoll
+  event?: import('./api').GroupEvent
+  task?: import('./api').GroupTask
+  poll_id?: string
+  event_id?: string
+  task_id?: string
+  /** groups: a message pinned or unpinned, marked as an announcement, removed by a moderator */
+  pinned?: boolean
+  announcement?: boolean
+  removed?: boolean
+  /** groups: the group itself was deleted */
+  deleted?: boolean
 }
 
 type Listener = (event: RealtimeEvent) => void

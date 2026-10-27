@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { Link, useLocation, useNavigate, useParams } from 'react-router'
-import { Globe, Lock, UsersRound } from 'lucide-react'
+import { Globe, Lock, ScrollText, UsersRound } from 'lucide-react'
 import AppShell from '@/components/app/AppShell'
 import { useApi } from '@/hooks/useApi'
 import { useAuth } from '@/hooks/useAuth'
@@ -58,7 +58,7 @@ export default function JoinGroup() {
   }
 
   return (
-    <AppShell title="Join a group">
+    <AppShell title="Join a group chat">
       {preview.loading && <p className="caption">Loading…</p>}
       {preview.error && <p className="cloud-card p-4 text-sm text-text-mid">{preview.error}</p>}
       {group && (
@@ -77,7 +77,7 @@ export default function JoinGroup() {
                 <h1 className="truncate text-2xl font-bold text-text-hi">{group.title ?? 'Group'}</h1>
                 <p className="mt-1 inline-flex items-center gap-1.5 text-sm text-text-low">
                   {group.privacy === 'public' ? <Globe size={13} aria-hidden="true" /> : <Lock size={13} aria-hidden="true" />}
-                  {group.privacy === 'public' ? 'Public group' : 'Private group'} · {group.members_count}{' '}
+                  {group.privacy === 'public' ? 'Group chat · anyone with the link joins' : 'Group chat · an admin lets people in'} · {group.members_count}{' '}
                   {group.members_count === 1 ? 'member' : 'members'}
                 </p>
               </div>
@@ -85,6 +85,19 @@ export default function JoinGroup() {
             {group.description && (
               <p className="mt-4 whitespace-pre-wrap text-[0.95rem] text-text-mid">{group.description}</p>
             )}
+            {group.rules && (
+              <div className="mt-4 rounded-card-sm border border-white/10 px-4 py-3">
+                <p className="flex items-center gap-1.5 text-sm font-semibold text-text-hi">
+                  <ScrollText size={14} aria-hidden="true" />
+                  Group rules
+                </p>
+                <p className="mt-1 whitespace-pre-wrap text-sm text-text-mid">{group.rules}</p>
+              </div>
+            )}
+            <p className="mt-4 text-xs text-text-low">
+              A group chat in Messages: joining it gives no access to any community. Its members see your name and
+              profile photo.
+            </p>
 
             <div className="mt-5">
               {group.my_state === 'member' && group.id ? (
@@ -98,6 +111,8 @@ export default function JoinGroup() {
                 <span className="inline-block rounded-full bg-amber-500/10 px-5 py-2.5 text-sm font-semibold text-amber-200">
                   Waiting for an admin
                 </span>
+              ) : group.unavailable ? (
+                <p className="text-sm text-amber-200">{group.unavailable}</p>
               ) : (
                 <button
                   type="button"
@@ -105,7 +120,13 @@ export default function JoinGroup() {
                   disabled={busy}
                   className="rounded-full bg-gradient-to-br from-gold-soft to-gold px-5 py-2.5 text-sm font-bold text-ink disabled:opacity-40"
                 >
-                  {group.privacy === 'public' ? 'Join' : 'Ask to join'}
+                  {group.privacy === 'public'
+                    ? group.rules
+                      ? 'Accept the rules and join'
+                      : 'Join'
+                    : group.rules
+                      ? 'Accept the rules and ask to join'
+                      : 'Ask to join'}
                 </button>
               )}
             </div>

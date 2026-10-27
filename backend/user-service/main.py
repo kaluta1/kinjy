@@ -39,6 +39,10 @@ MIGRATIONS = [
     "ADD COLUMN IF NOT EXISTS who_can_see_family VARCHAR(20) DEFAULT 'family'",
     f"ALTER TABLE {models.SCHEMA}.preferences "
     "ADD COLUMN IF NOT EXISTS family_tree_shared BOOLEAN DEFAULT TRUE",
+    f"ALTER TABLE {models.SCHEMA}.preferences "
+    "ADD COLUMN IF NOT EXISTS who_can_add_group VARCHAR(20) DEFAULT 'connections'",
+    f"ALTER TABLE {models.SCHEMA}.preferences "
+    "ADD COLUMN IF NOT EXISTS who_can_invite_group VARCHAR(20) DEFAULT 'everyone'",
     f"ALTER TABLE {models.SCHEMA}.profiles ADD COLUMN IF NOT EXISTS avatar_asset_id VARCHAR(40)",
     f"ALTER TABLE {models.SCHEMA}.profiles ADD COLUMN IF NOT EXISTS cover_asset_id VARCHAR(40)",
     # Dark mode was removed. Cloud is the nearest thing to it, so a member who
@@ -257,6 +261,8 @@ class PreferencesIn(BaseModel):
     who_can_message: str | None = Field(default=None, pattern="^(everyone|connections|nobody)$")
     who_can_add_family: str | None = Field(default=None, pattern="^(everyone|connections|nobody)$")
     who_can_add_community: str | None = Field(default=None, pattern="^(everyone|connections|nobody)$")
+    who_can_add_group: str | None = Field(default=None, pattern="^(everyone|connections|nobody)$")
+    who_can_invite_group: str | None = Field(default=None, pattern="^(everyone|connections|nobody)$")
     who_can_see_family: str | None = Field(default=None, pattern="^(family|connections|everyone)$")
     family_tree_shared: bool | None = None
     discoverable: bool | None = None
@@ -1906,7 +1912,8 @@ def permissions(actor_id: str, target_id: str, db: OrmSession = Depends(get_db))
     if actor_id == target_id:
         return {
             "connected": True, "can_message": True, "can_add_family": True,
-            "can_add_community": True, "can_invite": False, "reason": "self",
+            "can_add_community": True, "can_add_group": True, "can_invite_group": True,
+            "can_invite": False, "reason": "self",
         }
 
     blocked = db.scalar(
@@ -1920,7 +1927,8 @@ def permissions(actor_id: str, target_id: str, db: OrmSession = Depends(get_db))
     if blocked:
         return {
             "connected": False, "can_message": False, "can_add_family": False,
-            "can_add_community": False, "can_invite": False, "reason": "blocked",
+            "can_add_community": False, "can_add_group": False, "can_invite_group": False,
+            "can_invite": False, "reason": "blocked",
         }
 
     row = _connection_between(db, actor_id, target_id)
@@ -1934,6 +1942,8 @@ def permissions(actor_id: str, target_id: str, db: OrmSession = Depends(get_db))
         "can_message": _allowed(prefs.who_can_message, connected),
         "can_add_family": _allowed(prefs.who_can_add_family, connected),
         "can_add_community": _allowed(prefs.who_can_add_community, connected),
+        "can_add_group": _allowed(prefs.who_can_add_group, connected),
+        "can_invite_group": _allowed(prefs.who_can_invite_group, connected),
         "can_invite": not row and _allowed(prefs.who_can_invite, False),
         "reason": "connected" if connected else "not_connected",
     }

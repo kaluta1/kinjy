@@ -165,6 +165,11 @@ class Preferences(Base):
     who_can_message: Mapped[str] = mapped_column(String(20), default="connections")
     who_can_add_family: Mapped[str] = mapped_column(String(20), default="connections")
     who_can_add_community: Mapped[str] = mapped_column(String(20), default="connections")
+    # Group chats in Messages. Being put straight into a group is the stronger
+    # act, so it starts at connections; an invitation is a request the member
+    # answers, so it starts open, like a connection invitation.
+    who_can_add_group: Mapped[str] = mapped_column(String(20), default="connections")
+    who_can_invite_group: Mapped[str] = mapped_column(String(20), default="everyone")
     # The family tree, which the member decides for themselves rather than the
     # code deciding for them. Default is the cautious reading: only people who
     # share the graph. `everyone` is a deliberate act, never a default.

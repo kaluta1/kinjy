@@ -1,7 +1,36 @@
 import { useCallback, useEffect, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { Link } from 'react-router'
-import { Check, Globe, UsersRound, Link2, Lock, LogOut, Pencil, Pin, PinOff, Search, ShieldCheck, UserPlus, X } from 'lucide-react'
+import {
+  Bell,
+  CalendarDays,
+  Check,
+  Flag,
+  Globe,
+  History,
+  Images,
+  Link2,
+  Lock,
+  LogOut,
+  Megaphone,
+  MessageSquare,
+  Pencil,
+  Pin,
+  PinOff,
+  ScrollText,
+  Search,
+  Settings2,
+  ShieldCheck,
+  Trash2,
+  UsersRound,
+  X,
+} from 'lucide-react'
+import ConfirmDialog from '@/components/ui-kit/ConfirmDialog'
+import { GroupSection, ReportDialog, TypeToConfirm } from '@/components/social/group/GroupBits'
+import { ROLE_LABEL } from '@/components/social/group/groupText'
+import { GroupLinkLimits, GroupNotifications, GroupRules } from '@/components/social/group/GroupSettings'
+import GroupMembers from '@/components/social/group/GroupMembers'
+import { GroupAuditLog, GroupFiles, GroupPins, GroupPlans } from '@/components/social/group/GroupShared'
 import { copyLink, siteOrigin } from '@/lib/share'
 import { shortLinkFor } from '@/lib/shortLink'
 import { useAuth } from '@/hooks/useAuth'
@@ -151,25 +180,6 @@ function GroupAccess({
           ))}
         </div>
       ) : null}
-      {runs && !conversation.is_welcome && (
-        <label className={cn('flex items-start gap-2 text-xs', tok.mid)}>
-          <input
-            type="checkbox"
-            className="mt-0.5 accent-[#E5B556]"
-            checked={(conversation.history_for_new ?? 'all') === 'all'}
-            disabled={busy}
-            onChange={(e) =>
-              void act(async () => {
-                await kaluta.messages.setHistory(conversation.id, e.target.checked ? 'all' : 'from_join')
-                return e.target.checked
-                  ? 'New members will see the earlier messages.'
-                  : 'New members will only see messages from when they join.'
-              }, 'Could not change this setting')
-            }
-          />
-          <span>New members can read the messages from before they joined</span>
-        </label>
-      )}
       <p className={cn('flex items-center gap-1.5 text-xs', tok.low)}>
         {privacy === 'public' ? <Globe size={12} aria-hidden="true" /> : <Lock size={12} aria-hidden="true" />}
         {privacy === 'public'
@@ -256,6 +266,7 @@ export default function GroupPanel({
   meId,
   onClose,
   onChanged,
+  onJump,
 }: {
   conversation: Conversation
   /** Who is looking. Leaving needs an identity, not a role: two people can
@@ -264,37 +275,29 @@ export default function GroupPanel({
   onClose: () => void
   /** The list and header are stale the moment anything here succeeds. */
   onChanged: () => void
+  /** Go to a message in the thread (a pin, an event, a task). */
+  onJump?: (messageId: string) => void
 }) {
   const { tok } = useAppTheme()
-  const [members, setMembers] = useState<GroupMember[] | null>(null)
-  /** How many are really in it, and whether there are more to fetch. */
-  const [total, setTotal] = useState(0)
-  const [more, setMore] = useState(false)
-  const [loadingMore, setLoadingMore] = useState(false)
   const [note, setNote] = useState<string | null>(null)
   const [busy, setBusy] = useState<string | null>(null)
-
   const [editing, setEditing] = useState(false)
   const [title, setTitle] = useState(conversation.title ?? '')
   const [description, setDescription] = useState(conversation.description ?? '')
+  const [rules, setRules] = useState(conversation.rules ?? '')
+  const [confirmLeave, setConfirmLeave] = useState(false)
+  const [deleting, setDeleting] = useState(false)
+  const [deleteError, setDeleteError] = useState<string | null>(null)
+  const [reporting, setReporting] = useState(false)
 
-  const [adding, setAdding] = useState(false)
-  const [query, setQuery] = useState('')
-  const [found, setFound] = useState<Array<PersonBrief & { user_id: string }>>([])
-
-  const runs = conversation.my_role === 'owner' || conversation.my_role === 'admin'
-
-
-  const load = useCallback(() => {
-    kaluta.messages
-      .participants(conversation.id)
-      .then((page) => {
-        setMembers(page.items)
-        setTotal(page.total)
-        setMore(page.has_more)
-      })
-      .catch(() => setMembers([]))
-  }, [conversation.id])
+  const myRole = conversation.my_role ?? 'member'
+  const runs = myRole === 'owner' || myRole === 'admin'
+  const owner = myRole === 'owner'
+  const count = conversation.participant_count ?? 0
+  const jump = (messageId: string) => {
+    onClose()
+    onJump?.(messageId)
+  }
 
   /**
    * Put an uploaded photo on the group, or take it off.
@@ -309,48 +312,11 @@ export default function GroupPanel({
       onChanged()
     }
 
-  /** The next page. Admins are on the first one, so this is rarely needed. */
-  const loadMore = () => {
-    setLoadingMore(true)
-    kaluta.messages
-      .participants(conversation.id, members?.length ?? 0)
-      .then((page) => {
-        setMembers((current) => [...(current ?? []), ...page.items])
-        setTotal(page.total)
-        setMore(page.has_more)
-      })
-      .catch(() => setNote('Could not load more members'))
-      .finally(() => setLoadingMore(false))
-  }
-
-  useEffect(load, [load])
-
-  useEffect(() => {
-    const text = query.trim()
-    if (text.length < 2) {
-      setFound([])
-      return
-    }
-    // Debounced, and the people already in the room are filtered out: offering
-    // to add somebody who is standing there is an offer that does nothing.
-    const timer = window.setTimeout(() => {
-      void kaluta.people
-        .search(text, 8)
-        .then((page) => {
-          const present = new Set((members ?? []).map((m) => m.user_id))
-          setFound(page.items.filter((p) => !present.has(p.user_id)))
-        })
-        .catch(() => setFound([]))
-    }, 200)
-    return () => window.clearTimeout(timer)
-  }, [query, members])
-
   const run = async (key: string, action: () => Promise<unknown>, failure: string) => {
     setBusy(key)
     setNote(null)
     try {
       await action()
-      load()
       onChanged()
     } catch (err) {
       setNote(err instanceof ApiError ? err.message : failure)
@@ -365,7 +331,7 @@ export default function GroupPanel({
     <div
       role="dialog"
       aria-modal="true"
-      aria-label="Group information"
+      aria-label="Group chat information"
       className="fixed inset-0 z-[80] flex items-end justify-center bg-black/55 backdrop-blur-[2px] sm:items-center sm:p-6"
       onClick={onClose}
     >
@@ -414,9 +380,6 @@ export default function GroupPanel({
         </div>
 
         <div className="px-5 pb-5 pt-14 sm:px-7">
-        {/* The group's own face. Above the name because that is the order it
-            is read in, and shown to everybody - only an admin gets the
-            pickers, because only an admin can change them. */}
         {editing && runs ? (
           <div className="mb-5 space-y-5">
             <ProfileImagePicker
@@ -444,6 +407,7 @@ export default function GroupPanel({
                   await kaluta.messages.editGroup(conversation.id, {
                     title: title.trim(),
                     description: description.trim(),
+                    rules: rules.trim(),
                   })
                   setEditing(false)
                 },
@@ -458,10 +422,7 @@ export default function GroupPanel({
               maxLength={140}
               aria-label="Group name"
               placeholder="Group name"
-              className={cn(
-                'w-full rounded-xl border border-[var(--cloud-border)] bg-transparent px-3 py-2 text-sm',
-                tok.text,
-              )}
+              className={cn('w-full rounded-xl border border-[var(--cloud-border)] bg-transparent px-3 py-2 text-sm', tok.text)}
             />
             <textarea
               value={description}
@@ -470,10 +431,16 @@ export default function GroupPanel({
               rows={3}
               aria-label="What this group is for"
               placeholder="What is this group for?"
-              className={cn(
-                'w-full resize-none rounded-xl border border-[var(--cloud-border)] bg-transparent px-3 py-2 text-sm',
-                tok.text,
-              )}
+              className={cn('w-full resize-none rounded-xl border border-[var(--cloud-border)] bg-transparent px-3 py-2 text-sm', tok.text)}
+            />
+            <textarea
+              value={rules}
+              onChange={(e) => setRules(e.target.value)}
+              maxLength={4000}
+              rows={4}
+              aria-label="Group rules"
+              placeholder="Group rules - shown to people before they join or accept an invitation (optional)"
+              className={cn('w-full resize-none rounded-xl border border-[var(--cloud-border)] bg-transparent px-3 py-2 text-sm', tok.text)}
             />
             <div className="flex gap-2">
               <button
@@ -489,6 +456,7 @@ export default function GroupPanel({
                   setEditing(false)
                   setTitle(conversation.title ?? '')
                   setDescription(conversation.description ?? '')
+                  setRules(conversation.rules ?? '')
                 }}
                 className={cn('rounded-full px-4 py-1.5 text-xs font-semibold', tok.mid)}
               >
@@ -498,12 +466,15 @@ export default function GroupPanel({
           </form>
         ) : (
           <div>
-            <div className="flex items-start gap-2">
-              <h3 className={cn('min-w-0 flex-1 text-[1.6rem] font-bold leading-tight tracking-[-0.02em]', tok.text)}>
-                {conversation.title ?? 'Group'}
-              </h3>
-            </div>
+            <h3 className={cn('text-[1.6rem] font-bold leading-tight tracking-[-0.02em]', tok.text)}>
+              {conversation.title ?? 'Group'}
+            </h3>
             <p className={cn('mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs', tok.low)}>
+              <span className="inline-flex items-center gap-1">
+                <MessageSquare size={12} aria-hidden="true" />
+                Group chat
+              </span>
+              <span aria-hidden="true">·</span>
               <span className="inline-flex items-center gap-1">
                 {(conversation.privacy ?? 'private') === 'public' || conversation.is_welcome ? (
                   <Globe size={12} aria-hidden="true" />
@@ -513,26 +484,57 @@ export default function GroupPanel({
                 {conversation.is_welcome
                   ? 'Everybody on Kinjy'
                   : (conversation.privacy ?? 'private') === 'public'
-                    ? 'Public group'
-                    : 'Private group'}
+                    ? 'Anyone with the link can join'
+                    : 'Joining needs an admin'}
               </span>
               <span aria-hidden="true">·</span>
               <span>
-                {total || conversation.participant_count || 0}{' '}
-                {(total || conversation.participant_count) === 1 ? 'member' : 'members'}
+                {count} {count === 1 ? 'member' : 'members'}
               </span>
-              {conversation.pinned && (
+              {myRole !== 'member' && (
                 <>
                   <span aria-hidden="true">·</span>
                   <span className="inline-flex items-center gap-1 text-gold-soft">
-                    <Pin size={11} aria-hidden="true" />
-                    Pinned
+                    <ShieldCheck size={11} aria-hidden="true" />
+                    You are {myRole === 'owner' ? 'the owner' : `a ${ROLE_LABEL[myRole].toLowerCase()}`}
+                  </span>
+                </>
+              )}
+              {conversation.posting === 'admins' && (
+                <>
+                  <span aria-hidden="true">·</span>
+                  <span className="inline-flex items-center gap-1">
+                    <Megaphone size={11} aria-hidden="true" />
+                    Announcements
                   </span>
                 </>
               )}
             </p>
             <p className={cn('mt-3 whitespace-pre-wrap text-[0.95rem] leading-relaxed', tok.mid)}>
               {conversation.description || 'No description yet.'}
+            </p>
+            {conversation.rules && (
+              <div className="mt-3 rounded-xl border border-[var(--cloud-border)] px-3 py-2">
+                <p className={cn('flex items-center gap-1.5 text-xs font-semibold', tok.text)}>
+                  <ScrollText size={12} aria-hidden="true" />
+                  Group rules
+                </p>
+                <p className={cn('mt-1 whitespace-pre-wrap text-sm', tok.mid)}>{conversation.rules}</p>
+              </div>
+            )}
+            {conversation.community_id && (
+              <Link
+                to={`/communities/${conversation.community_id}`}
+                className="mt-3 inline-flex items-center gap-1.5 text-xs font-semibold text-gold-soft hover:underline"
+              >
+                <UsersRound size={12} aria-hidden="true" />
+                Linked to a community
+              </Link>
+            )}
+            {/* Two different things, and members mix them up: say which one this is. */}
+            <p className={cn('mt-3 text-[0.72rem] leading-relaxed', tok.low)}>
+              A group chat lives in Messages. It is not a Community: being in this chat gives no access to any
+              community, paid space or family tree, and leaving it changes nothing there.
             </p>
             {runs && (
               <button
@@ -544,225 +546,153 @@ export default function GroupPanel({
                 )}
               >
                 <Pencil size={12} aria-hidden="true" />
-                Edit name, description and pictures
+                Edit name, description, rules and pictures
               </button>
             )}
           </div>
         )}
 
+        <GroupSection title="Your notifications" icon={<Bell size={15} aria-hidden="true" />}>
+          <GroupNotifications conversation={conversation} onChanged={onChanged} />
+        </GroupSection>
+
+        <GroupSection title="Members" icon={<UsersRound size={15} aria-hidden="true" />} badge={<span className={cn('text-xs', tok.low)}>{count}</span>}>
+          <GroupMembers conversation={conversation} meId={meId} onChanged={onChanged} />
+        </GroupSection>
+
         {/* Sharing, privacy, the pin and the queue, in this dialog rather
             than a second one stacked on it. */}
         {!conversation.is_welcome && (
-          <section className="mt-6 rounded-2xl border border-[var(--cloud-border)] bg-text-hi/[0.025] p-4">
-            <h3 className={cn('mb-3 flex items-center gap-2 text-sm font-semibold', tok.text)}>
-              <Link2 size={15} className="text-gold-soft" aria-hidden="true" />
-              Sharing and privacy
-            </h3>
-            <GroupAccess
-              conversation={conversation}
-              runs={runs}
-              onChanged={() => {
-                load()
-                onChanged()
-              }}
-            />
-          </section>
+          <GroupSection title="Sharing and joining" icon={<Link2 size={15} aria-hidden="true" />}>
+            <GroupAccess conversation={conversation} runs={runs} onChanged={onChanged} />
+            {runs && <GroupLinkLimits conversation={conversation} onChanged={onChanged} />}
+          </GroupSection>
         )}
 
-        <section className="mt-4 rounded-2xl border border-[var(--cloud-border)] bg-text-hi/[0.025] p-4">
-        <div className="flex items-center justify-between gap-2">
-          <h3 className={cn('text-sm font-semibold', tok.text)}>
-            {members ? `${total} ${total === 1 ? 'member' : 'members'}` : 'Members'}
-          </h3>
-          {runs && (
-            <button
-              type="button"
-              onClick={() => setAdding((v) => !v)}
-              aria-expanded={adding}
-              className="inline-flex items-center gap-1.5 rounded-full border border-sky/50 px-3 py-1 text-xs font-semibold text-sky hover:bg-sky/10"
-            >
-              <UserPlus size={12} aria-hidden="true" />
-              Add
-            </button>
-          )}
-        </div>
-
-        {adding && (
-          <div className="mt-2">
-            <label className="relative flex items-center">
-              <Search size={14} className="pointer-events-none absolute start-3 text-text-low" aria-hidden="true" />
-              <input
-                value={query}
-                onChange={(e) => setQuery(e.target.value)}
-                placeholder="Search by name…"
-                aria-label="Search for someone to add"
-                autoFocus
-                className={cn(
-                  'w-full rounded-full border border-[var(--cloud-border)] bg-transparent py-2 pe-3 ps-9 text-sm',
-                  tok.text,
-                )}
-              />
-            </label>
-            <ul className="mt-2 space-y-1">
-              {found.map((person) => (
-                <li key={person.user_id}>
-                  <button
-                    type="button"
-                    disabled={busy === person.user_id}
-                    onClick={() =>
-                      void run(
-                        person.user_id,
-                        async () => {
-                          await kaluta.messages.addMembers(conversation.id, [person.user_id])
-                          setQuery('')
-                        },
-                        'Could not add them',
-                      )
-                    }
-                    className="flex w-full items-center gap-2.5 rounded-xl p-2 text-start hover:bg-text-hi/[0.05]"
-                  >
-                    <MemberAvatar
-                      handle={person.handle}
-                      displayName={person.display_name}
-                      avatarUrl={person.avatar_url}
-                      size={32}
-                    />
-                    <span className={cn('min-w-0 flex-1 truncate text-sm', tok.text)}>
-                      {person.display_name}
-                    </span>
-                    <UserPlus size={14} className="shrink-0 text-sky" aria-hidden="true" />
-                  </button>
-                </li>
-              ))}
-            </ul>
-          </div>
+        {runs && (
+          <GroupSection title="Group settings" icon={<Settings2 size={15} aria-hidden="true" />}>
+            <GroupRules conversation={conversation} onChanged={onChanged} />
+          </GroupSection>
         )}
 
-        <ul className="mt-2 space-y-0.5">
-          {(members ?? []).map((member) => (
-            <li key={member.user_id} className="flex items-center gap-2.5 rounded-xl p-2">
-              <MemberAvatar
-                handle={member.handle ?? undefined}
-                displayName={member.display_name}
-                avatarUrl={member.avatar_url}
-                size={38}
-              />
-              <span className="min-w-0 flex-1">
-                <Link
-                  to={member.handle ? `/u/${member.handle}` : '#'}
-                  className={cn('block truncate text-sm font-semibold hover:underline', tok.text)}
-                >
-                  {member.display_name}
-                </Link>
-                {member.role !== 'member' && (
-                  <span className="caption inline-flex items-center gap-1 text-gold-soft">
-                    <ShieldCheck size={11} aria-hidden="true" />
-                    {member.role === 'owner' ? 'Owner' : 'Admin'}
-                  </span>
-                )}
-              </span>
+        <GroupSection title="Pinned messages" icon={<Pin size={15} aria-hidden="true" />}>
+          <GroupPins conversationId={conversation.id} onJump={jump} />
+        </GroupSection>
 
-              {/* An admin's controls, and only on somebody they may act on:
-                  the owner is nobody's to demote or remove. */}
-              {runs && member.role !== 'owner' && (
-                <span className="flex shrink-0 items-center gap-1">
-                  <button
-                    type="button"
-                    disabled={busy === member.user_id}
-                    title={member.role === 'admin' ? 'Remove as admin' : 'Make admin'}
-                    aria-label={
-                      member.role === 'admin'
-                        ? `Remove ${member.display_name} as admin`
-                        : `Make ${member.display_name} an admin`
-                    }
-                    onClick={() =>
-                      void run(
-                        member.user_id,
-                        () =>
-                          kaluta.messages.setRole(
-                            conversation.id,
-                            member.user_id,
-                            member.role === 'admin' ? 'member' : 'admin',
-                          ),
-                        'Could not change their role',
-                      )
-                    }
-                    className={cn(
-                      'rounded-full p-1.5 hover:bg-text-hi/[0.07]',
-                      member.role === 'admin' ? 'text-gold-soft' : tok.low,
-                    )}
-                  >
-                    <ShieldCheck size={14} aria-hidden="true" />
-                  </button>
-                  {/* Nobody is put out of the welcome group by somebody else;
-                      the server refuses it, and offering the button anyway
-                      would be an offer that always fails. */}
-                  {!conversation.is_welcome && (
-                    <button
-                      type="button"
-                      disabled={busy === member.user_id}
-                      title="Remove from the group"
-                      aria-label={`Remove ${member.display_name}`}
-                      onClick={() =>
-                        void run(
-                          member.user_id,
-                          () => kaluta.messages.removeMember(conversation.id, member.user_id),
-                          'Could not remove them',
-                        )
-                      }
-                      className={cn('rounded-full p-1.5 hover:bg-text-hi/[0.07]', tok.low)}
-                    >
-                      <X size={14} aria-hidden="true" />
-                    </button>
-                  )}
-                </span>
-              )}
-            </li>
-          ))}
-        </ul>
+        <GroupSection title="Photos, files and links" icon={<Images size={15} aria-hidden="true" />}>
+          <GroupFiles conversationId={conversation.id} />
+        </GroupSection>
 
-        {more && (
-          <button
-            type="button"
-            disabled={loadingMore}
-            onClick={loadMore}
-            className={cn(
-              'mt-2 w-full rounded-xl border border-[var(--cloud-border)] px-4 py-2 text-sm font-semibold',
-              tok.text,
-              tok.hoverBg,
-            )}
-          >
-            {loadingMore ? 'Loading…' : `Show more (${total - (members?.length ?? 0)} left)`}
-          </button>
+        <GroupSection title="Events and tasks" icon={<CalendarDays size={15} aria-hidden="true" />}>
+          <GroupPlans conversationId={conversation.id} onJump={jump} />
+        </GroupSection>
+
+        {runs && (
+          <GroupSection title="Activity log" icon={<History size={15} aria-hidden="true" />}>
+            <GroupAuditLog conversationId={conversation.id} />
+          </GroupSection>
         )}
 
-        </section>
-
-        {note && <p className="mt-3 text-xs text-amber-200">{note}</p>}
+        {note && <p role="status" className="mt-3 text-xs text-amber-200">{note}</p>}
         </div>
       </div>
 
-      <footer className="border-t border-[var(--cloud-border)] px-5 py-3 sm:px-7">
+      <footer className="flex flex-wrap gap-2 border-t border-[var(--cloud-border)] px-5 py-3 sm:px-7">
         <button
           type="button"
-          disabled={busy === 'leave'}
-          onClick={() =>
-            void run(
-              'leave',
-              async () => {
-                await kaluta.messages.removeMember(conversation.id, meId)
-                onClose()
-              },
-              'Could not leave the group',
-            )
-          }
-          className="inline-flex w-full items-center justify-center gap-2 rounded-xl border border-[var(--cloud-border)] px-4 py-2 text-sm font-semibold text-text-mid hover:border-red-400/40 hover:text-red-300"
+          onClick={() => setReporting(true)}
+          className={cn('inline-flex items-center justify-center gap-2 rounded-xl border border-[var(--cloud-border)] px-3 py-2 text-sm font-semibold hover:border-red-400/40', tok.mid)}
         >
-          <LogOut size={14} aria-hidden="true" />
-          Leave this group
+          <Flag size={14} aria-hidden="true" />
+          Report
         </button>
+        {owner && !conversation.is_welcome ? (
+          <>
+            <p className={cn('min-w-0 flex-1 self-center text-xs', tok.low)}>
+              {count > 1 ? 'To leave, first make somebody else the owner (Members).' : 'You are the only member.'}
+            </p>
+            <button
+              type="button"
+              onClick={() => {
+                setDeleteError(null)
+                setDeleting(true)
+              }}
+              className="inline-flex items-center justify-center gap-2 rounded-xl border border-red-400/40 px-3 py-2 text-sm font-semibold text-red-300 hover:bg-red-500/10"
+            >
+              <Trash2 size={14} aria-hidden="true" />
+              Delete group
+            </button>
+          </>
+        ) : (
+          <button
+            type="button"
+            disabled={busy === 'leave'}
+            onClick={() => setConfirmLeave(true)}
+            className="inline-flex flex-1 items-center justify-center gap-2 rounded-xl border border-[var(--cloud-border)] px-4 py-2 text-sm font-semibold text-text-mid hover:border-red-400/40 hover:text-red-300"
+          >
+            <LogOut size={14} aria-hidden="true" />
+            Leave this group
+          </button>
+        )}
       </footer>
     </div>
+    <ConfirmDialog
+      open={confirmLeave}
+      onOpenChange={setConfirmLeave}
+      title="Leave this group?"
+      description="You stop receiving its messages and it leaves your list. The group is told you left. You can come back only if somebody adds or invites you, or through its link."
+      confirmLabel="Leave the group"
+      onConfirm={() => {
+        setConfirmLeave(false)
+        void run(
+          'leave',
+          async () => {
+            await kaluta.messages.removeMember(conversation.id, meId)
+            onClose()
+          },
+          'Could not leave the group',
+        )
+      }}
+    />
+    {deleting && (
+      <TypeToConfirm
+        title="Delete this group for everybody?"
+        expected={conversation.title ?? ''}
+        confirmLabel="Delete the group"
+        busy={busy === 'delete'}
+        error={deleteError}
+        description={
+          <>
+            <p>
+              Every message, photo reference, reaction, pin, poll, event and task in it is deleted from Kinjy’s
+              database, for all {count} {count === 1 ? 'member' : 'members'}. It cannot be undone.
+            </p>
+            <p>Members are told the group was deleted. A record that you deleted it is kept.</p>
+          </>
+        }
+        onClose={() => setDeleting(false)}
+        onConfirm={(typed) => {
+          setBusy('delete')
+          setDeleteError(null)
+          kaluta.messages
+            .deleteGroup(conversation.id, typed)
+            .then(() => {
+              setDeleting(false)
+              onClose()
+              onChanged()
+            })
+            .catch((err) => setDeleteError(err instanceof ApiError ? err.message : 'Could not delete the group'))
+            .finally(() => setBusy(null))
+        }}
+      />
+    )}
+    {reporting && (
+      <ReportDialog
+        conversationId={conversation.id}
+        target={{ kind: 'group', id: conversation.id, label: 'this group' }}
+        onClose={() => setReporting(false)}
+      />
+    )}
     </div>,
     document.body,
   )
@@ -774,11 +704,16 @@ export function NewGroupDialog({
   onCreated,
 }: {
   onClose: () => void
-  onCreated: (conversationId: string) => void
+  /** `invited`: how many were sent an invitation rather than added. */
+  onCreated: (conversationId: string, invited: number) => void
 }) {
   const { tok } = useAppTheme()
   const [title, setTitle] = useState('')
   const [description, setDescription] = useState('')
+  const [rules, setRules] = useState('')
+  // Uploaded before the group exists, applied when it is created.
+  const [avatar, setAvatar] = useState<{ id: string; url: string | null } | null>(null)
+  const [cover, setCover] = useState<{ id: string; url: string | null } | null>(null)
   const [query, setQuery] = useState('')
   const [found, setFound] = useState<Array<PersonBrief & { user_id: string }>>([])
   const [chosen, setChosen] = useState<Array<PersonBrief & { user_id: string }>>([])
@@ -810,9 +745,12 @@ export function NewGroupDialog({
       const group = await kaluta.messages.createGroup({
         title: title.trim(),
         description: description.trim() || undefined,
+        rules: rules.trim() || undefined,
         participantIds: chosen.map((p) => p.user_id),
+        avatarAssetId: avatar?.id,
+        coverAssetId: cover?.id,
       })
-      onCreated(group.id)
+      onCreated(group.id, group.invited?.length ?? 0)
     } catch (err) {
       setNote(err instanceof ApiError ? err.message : 'Could not create the group')
     } finally {
@@ -869,6 +807,35 @@ export function NewGroupDialog({
               tok.text,
             )}
           />
+          <textarea
+            value={rules}
+            onChange={(e) => setRules(e.target.value)}
+            maxLength={4000}
+            rows={2}
+            aria-label="Group rules"
+            placeholder="Group rules, shown before people join (optional)"
+            className={cn(
+              'w-full resize-none rounded-xl border border-[var(--cloud-border)] bg-transparent px-3 py-2 text-sm',
+              tok.text,
+            )}
+          />
+          <details className="rounded-xl border border-[var(--cloud-border)] px-3 py-2">
+            <summary className={cn('cursor-pointer text-xs font-semibold', tok.mid)}>Photo and cover (optional)</summary>
+            <div className="mt-3 space-y-4">
+              <ProfileImagePicker
+                purpose="avatar"
+                url={avatar?.url ?? null}
+                displayName={title || 'Group'}
+                onChange={async (id, url) => setAvatar(id ? { id, url: url ?? null } : null)}
+              />
+              <ProfileImagePicker
+                purpose="cover"
+                url={cover?.url ?? null}
+                displayName={title || 'Group'}
+                onChange={async (id, url) => setCover(id ? { id, url: url ?? null } : null)}
+              />
+            </div>
+          </details>
 
           {chosen.length > 0 && (
             <ul className="flex flex-wrap gap-1.5">
@@ -931,8 +898,10 @@ export function NewGroupDialog({
           {/* Said before they find out by being refused: the server only lets
               you add people who accept messages from you. */}
           <p className={cn('text-[0.7rem]', tok.low)}>
-            You can add people who accept messages from you. A group is stored
-            encrypted but is not end-to-end — three people cannot share one key.
+            Each person’s settings decide: people who let you add them are added, people who only accept
+            invitations are invited and join when they accept. Group messages travel encrypted and are
+            stored encrypted on Kinjy’s servers, but they are not end-to-end encrypted: Kinjy’s servers can
+            read them, which is what makes search and reports possible.
           </p>
         </div>
 
