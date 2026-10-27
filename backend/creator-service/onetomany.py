@@ -179,7 +179,15 @@ def capabilities(source_lang: str | None) -> dict:
         elif (source_lang or "en") not in (media.get("narration_langs") or []):
             out["short_video"]["reason"] = "Voice narration is not available in this language yet."
         else:
-            out["short_video"] = {"available": True, "reason": None}
+            voice = (media.get("narration_voices") or {}).get(source_lang or "en") or {}
+            out["short_video"] = {
+                "available": True,
+                "reason": None,
+                # Said up front when only the basic synthetic voice can read this language.
+                "voice_quality": voice.get("quality"),
+                "note": None if voice.get("quality") == "natural"
+                else "Only a basic synthetic voice is installed for this language.",
+            }
     except Exception as exc:
         log.warning("media capabilities unreachable: %s", exc)
         out["short_video"]["reason"] = "The video renderer cannot be reached right now."
@@ -312,9 +320,11 @@ def produce_short(source: dict, output: models.PublishingOutput, revision: str) 
         "media_url": data["url"],
         "duration_s": data["duration_s"],
         "provenance": "ai_assisted",
-        # "+voice": read aloud. Videos made before narration existed say
-        # "kinjy-render" alone, which is how the panel tells them apart.
-        "provider": "kinjy-render+voice",
+        # "+voice": read aloud, then which kind of voice - "natural" (a neural
+        # voice of the post's language) or "basic" (the synthetic fallback).
+        # Videos made before narration existed say "kinjy-render" alone, and
+        # the first narrated ones (27/10, basic voice) "kinjy-render+voice".
+        "provider": f"kinjy-render+voice:{(data.get('voice') or {}).get('quality') or 'basic'}",
     }
 
 
@@ -554,7 +564,12 @@ def output_view(output: models.PublishingOutput, viewer: str, current_revision: 
         "completed_at": output.completed_at.isoformat() if output.completed_at else None,
         "stale": bool(status == "completed" and output.source_revision and current_revision and output.source_revision != current_revision),
         # A short video made before narration existed has no voice track.
-        "narrated": output.target == "short_video" and (output.provider or "").endswith("+voice"),
+        "narrated": output.target == "short_video" and "+voice" in (output.provider or ""),
+        # natural | basic | None: whether the voice is a natural one of the post's language.
+        "voice_quality": (
+            ("natural" if (output.provider or "").endswith(":natural") else "basic")
+            if output.target == "short_video" and "+voice" in (output.provider or "") else None
+        ),
         "legacy": output.pipeline != "v2",
         "user_edited": bool(output.user_edited),
         "content": None,

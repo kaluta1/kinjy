@@ -6,12 +6,16 @@ import App from './App.tsx'
 import { AuthProvider } from './lib/auth'
 import { AppThemeProvider } from './components/appdemo/theme'
 import { reloadForUpdate } from './components/app/RouteErrorBoundary'
+import { installSingleAudio } from './lib/singleAudio'
 
 // A tab opened before a deployment asks for page files that no longer exist.
 // Vite reports it here before React sees it: reload once for the new version.
 window.addEventListener('vite:preloadError', (event) => {
   if (reloadForUpdate()) event.preventDefault()
 })
+
+// Two players of the same video must never be heard at once (an echo).
+installSingleAudio()
 
 createRoot(document.getElementById('root')!).render(
   <BrowserRouter>

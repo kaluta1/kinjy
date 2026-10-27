@@ -2774,6 +2774,8 @@ export type OneToManyOutput = {
   stale: boolean
   /** Short video: whether it is read aloud (videos made before narration are silent). */
   narrated?: boolean
+  /** Short video: "natural" (a neural voice of the post's language) or "basic" (synthetic fallback). */
+  voice_quality?: 'natural' | 'basic' | null
   legacy: boolean
   user_edited: boolean
   content: string | null

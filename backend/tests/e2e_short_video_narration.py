@@ -70,6 +70,7 @@ for _ in range(90):
     time.sleep(2)
 check("video completed", video and video["status"] == "completed", video)
 check("reported as narrated", video and video.get("narrated") is True, video)
+check("read by a natural English voice", video and video.get("voice_quality") == "natural", video)
 
 asset_id = psql(f"select media_id from creator.publishing_outputs where job_id = '{job_id}' and target = 'short_video'")
 path = psql(f"select storage_path from media.assets where id = '{asset_id}'")

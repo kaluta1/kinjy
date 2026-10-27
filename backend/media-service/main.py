@@ -1723,6 +1723,12 @@ _render_lock = threading.Lock()
 def render_capabilities():
     ok, reason = shortvideo.available()
     narration, why = shortvideo.narration_available("en")
+    # Which voice would read each language, and whether it is a natural one.
+    voices = {
+        lang: {k: v[k] for k in ("engine", "voice", "quality", "locale")}
+        for lang in sorted(set(shortvideo.NATURAL_VOICES) | set(shortvideo.BASIC_VOICES))
+        if (v := shortvideo.voice_for(lang))
+    } if shortvideo.NARRATION_ENABLED else {}
     return {
         "short_video": {
             "available": ok,
@@ -1731,7 +1737,8 @@ def render_capabilities():
             # Whether videos are read aloud here, and in which languages.
             "narration": narration,
             "narration_reason": why,
-            "narration_langs": sorted(shortvideo.VOICES) if narration else [],
+            "narration_langs": sorted(voices),
+            "narration_voices": voices,
         }
     }
 
@@ -1771,7 +1778,10 @@ def render_short(payload: RenderShortIn, db: OrmSession = Depends(get_db)):
     byte: it is served on a ticket, like the post media it was made from.
     Idempotent per ``job_ref``.
     """
-    name = f"short-{payload.job_ref}.mp4"
+    # The voice is part of the name: a video read by another voice (an older,
+    # basic one) is not handed back when this voice would read it now.
+    current_voice = shortvideo.voice_for(payload.lang) if payload.narrate else None
+    name = f"short-{payload.job_ref}{'-' + current_voice['voice'] if current_voice else ''}.mp4"
     existing = db.scalar(
         select(models.Asset).where(
             models.Asset.owner_id == payload.owner_id,
@@ -1784,7 +1794,8 @@ def render_short(payload: RenderShortIn, db: OrmSession = Depends(get_db)):
         info = shortvideo.probe(Path(existing.storage_path))
         # A file made before narration existed is not handed back as narrated.
         if info.get("narrated") or not payload.narrate:
-            return {"asset_id": existing.id, "url": existing.url, **info, "reused": True}
+            voice = {k: current_voice[k] for k in ("engine", "voice", "quality", "locale")} if current_voice else None
+            return {"asset_id": existing.id, "url": existing.url, **info, "voice": voice, "reused": True}
 
     pictures: list[models.Asset] = []
     for asset_id in dict.fromkeys(payload.image_ids):

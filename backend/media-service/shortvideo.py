@@ -6,8 +6,10 @@ author's, every picture is one they attached to the post, and the narration
 reads exactly the words on each card, in the post's language. What this adds
 is framing - a 720x1280 frame, H.264 + AAC that every phone plays.
 
-Rendering is Pillow for the frames, espeak-ng for the voice (local: no vendor,
-no key, the text never leaves the server) and ffmpeg for the encoding. The
+Rendering is Pillow for the frames, a local voice for the narration (Piper's
+neural voices, chosen per language from their published metadata; espeak-ng
+only as a declared fallback - no vendor, no key, the text never leaves the
+server) and ffmpeg for the encoding. The
 result is probed before it is handed back: a file that is not a vertical H.264
 video of a sensible length, or whose narration track is missing or silent, is
 a failure, not an output. A video is never delivered without its voice.
@@ -52,9 +54,22 @@ UNSUPPORTED_LANGS = ("ar", "zh")
 # Narration on by default; "0" turns it off (videos are then silent title cards
 # and say so). A server setting, not code.
 NARRATION_ENABLED = os.getenv("SHORT_VIDEO_NARRATION", "1") not in ("0", "false", "off")
-# The espeak-ng voice for each platform language it can read well enough.
-VOICES = {"en": "en-us", "fr": "fr-fr", "sw": "sw"}
-SPEECH_RATE = int(os.getenv("SHORT_VIDEO_SPEECH_RATE", "150"))  # words a minute
+# Natural voices (Piper), one per language, by model name in PIPER_VOICES_DIR.
+# Server settings: SHORT_VIDEO_VOICES='{"en": "en_US-ljspeech-high", ...}'.
+# Defaults picked from the published voice list by language code, quality and
+# licence: LJ Speech (US English, one female reader, public domain); SIWIS
+# (French, CC-BY 4.0); Lanfrica (Swahili).
+PIPER_VOICES_DIR = Path(os.getenv("PIPER_VOICES_DIR", "/opt/piper-voices"))
+NATURAL_VOICES: dict[str, str] = {
+    "en": "en_US-ljspeech-high",
+    "fr": "fr_FR-siwis-medium",
+    "sw": "sw_CD-lanfrica-medium",
+    **json.loads(os.getenv("SHORT_VIDEO_VOICES", "{}") or "{}"),
+}
+# The fallback when no natural voice is installed for a language: espeak-ng,
+# intelligible but synthetic. Used only for that language, and reported.
+BASIC_VOICES = {"en": "en-us", "fr": "fr-fr", "sw": "sw"}
+SPEECH_RATE = int(os.getenv("SHORT_VIDEO_SPEECH_RATE", "150"))  # words a minute, espeak-ng only
 # Below this mean loudness a track is treated as silence, not as narration.
 AUDIBLE_DB = -45.0
 
@@ -63,30 +78,59 @@ class RenderError(RuntimeError):
     pass
 
 
+def _piper_language(model: Path) -> str | None:
+    """The language a Piper voice declares in its own metadata (e.g. "en_US")."""
+    try:
+        meta = json.loads(Path(f"{model}.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return ((meta.get("language") or {}).get("code") or meta.get("espeak", {}).get("voice") or None)
+
+
+def voice_for(lang: str | None) -> dict | None:
+    """The voice that would read ``lang``: {engine, voice, quality, locale}, or None.
+
+    A natural voice is used only when its model is installed and its own
+    metadata says it speaks this language - never one of another language.
+    """
+    lang = lang or "en"
+    name = NATURAL_VOICES.get(lang)
+    if name and shutil.which("piper"):
+        model = PIPER_VOICES_DIR / f"{name}.onnx"
+        locale = _piper_language(model) if model.exists() else None
+        if locale and locale.split("_")[0].lower() == lang:
+            return {"engine": "piper", "voice": name, "model": str(model), "quality": "natural", "locale": locale}
+        if model.exists():
+            log.warning("voice %s declares %s, not %s: not used", name, locale, lang)
+    if lang in BASIC_VOICES and shutil.which("espeak-ng"):
+        return {"engine": "espeak-ng", "voice": BASIC_VOICES[lang], "quality": "basic", "locale": BASIC_VOICES[lang]}
+    return None
+
+
 def narration_available(lang: str | None) -> tuple[bool, str | None]:
     """Whether a video in this language can be narrated here, and why not."""
     if not NARRATION_ENABLED:
         return False, "narration is turned off on this server"
-    if not shutil.which("espeak-ng"):
-        return False, "the narration voice (espeak-ng) is not installed on the media server"
-    if (lang or "en") not in VOICES:
+    if voice_for(lang) is None:
         return False, "narration is not available in this language yet"
     return True, None
 
 
-def _speak(text: str, lang: str | None, path: Path) -> float:
-    """Read one card aloud into a WAV file; returns its length in seconds."""
-    voice = VOICES.get(lang or "en", VOICES["en"])
+def _speak(text: str, voice: dict, path: Path) -> float:
+    """Read one card aloud into a WAV file, once; returns its length in seconds."""
+    if voice["engine"] == "piper":
+        source = path.with_suffix(".txt")
+        # Through a file, never a shell or an argument: the text is the author's.
+        source.write_text(" ".join(text.split()), encoding="utf-8")
+        command = ["piper", "-m", voice["model"], "-i", str(source), "-f", str(path)]
+    else:
+        command = ["espeak-ng", "-v", voice["voice"], "-s", str(SPEECH_RATE), "-w", str(path), "--", text]
     try:
-        # A list, never a shell: the text is the author's and goes in as one argument.
-        done = subprocess.run(
-            ["espeak-ng", "-v", voice, "-s", str(SPEECH_RATE), "-w", str(path), "--", text],
-            capture_output=True, text=True, timeout=60,
-        )
+        done = subprocess.run(command, capture_output=True, text=True, timeout=120)
     except subprocess.TimeoutExpired as exc:
         raise RenderError("the narration took too long") from exc
     if done.returncode != 0 or not path.exists() or path.stat().st_size < 1000:
-        log.error("espeak-ng failed: %s", (done.stderr or "")[-300:])
+        log.error("%s failed: %s", voice["engine"], (done.stderr or "")[-300:])
         raise RenderError("the narration could not be generated")
     return _duration(path)
 
@@ -218,10 +262,12 @@ def render(
     if any(unsupported_text(t) for t in texts):
         raise RenderError("title cards cannot be drawn in this script yet")
     narrate = narrate and bool(texts)
+    voice = None
     if narrate:
         can, why = narration_available(lang)
         if not can:
             raise RenderError(why or "narration is unavailable")
+        voice = voice_for(lang)
     limit = NARRATED_MAX_SECONDS if narrate else MAX_SECONDS
 
     workdir.mkdir(parents=True, exist_ok=True)
@@ -242,11 +288,11 @@ def render(
         if kind == "text":
             seconds = _seconds_for(str(item))
             if narrate:
-                voice = workdir / f"voice{index:02d}.wav"
-                spoken = _speak(str(item), lang, voice)
+                voice_file = workdir / f"voice{index:02d}.wav"
+                spoken = _speak(str(item), voice, voice_file)
                 # The card stays up for as long as it is being read, plus a breath.
                 seconds = round(max(seconds, spoken + 0.6), 2)
-                voices[frame] = voice
+                voices[frame] = voice_file
             last = index == len(order) - 1
             _text_card(str(item), frame, byline if last or index == 0 else None)
         else:
@@ -304,7 +350,10 @@ def render(
     if done.returncode != 0 or not destination.exists():
         log.error("ffmpeg failed: %s", (done.stderr or "")[-500:])
         raise RenderError("the video could not be encoded")
-    return probe(destination, expected_seconds=total, narrated=narrate)
+    info = probe(destination, expected_seconds=total, narrated=narrate)
+    if voice:
+        info["voice"] = {k: voice[k] for k in ("engine", "voice", "quality", "locale")}
+    return info
 
 
 def _mean_volume(path: Path) -> float | None:

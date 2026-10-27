@@ -1700,3 +1700,29 @@ Not done / to decide:
   "Make again with narration" (local engine, no vendor cost).
 - **Renamed communities** show the new name within two minutes (name cached
   briefly in social-service).
+
+## Short-video narration: natural voices, no doubled audio (27/10, evening)
+
+Done: narration now uses Piper's natural voices, chosen per language from
+their published metadata (en: en_US-ljspeech-high, LJ Speech, public domain;
+fr: fr_FR-siwis-medium, CC-BY 4.0; sw: sw_CD-lanfrica-medium); a voice is used
+only if its own metadata declares the post's language, otherwise the basic
+espeak-ng voice of that language is used and reported as "basic". Configurable
+with SHORT_VIDEO_VOICES / PIPER_VOICES_DIR. Videos read by the basic voice
+(27/10) show "Make again with a natural voice". On the site, only one player
+is heard at a time (the viewer pauses the card's unmuted player).
+
+Not done / to decide:
+- **The reported echo**: the exported files have one audio track and no
+  delayed copy (measured); the echo could not be reproduced in the file. Two
+  causes are addressed: espeak-ng's buzzy synthetic timbre, and two players of
+  the same video heard at once. Production's own video was not inspected
+  (production reads not allowed in this session).
+- **Licences to confirm**: the French and Swahili voices were fine-tuned from
+  the "lessac" voice, whose Blizzard 2013 dataset licence is research-oriented;
+  English uses LJ Speech (public domain) for that reason. A legal check is
+  advised before relying on fr/sw commercially, or swap them in
+  SHORT_VIDEO_VOICES.
+- **Listening**: checked by measurement (one track, speech time equal to the
+  readings, no overlap between cards, -18 dB mean), not by ear.
+- The media image is ~240 MB larger (three voice models).

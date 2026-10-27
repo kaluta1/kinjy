@@ -32,12 +32,24 @@ COPY common /app/common
 ARG SERVICE
 ENV SERVICE=${SERVICE}
 
-# media-service alone needs ffmpeg (video covers, short videos) and espeak-ng
-# (a short video's spoken narration: local, no vendor, no key).
+# media-service alone needs ffmpeg (video covers, short videos) and the voices
+# that narrate short videos: Piper's natural voices, one per language, with
+# espeak-ng as the declared fallback. All local: no vendor, no key.
 # After the shared layers, so the other services' images are not touched.
 RUN if [ "$SERVICE" = "media-service" ]; then \
-        apt-get update && apt-get install -y --no-install-recommends ffmpeg espeak-ng \
+        apt-get update && apt-get install -y --no-install-recommends ffmpeg espeak-ng curl \
         && rm -rf /var/lib/apt/lists/*; \
+    fi
+ARG PIPER_VOICES="en/en_US/ljspeech/high/en_US-ljspeech-high fr/fr_FR/siwis/medium/fr_FR-siwis-medium sw/sw_CD/lanfrica/medium/sw_CD-lanfrica-medium"
+RUN if [ "$SERVICE" = "media-service" ]; then \
+        pip install --retries 5 --timeout 120 "piper-tts==1.8.0" \
+        && mkdir -p /opt/piper-voices && cd /opt/piper-voices \
+        && for v in $PIPER_VOICES; do \
+             n=$(basename "$v"); \
+             curl -sfL --retry 5 -o "$n.onnx" "https://huggingface.co/rhasspy/piper-voices/resolve/main/$v.onnx" \
+             && curl -sfL --retry 5 -o "$n.onnx.json" "https://huggingface.co/rhasspy/piper-voices/resolve/main/$v.onnx.json" \
+             || exit 1; \
+           done; \
     fi
 # ai-service alone talks to a model vendor. Pinned to the 1.x line it was
 # written against; installed here so the other images keep their layers.
