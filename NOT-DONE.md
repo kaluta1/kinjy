@@ -1726,3 +1726,39 @@ Not done / to decide:
 - **Listening**: checked by measurement (one track, speech time equal to the
   readings, no overlap between cards, -18 dB mean), not by ear.
 - The media image is ~240 MB larger (three voice models).
+
+## Community events: edit, link, visibility (28/10)
+
+Done: the host (or the community's owner and moderators) edits an event
+(PATCH /events/{id}; registrations, waitlist and tickets kept; more places let
+the waitlist in; the price is locked once tickets are sold; the registered are
+told when the time or place changes); every event has its page /events/<id>
+with "Copy link"; upcoming events show on the community's main page and on the
+host's profile (only events of communities the reader may read).
+
+Not done / to decide:
+- **Signed-out visitors** following an event link are asked to sign in first
+  (the app shell's rule), then land on the event.
+- **Events have no draft state** (scheduled or cancelled only).
+- **Blocks**: the profile's event list relies on the profile itself being
+  hidden from a blocked member; community-service does not know about blocks.
+
+## Sponsor commissions and verification (28/10)
+
+Found: the rule "a sponsor earns only while verified" took effect on
+2026-10-20 (commit 18effec). Commissions earned before were paid without a
+check, so unverified members still had them - and the October Leaders ranking
+counts them. Also fixed: a rejected or withdrawn verification was never passed
+to auth-service (the member stayed "verified" until the old end date), and a
+redirected commission left no record of whose it would have been.
+
+Not done / to decide:
+- **Commissions earned before 2026-10-20 by unverified members**: listed by
+  the repair script under "before_rule", corrected only with --before-rule.
+  Applying the rule to them is retroactive: your decision.
+- **Leaders pool participation**: no rule says a member must be verified *now*
+  to take part or be paid (withdrawals already require verification). Not
+  invented; to decide.
+- **Pending (escrowed) marketplace commissions, withdrawn money, paid Leaders
+  months**: never corrected automatically; listed for review.
+- **Repair on production** has not been run (dry run first, with approval).

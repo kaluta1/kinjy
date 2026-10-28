@@ -132,6 +132,38 @@ class Commission(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
 
+class WithheldCommission(Base):
+    """A sponsor commission that was *not* paid, and why - the audit side of the
+    "unclaimed" revenue lines.
+
+    The ledger books the amount to revenue:unclaimed_commission (Kinjy's); this
+    row says whose it would have been and the reason (their verification was
+    not active when it was earned, or a later repair found so). It is not a
+    commission: it never reaches a wallet, the member's earnings or the Leaders
+    ranking. One row per journal, so a retried posting cannot record it twice.
+    """
+
+    __tablename__ = "withheld_commissions"
+    __table_args__ = (
+        UniqueConstraint("journal_id", "member_id", "reason", name="uq_withheld_commission"),
+        {"schema": SCHEMA},
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    journal_id: Mapped[str] = mapped_column(String(40), index=True)
+    member_id: Mapped[str] = mapped_column(String(40), index=True)
+    amount: Mapped[Decimal] = mapped_column(AMOUNT)
+    currency: Mapped[str] = mapped_column(String(10), default="USD")
+    source_kind: Mapped[str] = mapped_column(String(40))
+    source_ref: Mapped[str | None] = mapped_column(String(80))
+    # sponsor_unverified (at posting) | repair_unverified_at_earning (found later)
+    reason: Mapped[str] = mapped_column(String(60))
+    # For a repair: the commission row it replaced and the correcting journal.
+    commission_id: Mapped[str | None] = mapped_column(String(40))
+    correction_journal_id: Mapped[str | None] = mapped_column(String(40))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
 class LeaderSnapshot(Base):
     """Monthly Kinjy Leaders snapshot.
 

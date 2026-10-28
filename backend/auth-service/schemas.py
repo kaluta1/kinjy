@@ -166,6 +166,9 @@ class SponsorOut(BaseModel):
     user_id: str
     sponsor_id: str | None
     source: str  # invitation|referral_pool|unverified|none
+    # source "unverified": the sponsor the commission would have gone to, for
+    # the ledger's audit record of the redirected amount. Never paid.
+    withheld_from: str | None = None
 
 
 class PoolSeatIn(BaseModel):

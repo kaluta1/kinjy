@@ -1487,19 +1487,36 @@ def kyc_callback(user_id: str, outcome: str, db: OrmSession = Depends(get_db)):
 
 def _set_outcome(record: models.KycRecord, outcome: str, db: OrmSession) -> None:
     year = record.year
-    user_id = record.user_id
     record.status = outcome
     record.verification_url = None
     record.session_expires_at = None
     if outcome == "verified":
         record.verified_on = date.today()
         record.expires_on = date(year + 1, date.today().month, date.today().day)
-        try:
-            httpx.post(
-                f"{AUTH_URL}/internal/users/{user_id}/kyc",
-                params={"verified": True, "until": record.expires_on.isoformat()},
-                timeout=6,
-            ).raise_for_status()
-        except Exception as exc:
-            log.error("could not propagate KYC status for %s: %s", user_id, exc)
+    elif record.verified_on and (record.expires_on is None or record.expires_on > date.today()):
+        # A verification withdrawn by the provider ends today: the dates keep
+        # the period it was valid, which is what commissions earned in it rest on.
+        record.expires_on = date.today()
     db.commit()
+    _sync_auth_kyc(record.user_id, db)
+
+
+def _sync_auth_kyc(user_id: str, db: OrmSession) -> None:
+    """Tell auth-service whether this member is verified *now*, from every
+    verification record - not just the latest event. Before, only a success was
+    ever passed on: a rejected or withdrawn verification left the member
+    "verified" there (and earning commissions) until the old end date."""
+    today = date.today()
+    valid = [
+        r for r in db.scalars(select(models.KycRecord).where(models.KycRecord.user_id == user_id)).all()
+        if r.status == "verified" and r.expires_on and r.expires_on > today
+    ]
+    until = max((r.expires_on for r in valid), default=None)
+    try:
+        httpx.post(
+            f"{AUTH_URL}/internal/users/{user_id}/kyc",
+            params={"verified": bool(valid), **({"until": until.isoformat()} if until else {})},
+            timeout=6,
+        ).raise_for_status()
+    except Exception as exc:
+        log.error("could not propagate KYC status for %s: %s", user_id, exc)

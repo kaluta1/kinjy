@@ -54,6 +54,26 @@ app = create_app(
 )
 
 
+def _sponsor_answer(user_id: str) -> dict:
+    """auth-service's whole answer: the sponsor to pay, or nobody - and, when a
+    sponsor exists but is not verified, who the commission is withheld from.
+    The one eligibility rule for every posting path."""
+    try:
+        response = httpx.get(f"{AUTH_URL}/internal/sponsor/{user_id}", timeout=5)
+        response.raise_for_status()
+        return response.json()
+    except Exception as exc:
+        log.error("sponsor lookup failed for %s: %s", user_id, exc)
+        raise HTTPException(status_code=503, detail="Could not resolve the sponsor; posting aborted")
+
+
+def _withheld(answer: dict) -> dict | None:
+    """The audit note for a commission redirected to Kinjy: from whom, and why."""
+    if answer.get("sponsor_id") or not answer.get("withheld_from"):
+        return None
+    return {"member_id": answer["withheld_from"], "reason": f"sponsor_{answer.get('source') or 'ineligible'}"}
+
+
 def _sponsor(user_id: str) -> str | None:
     """Who is paid on this member's activity, per auth-service.
 
@@ -260,9 +280,10 @@ def rules():
 
 @app.post("/internal/post/ad-purchase", tags=["postings"])
 def post_ad_purchase(payload: AdPurchaseIn, db: OrmSession = Depends(get_db)):
-    split = economy.ad_purchase_split(payload.amount, _sponsor(payload.advertiser_id))
+    split = economy.ad_purchase_split(payload.amount, (who := _sponsor_answer(payload.advertiser_id))["sponsor_id"])
     journal = posting.post_split(
         db,
+        withheld=_withheld(who),
         kind="ad_purchase",
         split=split,
         revenue_account=models.ACC_REVENUE_ADS,
@@ -277,9 +298,10 @@ def post_ad_purchase(payload: AdPurchaseIn, db: OrmSession = Depends(get_db)):
 
 @app.post("/internal/post/creator-revenue", tags=["postings"])
 def post_creator_revenue(payload: CreatorRevenueIn, db: OrmSession = Depends(get_db)):
-    split = economy.creator_revenue_split(payload.amount, payload.creator_id, _sponsor(payload.creator_id))
+    split = economy.creator_revenue_split(payload.amount, payload.creator_id, (who := _sponsor_answer(payload.creator_id))["sponsor_id"])
     journal = posting.post_split(
         db,
+        withheld=_withheld(who),
         kind="creator_revenue",
         split=split,
         revenue_account=models.ACC_REVENUE_ADS,
@@ -318,9 +340,10 @@ def post_community_sale(payload: CommunitySaleIn, db: OrmSession = Depends(get_d
         return _journal_out(existing, db)
     owner_price = economy.money(payload.owner_price)
     markup = economy.money(payload.markup)
-    split = economy.revenue_split(markup, _sponsor(payload.buyer_id), kind=f"community_{payload.kind}")
+    split = economy.revenue_split(markup, (who := _sponsor_answer(payload.buyer_id))["sponsor_id"], kind=f"community_{payload.kind}")
     journal = posting.post_split(
         db,
+        withheld=_withheld(who),
         kind=f"community_{payload.kind}",
         split=split,
         revenue_account=models.ACC_REVENUE_COMMUNITY,
@@ -357,10 +380,11 @@ def post_marketplace_order(payload: MarketplaceOrderIn, db: OrmSession = Depends
     if existing is not None:
         return {"pricing": {k: str(v) for k, v in pricing.items()}, "journal": _journal_out(existing, db),
                 "replayed": True}
-    split = economy.service_affiliate_split(pricing["margin"], _sponsor(payload.buyer_id))
+    split = economy.service_affiliate_split(pricing["margin"], (who := _sponsor_answer(payload.buyer_id))["sponsor_id"])
 
     journal = posting.post_split(
         db,
+        withheld=_withheld(who),
         kind="marketplace_order",
         split=split,
         revenue_account=models.ACC_REVENUE_MARGIN,
@@ -408,9 +432,10 @@ def post_marketplace_order(payload: MarketplaceOrderIn, db: OrmSession = Depends
 
 @app.post("/internal/post/service-fee", tags=["postings"])
 def post_service_fee(payload: ServiceFeeIn, db: OrmSession = Depends(get_db)):
-    split = economy.service_affiliate_split(payload.fee, _sponsor(payload.buyer_id))
+    split = economy.service_affiliate_split(payload.fee, (who := _sponsor_answer(payload.buyer_id))["sponsor_id"])
     journal = posting.post_split(
         db,
+        withheld=_withheld(who),
         kind="service",
         split=split,
         revenue_account=models.ACC_REVENUE_MARGIN,
@@ -426,9 +451,10 @@ def post_service_fee(payload: ServiceFeeIn, db: OrmSession = Depends(get_db)):
 def post_kyc_fee(payload: PoolEntryIn, db: OrmSession = Depends(get_db)):
     """A member paid the annual KYC fee: Kinjy revenue, so their sponsor earns
     their 20% on it and the Leaders pool its 5%, like on everything else."""
-    split = economy.revenue_split(payload.amount, _sponsor(payload.member_id), kind="kyc_fee")
+    split = economy.revenue_split(payload.amount, (who := _sponsor_answer(payload.member_id))["sponsor_id"], kind="kyc_fee")
     journal = posting.post_split(
         db,
+        withheld=_withheld(who),
         kind="kyc_fee",
         split=split,
         revenue_account=models.ACC_REVENUE_KYC,
@@ -477,9 +503,10 @@ def post_referral_pool_entry(payload: PoolEntryIn, db: OrmSession = Depends(get_
     paid their 20% on it and the Leaders pool takes its 5%. Nothing about the
     pool exempts it from the programme it feeds.
     """
-    split = economy.revenue_split(payload.amount, _sponsor(payload.member_id), kind="referral_pool")
+    split = economy.revenue_split(payload.amount, (who := _sponsor_answer(payload.member_id))["sponsor_id"], kind="referral_pool")
     journal = posting.post_split(
         db,
+        withheld=_withheld(who),
         kind="referral_pool_entry",
         split=split,
         revenue_account=models.ACC_REVENUE_REFERRAL_POOL,

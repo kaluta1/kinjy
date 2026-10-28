@@ -2075,7 +2075,7 @@ def sponsor(user_id: str, db: OrmSession = Depends(get_db)):
     # Earning starts with the sponsor's own verification: until it is active
     # the commission is Kinjy's, booked as unclaimed so it stays visible.
     if settings.COMMISSION_REQUIRES_KYC and not _kyc_active(parent):
-        return schemas.SponsorOut(user_id=user_id, sponsor_id=None, source="unverified")
+        return schemas.SponsorOut(user_id=user_id, sponsor_id=None, source="unverified", withheld_from=parent.id)
 
     assigned = db.scalar(
         select(models.PoolAssignment).where(models.PoolAssignment.new_member_id == user_id)

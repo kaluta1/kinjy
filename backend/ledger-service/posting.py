@@ -53,6 +53,7 @@ def post_split(
     created_by: str | None = None,
     credit_wallets: bool = True,
     pending: bool = False,
+    withheld: dict | None = None,
 ) -> models.Journal:
     """Post a distribution.
 
@@ -114,6 +115,12 @@ def post_split(
                     credit=share.amount,
                     reason=share.reason,
                 )
+                # Whose it would have been, when somebody was withheld from it.
+                if withheld and share.reason == "unclaimed_sponsor_commission":
+                    db.add(models.WithheldCommission(
+                        journal_id=journal.id, member_id=withheld["member_id"], amount=share.amount,
+                        currency=currency, source_kind=kind, source_ref=reference, reason=withheld["reason"],
+                    ))
             continue
 
         expense = (
