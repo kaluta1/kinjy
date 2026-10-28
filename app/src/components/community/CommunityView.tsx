@@ -7,7 +7,7 @@ import PostCard from '@/components/social/PostCard'
 import { CommunityMembersDialog, CommunitySettingsDialog } from '@/components/community/CommunityDialogs'
 import { AuditDialog, PendingPostsDialog } from '@/components/community/CommunityModeration'
 import { AnalyticsDialog, PaidAccessDialog } from '@/components/community/CommunityOwnerTools'
-import CommunityEvents from '@/components/community/CommunityEvents'
+import CommunityEvents, { UpcomingEvents } from '@/components/community/CommunityEvents'
 import CommunityForums from '@/components/community/CommunityForums'
 import CommunityGroupChats from '@/components/community/CommunityGroupChats'
 import CommunityMarket from '@/components/community/CommunityMarket'
@@ -698,6 +698,11 @@ export default function CommunityView({
               </label>
               )}
             </div>
+          )}
+
+          {/* The next events, on the main page rather than only in their tab. */}
+          {section === 'posts' && (community.spaces ?? []).some((s) => s.id === 'events' && s.enabled) && (
+            <UpcomingEvents communityId={community.id} onSeeAll={() => setSection('events')} />
           )}
 
           {/* A 404 here is the private-community answer, not a broken page: the

@@ -62,6 +62,7 @@ def _event_out(db: OrmSession, e: models.CommunityEvent, viewer: str | None) -> 
     registered = bool(mine and mine.status == "registered")
     steward = bool(viewer and _steward(db, e.community_id, viewer))
     price = paid.money(e.ticket_price) if e.ticket_price else None
+    community = db.get(models.Community, e.community_id)
     return {
         "id": e.id, "community_id": e.community_id, "title": e.title, "description": e.description,
         "starts_at": e.starts_at, "ends_at": e.ends_at, "timezone": e.timezone, "mode": e.mode,
@@ -77,6 +78,11 @@ def _event_out(db: OrmSession, e: models.CommunityEvent, viewer: str | None) -> 
         "ticket_owner_price": str(price) if price else None,
         "ticket_price": str(price + paid.money(price * paid.markup_pct(db) / 100)) if price else None,
         "my_status": mine.status if mine else None,
+        # Only ever returned to someone allowed to read the event, so the
+        # community's name tells them nothing new.
+        "community": {"id": community.id, "slug": community.slug, "name": community.name} if community else None,
+        # The host, or the community's owner and moderators.
+        "can_edit": bool(viewer and (steward or (viewer == e.host_id and paid._role(db, e.community_id, viewer)))),
     }
 
 
@@ -349,3 +355,130 @@ def remind_upcoming(db: OrmSession) -> int:
             sent += 1
             notify.notify(user_id, kind="event_reminder", title=f"Tomorrow: {title}", link=f"/events/{event_id}")
     return sent
+
+
+# --- editing, and the events a member hosts -------------------------------------
+
+class EventPatch(BaseModel):
+    """What the creation form sets, every field optional: only what is sent changes."""
+
+    title: str | None = Field(default=None, min_length=3, max_length=200)
+    description: str | None = Field(default=None, max_length=8000)
+    starts_at: datetime | None = None
+    ends_at: datetime | None = None
+    timezone: str | None = Field(default=None, max_length=60)
+    mode: str | None = Field(default=None, pattern="^(online|in_person|hybrid)$")
+    location: str | None = Field(default=None, max_length=300)
+    online_url: str | None = Field(default=None, max_length=500, pattern=r"^(https://.*)?$")
+    capacity: int | None = Field(default=None, ge=1, le=100000)
+    waitlist: bool | None = None
+    ticket_price: float | None = Field(default=None, ge=0, le=100000)
+    speakers: list[str] | None = Field(default=None, max_length=20)
+    recording_consent: bool | None = None
+
+
+@router.patch("/events/{event_id}", tags=["events"])
+def update_event(event_id: str, payload: EventPatch, principal: CurrentUser, db: OrmSession = Depends(get_db)):
+    """Change an event: its host, or the community's owner and moderators.
+    Registrations, waitlist and tickets are kept; people registered are told
+    when the time or the place changes."""
+    event, community = _event(db, event_id, principal.user_id)
+    host = principal.user_id == event.host_id and paid._role(db, community.id, principal.user_id)
+    if not (host or _steward(db, community.id, principal.user_id)):
+        raise HTTPException(status_code=403, detail="Only the host and the community's moderators edit this event")
+    event = db.scalar(select(models.CommunityEvent).where(models.CommunityEvent.id == event.id).with_for_update())
+    if event.status != "scheduled":
+        raise HTTPException(status_code=409, detail="A cancelled event cannot be edited")
+    changes = payload.model_dump(exclude_unset=True)
+    if "title" in changes and changes["title"] is None:
+        raise HTTPException(status_code=422, detail="An event needs a title")
+    if changes.get("timezone"):
+        try:
+            ZoneInfo(changes["timezone"])
+        except (ZoneInfoNotFoundError, ValueError):
+            raise HTTPException(status_code=400, detail="Unknown time zone")
+    starts = _aware(changes["starts_at"]) if changes.get("starts_at") else _aware(event.starts_at)
+    if changes.get("starts_at") and starts != _aware(event.starts_at) and starts < _now():
+        raise HTTPException(status_code=400, detail="The event must start in the future")
+    ends = _aware(changes["ends_at"]) if "ends_at" in changes else _aware(event.ends_at)
+    if ends and ends <= starts:
+        raise HTTPException(status_code=400, detail="The event must end after it starts")
+    if "capacity" in changes and changes["capacity"] is not None and changes["capacity"] < event.registered_count:
+        raise HTTPException(
+            status_code=400,
+            detail=f"{event.registered_count} people are already registered: the places cannot go below that",
+        )
+    price_now = paid.money(event.ticket_price) if event.ticket_price else None
+    if "ticket_price" in changes:
+        new_price = paid.money(changes["ticket_price"]) if changes["ticket_price"] else None
+        if new_price != price_now:
+            sold = db.scalar(select(models.EventRegistration.id).where(
+                models.EventRegistration.event_id == event.id, models.EventRegistration.payment_id.is_not(None)).limit(1))
+            if sold:
+                raise HTTPException(status_code=409, detail="Tickets were already sold: the price cannot change")
+            if new_price and not paid.paid_enabled(db):
+                raise HTTPException(status_code=409, detail="Paid tickets are not open on Kinjy yet")
+            capacity = changes.get("capacity", event.capacity)
+            if new_price and not capacity:
+                raise HTTPException(status_code=400, detail="A paid event needs a number of places")
+            event.ticket_price = new_price
+    moved = any(
+        k in changes and changes[k] != getattr(event, k)
+        for k in ("mode", "location", "online_url")
+    ) or ("starts_at" in changes and starts != _aware(event.starts_at))
+    if "title" in changes:
+        event.title = changes["title"].strip()
+    if "description" in changes:
+        event.description = (changes["description"] or "").strip()
+    if "starts_at" in changes and changes["starts_at"]:
+        event.starts_at = starts
+    if "ends_at" in changes:
+        event.ends_at = ends
+    for key in ("timezone", "mode", "location", "capacity", "recording_consent"):
+        if key in changes and (changes[key] is not None or key in ("location", "capacity")):
+            setattr(event, key, changes[key])
+    if "online_url" in changes:
+        event.online_url = changes["online_url"] or None
+    if "waitlist" in changes and changes["waitlist"] is not None:
+        event.waitlist = changes["waitlist"] and not event.ticket_price
+    if "speakers" in changes and changes["speakers"] is not None:
+        event.speakers = "\n".join(s.strip() for s in changes["speakers"] if s.strip())
+    # More places may let the waitlist in.
+    promoted = []
+    while (who := _promote(db, event)) is not None:
+        promoted.append(who)
+    db.commit()
+    if moved:
+        people = db.scalars(select(models.EventRegistration.user_id).where(
+            models.EventRegistration.event_id == event.id,
+            models.EventRegistration.status.in_(("registered", "waitlisted")))).all()
+        notify.notify_many(list(people), kind="event_updated", title=f"{event.title}: the time or place changed",
+                           body="Open the event to see the new details.", link=f"/events/{event.id}")
+    if promoted:
+        notify.notify_many(promoted, kind="event_place", title=f"You have a place at {event.title}",
+                           link=f"/events/{event.id}")
+    return _event_out(db, event, principal.user_id)
+
+
+@router.get("/events/by-host/{user_id}", tags=["events"])
+def hosted_events(user_id: str, principal: MaybeUser, db: OrmSession = Depends(get_db)):
+    """Upcoming events a member hosts, for their profile: only scheduled ones,
+    and only in communities this reader may read."""
+    viewer = principal.user_id if principal else None
+    rows = db.scalars(select(models.CommunityEvent).where(
+        models.CommunityEvent.host_id == user_id,
+        models.CommunityEvent.status == "scheduled",
+        models.CommunityEvent.starts_at >= _now() - timedelta(hours=6),
+    ).order_by(models.CommunityEvent.starts_at).limit(50)).all()
+    items = []
+    for e in rows:
+        community = db.get(models.Community, e.community_id)
+        if community is None:
+            continue
+        try:
+            paid._visible(db, community, viewer)
+        except HTTPException:
+            continue
+        if _readable(db, community, viewer):
+            items.append(_event_out(db, e, viewer))
+    return {"items": items[:20]}

@@ -34,6 +34,7 @@ const PostPage = lazy(() => import('./pages/PostPage'))
 const Dashboard = lazy(() => import('./pages/Dashboard'))
 const SocialHub = lazy(() => import('./pages/SocialHub'))
 const Circles = lazy(() => import('./pages/app/Circles'))
+const EventPage = lazy(() => import('./pages/app/EventPage'))
 const AudienceSettings = lazy(() => import('./pages/app/AudienceSettings'))
 const Connections = lazy(() => import('./pages/app/Connections'))
 const Communities = lazy(() => import('./pages/app/Communities'))
@@ -84,7 +85,7 @@ const Profile = lazy(() => import('./pages/app/Profile'))
  * page that jumps sideways the moment it loads.
  */
 const APP_ROUTE_PREFIXES = [
-  '/hub', '/p', '/explore', '/messages', '/communities', '/forums', '/circles',
+  '/hub', '/p', '/explore', '/messages', '/communities', '/events', '/forums', '/circles',
   '/connections', '/u', '/dashboard', '/market', '/tree', '/graveyard',
   '/memorial', '/live', '/shorts', '/earn', '/supervision', '/settings',
   '/moderation', '/trust-safety', '/admin', '/stats', '/team',
@@ -182,6 +183,8 @@ export default function App() {
           {/* One community, by slug. The directory and the community are the
               same page so a join updates both without a refetch dance. */}
           <Route path="/communities/:slug" element={<Communities />} />
+          {/* One community event, by its own address: the link that is shared. */}
+          <Route path="/events/:eventId" element={<EventPage />} />
           <Route path="/forums" element={<Forums />} />
           <Route path="/messages" element={<Messages />} />
           <Route path="/messages/join/:code" element={<JoinGroup />} />

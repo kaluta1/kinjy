@@ -38,6 +38,7 @@ const APP_ROUTES = [
   '/circles',
   '/connections',
   '/communities',
+  '/events',
   '/forums',
   '/messages',
   '/tree',

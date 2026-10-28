@@ -1134,6 +1134,27 @@ export interface CommunityEvent {
   /** What a member pays for a ticket (owner's price + Kinjy's fee). */
   ticket_price: string | null
   my_status: 'registered' | 'waitlisted' | 'cancelled' | null
+  /** The community it happens in, for its page and its link. */
+  community?: { id: string; slug: string; name: string } | null
+  /** The host, or the community's owner and moderators. */
+  can_edit?: boolean
+}
+
+/** What the event form sets; on an edit, only what is sent changes. */
+export interface EventInput {
+  title: string
+  description: string
+  starts_at: string
+  ends_at?: string | null
+  timezone: string
+  mode: string
+  location?: string | null
+  online_url?: string | null
+  capacity?: number | null
+  waitlist?: boolean
+  ticket_price?: number | null
+  speakers?: string[]
+  recording_consent?: boolean
 }
 
 /** Template, spaces and the rules of the house, with what the reader may do. */
@@ -3565,6 +3586,11 @@ export const kaluta = {
         recording_consent?: boolean
       },
     ) => api.post<CommunityEvent>(`/communities/${id}/events`, event),
+    /** One event, by its own address (/events/<id>); the community's rules decide who sees it. */
+    event: (eventId: string) => api.get<CommunityEvent>(`/events/${eventId}`),
+    updateEvent: (eventId: string, patch: Partial<EventInput>) => api.patch<CommunityEvent>(`/events/${eventId}`, patch),
+    /** Upcoming events a member hosts, in communities the reader may read. */
+    hostedEvents: (userId: string) => api.get<{ items: CommunityEvent[] }>(`/events/by-host/${userId}`),
     register: (eventId: string) => api.post<CommunityEvent>(`/events/${eventId}/register`, {}),
     unregister: (eventId: string) => api.post<CommunityEvent>(`/events/${eventId}/unregister`, {}),
     cancelEvent: (eventId: string) => api.post<{ cancelled: boolean; told: number }>(`/events/${eventId}/cancel`, {}),

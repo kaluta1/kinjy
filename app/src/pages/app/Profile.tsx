@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import { Link,useNavigate, useParams } from 'react-router'
-import { Check, Clock, MapPin, MessageSquare, Pencil, UserPlus, Users } from 'lucide-react'
+import { CalendarDays, Check, Clock, MapPin, MessageSquare, Pencil, UserPlus, Users } from 'lucide-react'
 import AppShell from '@/components/app/AppShell'
 import { ProfileAsideSkeleton, ProfileSkeleton } from '@/components/app/ProfileSkeleton'
 import MediaLightbox from '@/components/social/MediaLightbox'
@@ -14,6 +14,7 @@ import { announce } from '@/lib/live'
 import {
   ApiError,
   kaluta,
+  type CommunityEvent,
   type Permissions,
   type Post,
   type Profile as ProfileData,
@@ -40,6 +41,8 @@ export default function Profile() {
   const [profile, setProfile] = useState<ProfileData | null>(null)
   const [permissions, setPermissions] = useState<Permissions | null>(null)
   const [posts, setPosts] = useState<Post[]>([])
+  // Upcoming events they host, in communities this reader may see.
+  const [events, setEvents] = useState<CommunityEvent[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
@@ -55,10 +58,12 @@ export default function Profile() {
 
       // Permissions and posts are independent of each other: a failure in one
       // must not blank the page, so they settle separately.
-      const [perm, page] = await Promise.allSettled([
+      const [perm, page, hosted] = await Promise.allSettled([
         kaluta.connections.with(found.user_id),
         kaluta.posts.byAuthor(found.user_id),
+        kaluta.communityPaid.hostedEvents(found.user_id),
       ])
+      setEvents(hosted.status === 'fulfilled' ? hosted.value.items : [])
       if (perm.status === 'fulfilled') {
         setPermissions(perm.value)
         // From the server, not assumed: a profile reached from a notification
@@ -372,6 +377,32 @@ export default function Profile() {
           )}
         </div>
       </div>
+
+      {/* Events they host - only when there are some, and only ones this reader may open. */}
+      {events.length > 0 && (
+        <>
+          <h2 className={cn('mb-4 mt-8 flex items-center gap-2.5 text-xl font-bold tracking-[-0.03em]', tok.text)}>
+            Events
+            <span className="mono-data rounded-full bg-text-hi/[0.07] px-2.5 py-0.5 text-xs font-semibold text-text-mid">
+              {events.length}
+            </span>
+          </h2>
+          <ul className="space-y-2">
+            {events.map((e) => (
+              <li key={e.id}>
+                <Link to={`/events/${e.id}`} className={cn('block rounded-[20px] p-4 hover:ring-1 hover:ring-gold/40', tok.card)}>
+                  <span className={cn('block font-semibold', tok.text)}>{e.title}</span>
+                  <span className={cn('mt-1 flex items-center gap-1.5 text-sm', tok.low)}>
+                    <CalendarDays size={13} aria-hidden="true" />
+                    {new Date(e.starts_at).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' })}
+                    {e.community && ` · ${e.community.name}`}
+                  </span>
+                </Link>
+              </li>
+            ))}
+          </ul>
+        </>
+      )}
 
       {/* Their posts */}
       <h2 className={cn('mb-4 mt-8 flex items-center gap-2.5 text-xl font-bold tracking-[-0.03em]', tok.text)}>
