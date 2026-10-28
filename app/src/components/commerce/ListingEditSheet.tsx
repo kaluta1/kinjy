@@ -72,7 +72,16 @@ export default function ListingEditSheet({ product, onClose, onSaved }: Props) {
   const isService = product.kind === 'service'
   const gaps = protection ? protectionProblems(protection, isService, 'ed') : []
   const problemFor = (id: string) => (attempted ? gaps.find((p) => p.field === id) : undefined)
-  const ready = !busy && !uploading && title.trim().length >= 2 && cents !== null && country !== ''
+  // The same rule as when the listing was created: an ebook's country is
+  // optional ("Not shown"), anything else ships or happens from somewhere.
+  const ebook = product.kind === 'digital'
+  // What keeps the button off, named, so the seller is never left guessing.
+  const blockers = [
+    ...(title.trim().length < 2 ? ['a title of at least 2 characters'] : []),
+    ...(cents === null ? ['a price above $0 with at most 2 decimals (for example 12.50)'] : []),
+    ...(!ebook && country === '' ? ['the country you sell from'] : []),
+  ]
+  const ready = !busy && !uploading && blockers.length === 0
 
   const save = async (event: React.FormEvent) => {
     event.preventDefault()
@@ -135,9 +144,15 @@ export default function ListingEditSheet({ product, onClose, onSaved }: Props) {
               value={price}
               onChange={(e) => setPrice(e.target.value.replace(/[^\d.]/g, ''))}
               inputMode="decimal"
-              aria-invalid={price !== '' && cents === null}
+              aria-invalid={cents === null}
+              aria-describedby={cents === null ? 'ed-price-problem' : undefined}
               className={fieldClass}
             />
+            {cents === null && (
+              <p id="ed-price-problem" className="mt-1 text-xs text-red-200">
+                Enter a price above $0, with at most 2 decimals.
+              </p>
+            )}
           </div>
           {showStock && (
             <div>
@@ -156,9 +171,9 @@ export default function ListingEditSheet({ product, onClose, onSaved }: Props) {
         <MarginCalculator value={price} />
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
           <div>
-            <label htmlFor="ed-country" className="caption mb-1.5 block">Country</label>
+            <label htmlFor="ed-country" className="caption mb-1.5 block">{ebook ? 'Your country (optional)' : 'Country'}</label>
             <select id="ed-country" value={country} onChange={(e) => setCountry(e.target.value)} className={fieldClass}>
-              <option value="">Select a country</option>
+              <option value="">{ebook ? 'Not shown' : 'Select a country'}</option>
               {countries.map(({ code, name }) => (
                 <option key={code} value={code}>
                   {name}
@@ -224,6 +239,12 @@ export default function ListingEditSheet({ product, onClose, onSaved }: Props) {
             {error}
           </p>
         )}
+        {blockers.length > 0 && (
+          <p role="status" className="text-xs text-text-low">
+            To save, add {blockers.join(' and ')}.
+          </p>
+        )}
+        {uploading && <p role="status" className="text-xs text-text-low">Waiting for the photos to finish uploading…</p>}
         <button type="submit" disabled={!ready} className={primaryBtn}>
           {busy ? 'Saving…' : 'Save changes'}
         </button>
