@@ -2298,6 +2298,35 @@ export interface OrderPayment {
   status: string
 }
 
+/** Paying an order from the Kinjy balance: what it would take (server's figures). */
+export type WalletPayQuote =
+  | { enabled: false }
+  | { enabled: true; order_id: string; amount: string; currency: string; available: string; enough: boolean }
+
+export interface WalletPayment {
+  payment_id: string
+  rail: 'wallet'
+  order_id: string
+  amount: string
+  currency: string
+  /** paid | processing (a service is catching up; nothing to do) */
+  status: string
+  paid_at: string | null
+}
+
+/** One movement of the balance: positive in, negative out. */
+export interface WalletHistoryItem {
+  id: string
+  date: string
+  amount: string
+  currency: string
+  type: string
+  kind: string
+  status: 'completed' | 'pending' | 'returned'
+  reference: string | null
+  journal_id: string | null
+}
+
 export interface OrderShipping {
   full_name: string
   line1: string
@@ -4549,6 +4578,11 @@ export const kaluta = {
         reference: orderId,
         return_path: `/market/orders/${orderId}`,
       }),
+    /** Paying from the balance: `{ enabled: false }` while the option is switched off. */
+    walletQuote: (orderId: string) =>
+      api.get<WalletPayQuote>(`/payments/wallet/quote?order_id=${encodeURIComponent(orderId)}`),
+    /** The whole order, from the available balance. The server sets the amount. */
+    payWithWallet: (orderId: string) => api.post<WalletPayment>('/payments/wallet/pay', { order_id: orderId }),
     settleMockPayment: (paymentId: string) =>
       api.post<{ payment_id: string; status: string; mock: boolean }>(`/payments/${paymentId}/mock-settle`, {}),
 
@@ -5064,6 +5098,8 @@ export const kaluta = {
     profileEligibility: () => api.get<ProfileEligibility>('/users/me/eligibility'),
 
     wallet: () => api.get<Wallet>('/wallet'),
+    walletHistory: (limit = 30, offset = 0) =>
+      api.get<{ total: number; items: WalletHistoryItem[] }>(`/wallet/history?limit=${limit}&offset=${offset}`),
     commissions: (params: { source_kind?: string; limit?: number } = {}) => {
       const query = new URLSearchParams()
       if (params.source_kind) query.set('source_kind', params.source_kind)

@@ -19,6 +19,8 @@ What "allocate" means depends on the rail the buyer paid through:
 * **Sonco Pay** (direct) settles into Kinjy's own Sonco Pay merchant balance,
   the balance withdrawals are paid from. There is no hold at the provider to
   release, so allocation is confirmed against that balance and said so.
+* A **balance payment** (``wallet``, see walletpay.py) never left Kinjy:
+  allocation is confirmed against Kinjy's own balance, like Sonco Pay's.
 * The **test rail** (development machines only) confirms with backing
   ``test_rail``. In production it is refused.
 * Anything else - including payments taken through the removed Mangopay and
@@ -162,6 +164,11 @@ def allocate(
         # Settled into Kinjy's own Sonco Pay merchant balance: nothing is held at
         # the provider, and that balance is what withdrawals are paid from.
         row.backing = "soncopay_merchant_balance"
+    elif intent.rail == "wallet":
+        # Paid from the buyer's Kinjy balance (walletpay): the money never left
+        # Kinjy, so, as for Sonco Pay, allocating is confirmed against Kinjy's
+        # own balance - the one withdrawals are paid from.
+        row.backing = "kinjy_balance"
     elif intent.rail == "mock" and rails.test_rail_allowed():
         row.backing = "test_rail"
     else:

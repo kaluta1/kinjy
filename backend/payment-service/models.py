@@ -25,7 +25,7 @@ class PaymentIntent(Base):
 
     id: Mapped[str] = mapped_column(String(40), primary_key=True, default=lambda: new_id("pmt"))
     user_id: Mapped[str] = mapped_column(String(40), index=True)
-    rail: Mapped[str] = mapped_column(String(20), default="soncopay")  # kalutapay|soncopay|mock (test); nowpayments|mangopay on old rows only
+    rail: Mapped[str] = mapped_column(String(20), default="soncopay")  # kalutapay|soncopay|wallet (Kinjy balance)|mock (test); nowpayments|mangopay on old rows only
     purpose: Mapped[str] = mapped_column(String(40))  # order|subscription|ad_credit|kyc_fee|tribute
     reference: Mapped[str | None] = mapped_column(String(80), index=True)
 

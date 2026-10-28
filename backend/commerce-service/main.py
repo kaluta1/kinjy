@@ -1269,7 +1269,10 @@ def order_quote(order_id: str, db: OrmSession = Depends(get_db)):
     if order is None:
         raise HTTPException(status_code=404, detail="Order not found")
     return {"id": order.id, "buyer_id": order.buyer_id, "customer_price": str(order.customer_price),
-            "currency": order.currency, "status": order.status}
+            "currency": order.currency, "status": order.status,
+            # Which payment opened its escrow: a balance payment that lost the
+            # race to another payment gives its money back.
+            "custody_ref": order.custody_ref}
 
 
 @app.post("/internal/orders/{order_id}/funded", tags=["internal"])

@@ -204,6 +204,11 @@ KYC_FEE_COMMISSIONABLE = _str("KYC_FEE_COMMISSIONABLE", "1") not in ("0", "false
 # unclaimed. "0" turns the rule off: every sponsor earns, verified or not.
 COMMISSION_REQUIRES_KYC = _str("COMMISSION_REQUIRES_KYC", "1") not in ("0", "false", "no")
 
+# Paying a marketplace order from the member's available Kinjy balance instead
+# of withdrawing it first. Off until switched on ("1"): the option is then
+# offered at checkout, next to the existing payment.
+WALLET_PAY_ENABLED = _str("WALLET_PAY_ENABLED", "0") in ("1", "true", "yes")
+
 # Kaluta KYC: the identity check behind KinjyKYC. Blank key => verification
 # cannot start, and says so, rather than pretending to.
 KALUTA_KYC_API_KEY = _str("KALUTA_KYC_API_KEY")

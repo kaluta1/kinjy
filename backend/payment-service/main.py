@@ -35,6 +35,7 @@ import orderfunds
 import payouts
 import rails
 import sonco
+import walletpay
 
 log = logging.getLogger("payment-service")
 AUTH_URL = "http://auth-service:8000"
@@ -61,6 +62,10 @@ MIGRATIONS = [
     # A settled referral-pool payment whose units (and revenue) are recorded.
     # Null on a settled one means the reconciler still owes it the credit.
     f"ALTER TABLE {_T}.payment_intents ADD COLUMN IF NOT EXISTS fulfilled_at TIMESTAMPTZ",
+    # One balance payment per order (walletpay): a double click or two tabs
+    # find the same payment instead of starting a second.
+    f"CREATE UNIQUE INDEX IF NOT EXISTS ux_payment_intents_wallet_key ON {_T}.payment_intents (external_id) "
+    "WHERE rail = 'wallet'",
 ]
 
 
@@ -70,6 +75,7 @@ def _start_reconciler():
     asyncio.get_event_loop().create_task(payouts.reconcile_loop())
     asyncio.get_event_loop().create_task(_splits_loop())
     asyncio.get_event_loop().create_task(_pool_loop())
+    asyncio.get_event_loop().create_task(walletpay.reconcile_loop())
 
 
 async def _pool_loop() -> None:
@@ -102,6 +108,7 @@ app = create_app(
     on_startup=[_start_reconciler],
 )
 app.include_router(payouts.router)
+app.include_router(walletpay.router)
 
 
 class CheckoutIn(BaseModel):

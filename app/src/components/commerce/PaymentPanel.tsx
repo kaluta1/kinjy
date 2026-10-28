@@ -1,9 +1,14 @@
 import { useState } from 'react'
-import { CheckCircle2, Copy, ExternalLink, FlaskConical, ShieldCheck } from 'lucide-react'
+import { CheckCircle2, Copy, ExternalLink, FlaskConical, ShieldCheck, Wallet } from 'lucide-react'
 import { ghostBtn, primaryBtn } from '@/components/commerce/ActionSheet'
-import { ApiError, kaluta, type OrderPayment } from '@/lib/api'
+import { useApi } from '@/hooks/useApi'
+import { ApiError, kaluta, type OrderPayment, type WalletPayQuote } from '@/lib/api'
 import InPagePayment from '@/components/payments/InPagePayment'
 import { inPage } from '@/lib/payrail'
+
+/** The balance after paying, in whole cents so no float rounding shows. */
+const afterCents = (available: string, amount: string) =>
+  ((Math.round(Number(available) * 100) - Math.round(Number(amount) * 100)) / 100).toFixed(2)
 
 /**
  * Pays for one order, from "Pay" to "held until the purchase is final".
@@ -31,6 +36,34 @@ export default function PaymentPanel({
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [copied, setCopied] = useState(false)
+  // Paying from the Kinjy balance, when the option is on. The figures are the
+  // server's; the confirmation step shows them before anything is taken.
+  const balance = useApi<WalletPayQuote>(() => kaluta.market.walletQuote(orderId), [orderId])
+  const [confirming, setConfirming] = useState(false)
+  const [reference, setReference] = useState<string | null>(null)
+
+  const payFromBalance = async () => {
+    setBusy(true)
+    setError(null)
+    try {
+      const done = await kaluta.market.payWithWallet(orderId)
+      setReference(done.payment_id)
+      setPaid(true)
+      onPaid()
+    } catch (err) {
+      setConfirming(false)
+      balance.reload()
+      setError(
+        err instanceof ApiError && err.message === 'insufficient_funds'
+          ? 'Your available balance is lower than this order. Nothing was taken; you can pay another way.'
+          : err instanceof ApiError
+            ? err.message
+            : 'The payment from your balance did not go through. Nothing was taken.',
+      )
+    } finally {
+      setBusy(false)
+    }
+  }
 
   const start = async () => {
     setBusy(true)
@@ -78,6 +111,11 @@ export default function PaymentPanel({
           ${amount} is held. It reaches the seller only when the purchase is final: your confirmation of receipt, or
           for an ebook your first successful download.
         </p>
+        {reference && (
+          <p className="caption mt-2">
+            Paid from your Kinjy balance · reference <span className="mono-data">{reference}</span>
+          </p>
+        )}
         {onDone && (
           <button type="button" onClick={onDone} className={`${primaryBtn} mt-4`}>
             Done
@@ -96,6 +134,44 @@ export default function PaymentPanel({
           purchase is final, not paid to the seller straight away.
         </span>
       </p>
+
+      {!payment && balance.data?.enabled && (
+        <div className="space-y-2 rounded-2xl border border-white/10 bg-ink-2/40 p-3">
+          <p className="flex items-start gap-2 text-sm text-text-mid">
+            <Wallet size={16} className="mt-0.5 shrink-0 text-gold" aria-hidden="true" />
+            <span>
+              Your available Kinjy balance:{' '}
+              <span className="mono-data text-text-hi">${balance.data.available}</span>
+            </span>
+          </p>
+          {!balance.data.enough ? (
+            <p className="caption">It is lower than this order, so pay it another way below.</p>
+          ) : confirming ? (
+            <div className="space-y-2">
+              <p className="text-sm text-text-hi">
+                Pay <span className="mono-data">${balance.data.amount}</span> from your balance? It goes from{' '}
+                <span className="mono-data">${balance.data.available}</span> to{' '}
+                <span className="mono-data">
+                  ${afterCents(balance.data.available, balance.data.amount)}
+                </span>
+                , and the money is held until the purchase is final.
+              </p>
+              <div className="grid grid-cols-2 gap-2">
+                <button type="button" onClick={payFromBalance} disabled={busy} className={primaryBtn}>
+                  {busy ? 'Paying…' : `Confirm $${balance.data.amount}`}
+                </button>
+                <button type="button" onClick={() => setConfirming(false)} disabled={busy} className={ghostBtn}>
+                  Cancel
+                </button>
+              </div>
+            </div>
+          ) : (
+            <button type="button" onClick={() => setConfirming(true)} disabled={busy} className={primaryBtn}>
+              Pay with my balance
+            </button>
+          )}
+        </div>
+      )}
 
       {!payment && (
         <button type="button" onClick={start} disabled={busy} className={primaryBtn}>

@@ -1,6 +1,6 @@
 import { Clock3, HandCoins, Landmark, Sparkles, Wallet as WalletIcon } from 'lucide-react'
 import { useApi } from '@/hooks/useApi'
-import { kaluta, type CommissionsPage, type Wallet } from '@/lib/api'
+import { kaluta, type CommissionsPage, type Wallet, type WalletHistoryItem } from '@/lib/api'
 import Payout from './Payout'
 import { KpiCard, Panel, PanelState } from './primitives'
 
@@ -36,6 +36,7 @@ const SOURCE_DONE: Record<string, string> = {
 export default function Earnings() {
   const wallet = useApi<Wallet>(() => kaluta.account.wallet(), [])
   const commissions = useApi<CommissionsPage>(() => kaluta.account.commissions({ limit: 10 }), [])
+  const history = useApi<{ total: number; items: WalletHistoryItem[] }>(() => kaluta.account.walletHistory(20), [])
   // Commission has one rate and one level, so there is nothing to break down
   // by depth any more. What a member actually wants to know is which part of
   // the platform their sponsees are spending in.
@@ -126,7 +127,45 @@ export default function Earnings() {
         </Panel>
       )}
 
-      <Payout onChange={wallet.reload} />
+      {/* Every movement of the balance - earnings, sales, refunds, purchases
+          paid from it, withdrawals - read from the same ledger lines the
+          balance reconciles to. */}
+      {(history.data?.items.length ?? 0) > 0 && (
+        <Panel title="Balance activity" subtitle="What came in, what you paid from your balance, and withdrawals." className="lg:col-span-2">
+          <ul className="divide-y divide-[var(--cloud-border)]">
+            {history.data!.items.map((item) => {
+              const out = Number(item.amount) < 0
+              return (
+                <li key={item.id} className="flex items-center justify-between gap-3 py-2.5">
+                  <span className="min-w-0">
+                    <span className="block truncate text-sm text-text-hi">
+                      {item.type}
+                      {item.status !== 'completed' && <span className="caption"> · {item.status}</span>}
+                    </span>
+                    <span className="caption block truncate">
+                      {new Date(item.date).toLocaleString()}
+                      {item.reference ? ` · ${item.reference}` : ''}
+                    </span>
+                  </span>
+                  <span
+                    className={`mono-data shrink-0 text-sm font-semibold ${out ? 'text-text-mid' : 'text-emerald-300'}`}
+                  >
+                    {out ? '−' : '+'}
+                    {usd(Math.abs(Number(item.amount)))} <span className="caption">{item.currency}</span>
+                  </span>
+                </li>
+              )
+            })}
+          </ul>
+        </Panel>
+      )}
+
+      <Payout
+        onChange={() => {
+          wallet.reload()
+          history.reload()
+        }}
+      />
     </div>
   )
 }

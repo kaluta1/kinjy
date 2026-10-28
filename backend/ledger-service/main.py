@@ -1106,6 +1106,189 @@ def release_payout(payload: HoldIn, db: OrmSession = Depends(get_db)):
     return {"key": hold.key, "status": "released", "released": True, "available": str(wallet.available)}
 
 
+class WalletPayIn(BaseModel):
+    member_id: str
+    amount: Decimal = Field(gt=0)
+    # One per purchase (payment-service derives it from the order), so a
+    # double click, a retry or two tabs debit the balance once.
+    key: str = Field(min_length=8, max_length=110)
+    reference: str = Field(max_length=80)
+    payment_id: str = Field(max_length=40)
+
+
+def _wallet_journal(db: OrmSession, *, kind: str, key: str, payload: WalletPayIn, debit: str, credit: str,
+                    reason: str, description: str) -> models.Journal:
+    """One balanced journal moving ``amount`` between the payer's balance and cash."""
+    amount = economy.money(payload.amount)
+    journal = models.Journal(
+        id=new_id("jrn"), kind=kind, reference=payload.reference, description=description,
+        amount=amount, idempotency_key=key, created_by=payload.member_id,
+    )
+    db.add(journal)
+    db.flush()
+    for account in (debit, credit):
+        mine = account == models.ACC_MEMBER_PAYABLE
+        db.add(models.Entry(
+            id=new_id("led"), journal_id=journal.id, account=account,
+            beneficiary_id=payload.member_id if mine else None, role="payer" if mine else None,
+            debit=amount if account == debit else Decimal("0"),
+            credit=amount if account == credit else Decimal("0"),
+            reason=f"{reason}:{payload.payment_id}"[:80],
+        ))
+    db.flush()
+    posting.assert_balanced(db, journal.id)
+    return journal
+
+
+@app.post("/internal/wallet/pay", tags=["internal"])
+def wallet_pay(payload: WalletPayIn, db: OrmSession = Depends(get_db)):
+    """Pay a purchase from the member's own balance, once.
+
+    No second balance: the balance *is* what Kinjy owes the member
+    (liabilities:member_payable), and paying with it is Kinjy settling that
+    debt by taking the purchase in exchange. So the journal debits the payer's
+    payable and credits cash, as if the money had been paid out and paid
+    straight back in; the purchase's own postings (escrow hold, settlement,
+    commissions) then run exactly as for a card payment.
+
+    Only ``available`` is spendable: pending credits are not confirmed yet, and
+    a withdrawal in flight has already left it (the payout hold). The wallet row
+    is locked, the same lock withdrawals take, so a purchase and a withdrawal -
+    or two purchases - cannot both spend the same money.
+    """
+    amount = economy.money(payload.amount)
+    key = f"wallet-pay:{payload.key}"
+
+    def answer(journal: models.Journal, created: bool) -> dict:
+        mine = db.scalar(select(models.Entry).where(
+            models.Entry.journal_id == journal.id, models.Entry.account == models.ACC_MEMBER_PAYABLE))
+        if mine is None or mine.beneficiary_id != payload.member_id or economy.money(journal.amount) != amount:
+            # The same purchase key for another member or amount is a bug in
+            # the caller; paying it would be a guess.
+            raise HTTPException(status_code=409, detail="That purchase key is already used for something else")
+        wallet = posting.get_wallet(db, payload.member_id)
+        return {"journal_id": journal.id, "amount": str(amount), "created": created,
+                "available": str(economy.money(wallet.available))}
+
+    existing = posting.find_existing(db, key)
+    if existing is not None:
+        return answer(existing, False)
+    wallet = db.scalar(
+        select(models.Wallet)
+        .where(models.Wallet.owner_id == payload.member_id, models.Wallet.currency == "USD")
+        .with_for_update()
+    )
+    # A second request with the same key waited on the lock while the first paid.
+    existing = posting.find_existing(db, key)
+    if existing is not None:
+        db.rollback()
+        return answer(existing, False)
+    if wallet is None or economy.money(wallet.available) < amount:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="insufficient_funds")
+    journal = _wallet_journal(
+        db, kind="wallet_payment", key=key, payload=payload,
+        debit=models.ACC_MEMBER_PAYABLE, credit=models.ACC_CASH, reason="wallet_payment",
+        description=f"Paid from the Kinjy balance: {payload.reference} (payment {payload.payment_id})",
+    )
+    wallet.available = economy.money(wallet.available) - amount
+    db.commit()
+    log.info("wallet payment %s: %s for %s", payload.payment_id, amount, payload.reference)
+    return answer(journal, True)
+
+
+@app.post("/internal/wallet/pay/reverse", tags=["internal"])
+def wallet_pay_reverse(payload: WalletPayIn, db: OrmSession = Depends(get_db)):
+    """Give a wallet payment back, once, when its purchase could not go ahead
+    (the order was paid another way meanwhile, or is no longer payable).
+
+    A compensating journal, never an edit: the payment stays on record, and so
+    does its reversal. Reversing a payment that was never made moves nothing.
+    """
+    paid = posting.find_existing(db, f"wallet-pay:{payload.key}")
+    if paid is None:
+        return {"reversed": False, "reason": "not_paid"}
+    payer = db.scalar(select(models.Entry.beneficiary_id).where(
+        models.Entry.journal_id == paid.id, models.Entry.account == models.ACC_MEMBER_PAYABLE))
+    if payer != payload.member_id:
+        raise HTTPException(status_code=409, detail="That purchase key belongs to another member")
+    key = f"wallet-pay-reversal:{payload.key}"
+    if posting.find_existing(db, key) is not None:
+        return {"reversed": False, "reason": "already_reversed"}
+    wallet = _locked_wallet(db, payload.member_id)
+    if posting.find_existing(db, key) is not None:
+        db.rollback()
+        return {"reversed": False, "reason": "already_reversed"}
+    payload = payload.model_copy(update={"amount": paid.amount})
+    journal = _wallet_journal(
+        db, kind="wallet_payment_reversal", key=key, payload=payload,
+        debit=models.ACC_CASH, credit=models.ACC_MEMBER_PAYABLE, reason="wallet_payment_reversal",
+        description=f"Wallet payment {payload.payment_id} returned: the purchase did not go ahead",
+    )
+    journal.reverses_journal_id = paid.id
+    wallet.available = economy.money(wallet.available) + economy.money(paid.amount)
+    db.commit()
+    return {"reversed": True, "journal_id": journal.id, "available": str(economy.money(wallet.available))}
+
+
+# What each kind of journal is, in a member's history.
+_HISTORY_TYPES = {
+    "wallet_payment": "Purchase paid from balance",
+    "wallet_payment_reversal": "Purchase payment returned",
+    "escrow_refund_balance": "Order refund",
+    "refund": "Refund",
+    "marketplace_order": "Sale or commission",
+    "commission_correction": "Commission correction",
+    "reversal": "Correction",
+}
+
+
+@app.get("/wallet/history", tags=["wallet"])
+def wallet_history(principal: CurrentUser, limit: int = 30, offset: int = 0, db: OrmSession = Depends(get_db)):
+    """Every movement of this member's balance, newest first: what came in
+    (commissions, sales, refunds), what purchases took, and withdrawals.
+
+    Read from the ledger lines naming the member on the accounts that hold a
+    balance, plus the withdrawal holds - the same two sources the
+    reconciliation uses, so the history adds up to the balance.
+    """
+    lines = db.execute(
+        select(models.Entry, models.Journal)
+        .join(models.Journal, models.Journal.id == models.Entry.journal_id)
+        .where(
+            models.Entry.beneficiary_id == principal.user_id,
+            models.Entry.account.in_(posting.PAYABLE_ACCOUNTS),
+        )
+    ).all()
+    items = []
+    for entry, journal in lines:
+        amount = economy.money(entry.credit - entry.debit)
+        if not amount:
+            continue
+        pending = journal.kind == "marketplace_order" and journal.funds_released_at is None and amount > 0
+        items.append({
+            "id": entry.id,
+            "date": entry.created_at,
+            "amount": str(amount),
+            "currency": entry.currency,
+            "type": _HISTORY_TYPES.get(journal.kind, journal.kind.replace("_", " ").capitalize()),
+            "kind": journal.kind,
+            "status": "pending" if pending else "completed",
+            "reference": journal.reference,
+            "journal_id": journal.id,
+        })
+    for hold in db.scalars(select(models.PayoutHold).where(models.PayoutHold.member_id == principal.user_id)).all():
+        items.append({
+            "id": f"hold:{hold.key}", "date": hold.created_at, "amount": str(-economy.money(hold.amount)),
+            "currency": hold.currency, "type": "Withdrawal", "kind": "withdrawal",
+            "status": "returned" if hold.status == "released" else "completed",
+            "reference": hold.key, "journal_id": None,
+        })
+    items.sort(key=lambda i: i["date"], reverse=True)
+    limit = max(1, min(limit, 100))
+    return {"total": len(items), "items": items[offset:offset + limit]}
+
+
 @app.get("/internal/payout-candidates", tags=["internal"])
 def payout_candidates(db: OrmSession = Depends(get_db)):
     """Members at or above the $1 threshold. payment-service applies the KYC and

@@ -1,0 +1,13 @@
+# Local only: paying orders from the Kinjy balance switched on, for
+# e2e_wallet_pay.py, with quick settlement retries.
+#   docker compose -f docker-compose.yml -f backend/tests/compose.wallet-test.yml up -d --no-deps commerce-service payment-service
+# Without this file the services are back to the .env values. Never on a server.
+services:
+  commerce-service:
+    environment:
+      SETTLEMENT_POLL_S: "2"
+      SETTLEMENT_RETRY_BASE_S: "2"
+      SETTLEMENT_MAX_ATTEMPTS: "4"
+  payment-service:
+    environment:
+      WALLET_PAY_ENABLED: "1"
