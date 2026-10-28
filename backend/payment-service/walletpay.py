@@ -46,6 +46,7 @@ from common.database import SessionLocal, get_db
 from common.ids import new_id
 
 import models
+import payouts
 
 log = logging.getLogger("payment-service.walletpay")
 router = APIRouter()
@@ -96,6 +97,16 @@ def _payable_order(order_id: str, user_id: str) -> dict:
     if quote["status"] != "pending":
         raise HTTPException(status_code=409, detail="This order is already paid or no longer payable")
     return quote
+
+
+def _verified(user_id: str) -> bool:
+    """Whether this member's identity check is valid now (verified, not expired).
+
+    Paying from the balance requires it (decided 28/10): the balance is money
+    Kinjy owes, and spending it moves it to somebody else as surely as a
+    withdrawal does. Asked of auth-service each time; 503 if it cannot answer.
+    """
+    return bool(payouts._identity(user_id).get("kyc_active"))
 
 
 def _ledger_body(intent: models.PaymentIntent) -> dict:
@@ -188,6 +199,8 @@ def wallet_quote(order_id: str, principal: CurrentUser):
     price = economy.money(quote["customer_price"])
     return {
         "enabled": True,
+        # False: the option is shown with the way to verify, not the button.
+        "verified": _verified(principal.user_id),
         "order_id": order_id,
         "amount": str(price),
         "currency": quote.get("currency") or "USD",
@@ -220,6 +233,11 @@ def wallet_pay(payload: WalletPayIn, principal: CurrentUser, db: OrmSession = De
         raise HTTPException(status_code=404, detail="Order not found")
     if intent is not None and intent.status == "finished":
         return _out(intent)  # paid already: the same answer, nothing taken twice
+    if intent is None or intent.status != "processing":
+        # A payment already debited is finished whatever happens to the
+        # verification meanwhile; a new one needs it valid now.
+        if not _verified(principal.user_id):
+            raise HTTPException(status_code=403, detail="kyc_required")
     if intent is None or intent.status in ("failed", "returned"):
         quote = _payable_order(payload.order_id, principal.user_id)
         price = economy.money(quote["customer_price"])

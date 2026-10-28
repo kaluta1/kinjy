@@ -2301,7 +2301,16 @@ export interface OrderPayment {
 /** Paying an order from the Kinjy balance: what it would take (server's figures). */
 export type WalletPayQuote =
   | { enabled: false }
-  | { enabled: true; order_id: string; amount: string; currency: string; available: string; enough: boolean }
+  | {
+      enabled: true
+      /** Paying from the balance needs a valid identity verification. */
+      verified: boolean
+      order_id: string
+      amount: string
+      currency: string
+      available: string
+      enough: boolean
+    }
 
 export interface WalletPayment {
   payment_id: string

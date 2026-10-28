@@ -15,7 +15,7 @@ import subprocess
 import sys
 import threading
 import time
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal
 
 import httpx
@@ -65,6 +65,12 @@ def compose(*files):
             except httpx.HTTPError:
                 pass
             time.sleep(1)
+
+
+def verify(user, days=300):
+    """Identity verified until today + days (negative: already expired)."""
+    psql(f"update auth.users set kyc_verified=true, kyc_verified_until='{date.today() + timedelta(days=days)}' "
+         f"where id='{user['id']}'")
 
 
 def available(user):
@@ -133,12 +139,26 @@ else:
     print("  (WALLET_PAY_ENABLED is already on locally: skipped)")
 compose("backend/tests/compose.wallet-test.yml")
 try:
-    print("== paying ==")
+    print("== identity verification required ==")
     fund(buyer, price + Decimal("5.00"))
+    q = c.get(f"/payments/wallet/quote?order_id={o['id']}", headers=buyer["h"]).json()
+    check("unverified: the quote says so", q.get("verified") is False, q)
+    have = available(buyer)
+    r = pay(buyer, o["id"])
+    check("unverified: refused, nothing taken", r.status_code == 403 and r.json()["detail"] == "kyc_required"
+          and available(buyer) == have, r.text)
+    verify(buyer, -1)
+    r = pay(buyer, o["id"])
+    check("verification expired: refused too", r.status_code == 403 and available(buyer) == have, r.text)
+    check("and the order still waits for payment", order(buyer, o["id"])["status"] == "pending")
+    verify(buyer)
+    verify(other)
+
+    print("== paying ==")
     before = available(buyer)
     q = c.get(f"/payments/wallet/quote?order_id={o['id']}", headers=buyer["h"]).json()
-    check("the quote is the server's: order total, balance, enough",
-          q["enabled"] and Decimal(q["amount"]) == price and Decimal(q["available"]) == before and q["enough"], q)
+    check("the quote is the server's: verified, order total, balance, enough",
+          q["enabled"] and q["verified"] and Decimal(q["amount"]) == price and Decimal(q["available"]) == before and q["enough"], q)
     r = pay(buyer, o["id"])
     body = r.json()
     check("paid", r.status_code == 200 and body["status"] == "paid" and body["payment_id"].startswith("pmt_"), r.text)
@@ -188,6 +208,7 @@ try:
 
     print("== concurrent purchases ==")
     rich = register("Demo Rich")
+    verify(rich)
     fund(rich, price + Decimal("1.00"))  # enough for one, not two
     a1, a2 = buy(rich, pid), buy(rich, pid)
     res = []
@@ -200,6 +221,7 @@ try:
 
     print("== a purchase against a withdrawal ==")
     racer = register("Demo Racer")
+    verify(racer)
     fund(racer, price)
     b1 = buy(racer, pid)
     res = {}

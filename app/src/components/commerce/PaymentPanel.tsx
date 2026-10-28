@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { Link } from 'react-router'
 import { CheckCircle2, Copy, ExternalLink, FlaskConical, ShieldCheck, Wallet } from 'lucide-react'
 import { ghostBtn, primaryBtn } from '@/components/commerce/ActionSheet'
 import { useApi } from '@/hooks/useApi'
@@ -56,7 +57,9 @@ export default function PaymentPanel({
       setError(
         err instanceof ApiError && err.message === 'insufficient_funds'
           ? 'Your available balance is lower than this order. Nothing was taken; you can pay another way.'
-          : err instanceof ApiError
+          : err instanceof ApiError && err.message === 'kyc_required'
+            ? 'Paying from your balance needs a valid identity verification. Nothing was taken; you can pay another way.'
+            : err instanceof ApiError
             ? err.message
             : 'The payment from your balance did not go through. Nothing was taken.',
       )
@@ -144,7 +147,15 @@ export default function PaymentPanel({
               <span className="mono-data text-text-hi">${balance.data.available}</span>
             </span>
           </p>
-          {!balance.data.enough ? (
+          {!balance.data.verified ? (
+            <p className="caption">
+              Paying from your balance needs a valid identity verification.{' '}
+              <Link to="/dashboard?tab=verification" className="font-semibold text-gold-soft hover:underline">
+                Verify my identity
+              </Link>{' '}
+              or pay another way below.
+            </p>
+          ) : !balance.data.enough ? (
             <p className="caption">It is lower than this order, so pay it another way below.</p>
           ) : confirming ? (
             <div className="space-y-2">

@@ -1790,9 +1790,9 @@ Not done / to decide:
 - **Switched off in production** until you say so.
 - **Only marketplace orders**: KYC fee, community tickets/memberships,
   referral pool units and ad credit still pay through the provider.
-- **No verification requirement to spend**: spending uses the same
-  "available" figure withdrawals use, but withdrawals also require KYC and
-  spending does not. Not invented; to decide.
+- **Identity verification required to spend** (decided 28/10): valid and
+  not expired (auth's kyc_active, the commission rule), stricter than
+  withdrawals, which read the verified flag alone.
 - **No split payment** (part balance, part card) and **no partial refunds**
   (the marketplace refunds whole orders only).
 - **Admin**: API only (/admin/payments/wallet, /admin/journals?kind=

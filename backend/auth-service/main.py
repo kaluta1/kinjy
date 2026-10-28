@@ -2192,6 +2192,8 @@ def internal_identity(user_id: str, db: OrmSession = Depends(get_db)):
         "country": user.country,
         "lang": user.lang,
         "kyc_verified": user.kyc_verified,
+        # Verified and not past its end date: what paying from the balance requires.
+        "kyc_active": _kyc_active(user),
         "date_of_birth": profile.date_of_birth.isoformat() if profile else None,
     }
 
