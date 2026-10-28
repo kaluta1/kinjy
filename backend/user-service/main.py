@@ -10,7 +10,7 @@ from fastapi import Depends, HTTPException
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import and_, case, delete, func, or_, select
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.orm import Session as OrmSession
+from sqlalchemy.orm import Session as OrmSession, aliased
 
 from common import ageclient, notify
 from common.agesafety import engine
@@ -513,15 +513,66 @@ def people_suggestions(principal: CurrentUser, limit: int = 5, db: OrmSession = 
             # is what the invite endpoint already does with such a pair.
             standing[other] = "invites_you"
 
-    # Over-fetched because minors are trimmed out below for adult viewers, and a
-    # page that comes back three-quarters empty is worse than one extra query.
-    rows = db.scalars(
-        select(models.Profile)
-        .where(models.Profile.user_id.not_in(excluded) if excluded else True)
-        .order_by(models.Profile.followers_count.desc(), models.Profile.created_at.desc())
-        .limit(agediscovery.widened(min(limit, 20), 60))
-    ).all()
-    rows = agediscovery.filter_profiles(principal.user_id, list(rows), min(limit, 20))
+    # Counted from the follow rows themselves, not profiles.followers_count.
+    # That column is only moved by the follow and unfollow buttons; a block
+    # deletes follows in both directions and an erased member's follows are
+    # deleted with them, neither touching it, so it drifted upwards and the
+    # rail put members with fewer real followers above members with more. A
+    # follow counts while its follower still has a profile.
+    # Turning `discoverable` off keeps a member out of this rail, as the privacy
+    # screen promises - the same rule as /users/search: hidden from strangers,
+    # not from the people they already know. Known means connected either way
+    # or following either way; those this viewer follows are excluded above,
+    # so what is left to add is those who follow the viewer.
+    known = {other for other, s in standing.items() if s == "connected"} | set(
+        db.scalars(select(models.Follow.follower_id).where(models.Follow.followee_id == principal.user_id)).all()
+    )
+
+    follower = aliased(models.Profile)
+    counts = (
+        select(models.Follow.followee_id.label("user_id"), func.count().label("total"))
+        .join(follower, follower.user_id == models.Follow.follower_id)
+        .group_by(models.Follow.followee_id)
+        .subquery()
+    )
+    total = func.coalesce(counts.c.total, 0)
+    query = (
+        select(models.Profile, total)
+        .outerjoin(counts, counts.c.user_id == models.Profile.user_id)
+        # Outer join: a member whose preferences row was never materialised is
+        # still discoverable by default.
+        .outerjoin(models.Preferences, models.Preferences.user_id == models.Profile.user_id)
+        .where(
+            models.Profile.user_id.not_in(excluded) if excluded else True,
+            or_(
+                models.Preferences.discoverable.is_(True),
+                models.Preferences.user_id.is_(None),
+                models.Profile.user_id.in_(known or {""}),
+            ),
+            # Only members who uploaded a photo. An avatar is set solely from a
+            # media asset they own (PATCH /users/me), so both the asset and its
+            # URL are there; a blank one is the initials placeholder.
+            models.Profile.avatar_asset_id.is_not(None),
+            func.coalesce(func.trim(models.Profile.avatar_url), "") != "",
+        )
+        # user_id last, so equal totals always come back in the same order.
+        .order_by(total.desc(), models.Profile.created_at.desc(), models.Profile.user_id)
+    )
+
+    # Minors are trimmed out for adult viewers after the query, so the next
+    # batch is read whenever trimming left the page short: the rail shows the
+    # most-followed members this viewer may see, not the survivors of the
+    # first sixty. Bounded, because each candidate costs an age lookup.
+    wanted = min(limit, 20)
+    batch = agediscovery.widened(wanted, 60)
+    rows: list = []
+    followers: dict[str, int] = {}
+    for page in range(5):
+        found = db.execute(query.offset(page * batch).limit(batch)).all()
+        followers.update({p.user_id: n for p, n in found})
+        rows += agediscovery.filter_profiles(principal.user_id, [p for p, _ in found], wanted - len(rows))
+        if len(rows) >= wanted or len(found) < batch:
+            break
 
     return {
         "reason": "most_followed",
@@ -534,7 +585,7 @@ def people_suggestions(principal: CurrentUser, limit: int = 5, db: OrmSession = 
                 "avatar_url": r.avatar_url,
                 "city": r.city,
                 "country": r.country,
-                "followers_count": r.followers_count,
+                "followers_count": followers[r.user_id],
                 "verified": r.verified,
                 # none | invited | invites_you | connected
                 "connection": standing.get(r.user_id, "none"),

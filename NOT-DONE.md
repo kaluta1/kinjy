@@ -1762,3 +1762,40 @@ Not done / to decide:
 - **Pending (escrowed) marketplace commissions, withdrawn money, paid Leaders
   months**: never corrected automatically; listed for review.
 - **Repair on production** has not been run (dry run first, with approval).
+
+## People to follow: real follower counts, photos only, discoverable (28/10)
+
+Found: the rail sorted on profiles.followers_count, a counter moved only by
+the follow/unfollow buttons; blocks and erased members delete follows without
+touching it, so it drifted. The rail now counts follow rows (a follower must
+still have a profile), shows only members with an uploaded photo, and honours
+"discoverable" as the privacy screen promised.
+
+Not done:
+- **The profile page still shows the stored counter**, so some profiles show
+  too many followers. Recounting it (or reading the real count there) is a
+  separate change.
+- **Photos set before 28/09** (client-supplied URLs, no media asset) do not
+  qualify; locally there are none, production not checked.
+
+## Paying an order from the Kinjy balance (28/10)
+
+A marketplace order can be paid in full from the member's *available*
+balance (walletpay.py, ledger /internal/wallet/pay). No second balance: the
+journal debits the member's payable and credits cash; escrow, settlement and
+refunds then run as for any payment, rail "wallet", allocated against
+Kinjy's balance. Off until WALLET_PAY_ENABLED=1.
+
+Not done / to decide:
+- **Switched off in production** until you say so.
+- **Only marketplace orders**: KYC fee, community tickets/memberships,
+  referral pool units and ad credit still pay through the provider.
+- **No verification requirement to spend**: spending uses the same
+  "available" figure withdrawals use, but withdrawals also require KYC and
+  spending does not. Not invented; to decide.
+- **No split payment** (part balance, part card) and **no partial refunds**
+  (the marketplace refunds whole orders only).
+- **Admin**: API only (/admin/payments/wallet, /admin/journals?kind=
+  wallet_payment, /admin/reconcile); no new admin screen.
+- **Ledger presentation**: a balance-paid order that is refunded leaves
+  custodial_cash +X / cash -X (balanced, total unchanged).
