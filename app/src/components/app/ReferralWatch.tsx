@@ -1,5 +1,6 @@
 import { useEffect } from 'react'
 import { useLocation, useNavigate } from 'react-router'
+import { useAuth } from '@/hooks/useAuth'
 import { ApiError, kaluta } from '@/lib/api'
 import { pendingLink, pendingRef, refFromSearch, rememberInviter, rememberLink, rememberRef } from '@/lib/share'
 
@@ -46,6 +47,7 @@ import { pendingLink, pendingRef, refFromSearch, rememberInviter, rememberLink, 
 export default function ReferralWatch() {
   const { search, pathname, hash } = useLocation()
   const navigate = useNavigate()
+  const { user, loading } = useAuth()
 
   // A short link (kinjy.com/s/<token>) lands here with ?via=<token>: the
   // invitation of whoever shared it, held as the token - the server turns it
@@ -59,17 +61,26 @@ export default function ReferralWatch() {
     params.delete('via')
     const rest = params.toString()
     const clean = `${pathname}${rest ? `?${rest}` : ''}${hash}`
-    if (token === pendingLink()) {
+    // Wait for the session: whether to hold the invitation depends on it.
+    if (loading) return
+    if (token === pendingLink() || user) {
+      // A member's sponsor was settled when they joined: a link they follow
+      // (their own included) holds nothing for this browser, which would
+      // otherwise carry it into the next account created on it.
       navigate(clean, { replace: true })
       return
     }
+    // Only the last step - tidying the address bar - is dropped when the
+    // visitor has moved on. Holding the invitation is not: a deal or
+    // community page sends a signed-out visitor straight to sign-in, and that
+    // redirect used to land before the answer, which then credited nobody.
     let cancelled = false
     kaluta.auth
       .resolveShareLink(token)
       .then((link) => {
         // Only an invitation link is an invitation; a neutral one leaves
         // whatever is already held exactly as it was.
-        if (cancelled || !link.invitation) return
+        if (!link.invitation) return
         rememberLink(link.token, link.destination, link.inviter?.display_name ?? null)
         // And held by the server for the attribution window, so the sign-up
         // form cannot drop it. Best-effort: the browser copy still works.
@@ -79,7 +90,7 @@ export default function ReferralWatch() {
         // 404 is an answer: not one of ours. Anything else (offline, a 5xx)
         // is not, and the token is kept unverified, as a code would be - the
         // server checks it again at sign-up and drops it if it is not real.
-        if (cancelled || (err instanceof ApiError && err.status === 404)) return
+        if (err instanceof ApiError && err.status === 404) return
         if (!pendingRef() && !pendingLink()) rememberLink(token, pathname, null)
       })
       .finally(() => {
@@ -88,7 +99,7 @@ export default function ReferralWatch() {
     return () => {
       cancelled = true
     }
-  }, [search, pathname, hash, navigate])
+  }, [search, pathname, hash, navigate, user, loading])
 
   useEffect(() => {
     const candidate = refFromSearch(search)

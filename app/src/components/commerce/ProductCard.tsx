@@ -3,6 +3,7 @@ import { MapPin, ShoppingBag, Star, Store } from 'lucide-react'
 import { ProductImage } from '@/components/commerce/ProductGallery'
 import type { Product } from '@/lib/api'
 import { htmlToText } from '@/lib/richtext'
+import ShareDeal from './ShareDeal'
 import { cn } from '@/lib/utils'
 
 const KIND_LABEL: Record<string, string> = { product: 'Product', service: 'Service', digital: 'Digital' }
@@ -120,6 +121,7 @@ export default function ProductCard({
             Order - held in escrow
           </button>
         )}
+        <ShareDeal productId={product.id} title={product.title} compact />
       </div>
     </article>
   )

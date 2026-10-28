@@ -1799,3 +1799,28 @@ Not done / to decide:
   wallet_payment, /admin/reconcile); no new admin screen.
 - **Ledger presentation**: a balance-paid order that is refunded leaves
   custodial_cash +X / cash -X (balanced, total unchanged).
+
+## Personal links to marketplace deals (28/10)
+
+"Share deal" on every deal card and deal page makes the member's short link
+(kinjy.com/s/<token>) to /market/products/<id> with their invitation on: the
+existing short-link and invitation systems, unchanged. Added: the deal is
+checked active on the server before a link is made, a chat-app preview of the
+deal (title, words of its description, picture; never the sharer), and two
+fixes on the way in - the invitation is now held even when the deal page sends
+a signed-out visitor to sign-in before the link was resolved (that redirect
+cancelled the hold), and such a visitor lands on "Create your account".
+
+Not done / to decide:
+- **Signed-out visitors do not see the deal before joining**: deal pages are
+  inside the app, which asks to sign in or sign up first; they land on the
+  deal right after. Making deal pages public is a separate decision.
+- **No commission for the sharer on existing members' purchases**, as the
+  rules stand: the marketplace commission (20% of Kinjy's margin) goes to the
+  buyer's registered sponsor, once verified. A deal link changes nothing there.
+- **A sharer creating a second account through their own link** is not
+  detected beyond the existing fraud checks.
+- **Desktop**: the link is copied (the desktop share sheet covers the page,
+  see lib/share); phones and tablets get the native share sheet.
+- **Members without an invitation code** (none known) get the server's
+  message instead of a link.

@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { Link, useParams } from 'react-router'
 import { ArrowLeft, BookOpen, MapPin, PackageX, ShoppingBag } from 'lucide-react'
 import AppShell from '@/components/app/AppShell'
+import ShareDeal from '@/components/commerce/ShareDeal'
 import CheckoutSheet from '@/components/commerce/CheckoutSheet'
 import ProductGallery from '@/components/commerce/ProductGallery'
 import ProtectionSummary from '@/components/commerce/ProtectionSummary'
@@ -227,6 +228,10 @@ export default function MarketProduct() {
           </div>
         </div>
       </div>
+
+      {/* The member's personal link to this deal; not offered for one that
+          cannot be bought right now (the server refuses those too). */}
+      {!unavailable && <ShareDeal productId={item.id} title={item.title} />}
 
       <div className="mt-6">
         <ProductReviews productId={item.id} />

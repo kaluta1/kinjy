@@ -12,6 +12,7 @@ import UnreadBadge from './UnreadBadge'
 import { useUnreadMessages } from '@/hooks/useUnreadMessages'
 import MessageToast from './MessageToast'
 import WellbeingBar from './WellbeingBar'
+import { pendingLink } from '@/lib/share'
 
 /** Mobile bottom bar — the blueprint's five, Create in the middle. */
 const MOBILE_NAV = [
@@ -96,8 +97,17 @@ export default function AppShell({
     // Carry the destination so a link somebody was sent opens after they sign
     // in, rather than dropping them on their dashboard wondering what they
     // clicked.
-    const next = encodeURIComponent(location.pathname + location.search)
-    return <Navigate to={`/join?mode=signin&next=${next}`} replace />
+    // Arriving on somebody's invitation link is almost always a new visitor:
+    // the form opens on "Create your account", with the link's own token left
+    // off the way back. The token is either still on the address (?via=) or
+    // already held by ReferralWatch, which tidies the address while the
+    // page's code is loading.
+    const params = new URLSearchParams(location.search)
+    const invited = params.has('via') || Boolean(pendingLink())
+    params.delete('via')
+    const rest = params.toString()
+    const next = encodeURIComponent(location.pathname + (rest ? `?${rest}` : ''))
+    return <Navigate to={`/join?mode=${invited ? 'signup' : 'signin'}&next=${next}`} replace />
   }
 
   // `noise-overlay` is the project's dithering: a very dark gradient across a

@@ -593,6 +593,26 @@ def _live_link(db: OrmSession, token: str) -> tuple[models.ShareLink, str] | Non
     return link, destination
 
 
+_DEAL_PATH = re.compile(r"^/market/products/([A-Za-z0-9_-]{3,80})$")
+
+
+def _deal(destination: str) -> dict | None:
+    """The marketplace deal a destination names, in its public shape, if it is
+    active; None when it is not a deal page or the deal is paused or gone.
+
+    Asked of commerce-service, which only ever returns active listings here.
+    Raises httpx.HTTPError when commerce-service does not answer.
+    """
+    match = _DEAL_PATH.match(destination.split("#", 1)[0].split("?", 1)[0])
+    if match is None:
+        return None
+    response = httpx.post("http://commerce-service:8000/internal/products/batch",
+                          json={"ids": [match.group(1)]}, timeout=6)
+    response.raise_for_status()
+    items = response.json().get("items") or []
+    return items[0] if items else None
+
+
 def _link_sharer(db: OrmSession, link: models.ShareLink) -> models.User | None:
     """Whose invitation a link carries: nobody for a neutral one, or once they have left."""
     if not link.with_invitation:
@@ -627,6 +647,14 @@ def create_share_link(payload: ShareLinkIn, principal: CurrentUser, db: OrmSessi
         destination, kind = sharelinks.normalize(raw)
     except sharelinks.BadDestination as exc:
         raise HTTPException(status_code=400, detail=str(exc))
+    if _DEAL_PATH.match(destination.split("?", 1)[0]):
+        # A deal link is made for a deal that can be bought now: a paused,
+        # removed or unknown listing gets an answer instead of a dead link.
+        try:
+            if _deal(destination) is None:
+                raise HTTPException(status_code=404, detail="This deal is not available to share")
+        except httpx.HTTPError:
+            raise HTTPException(status_code=503, detail="The marketplace did not answer. Try again.")
     with_invitation = payload.include_invitation
     if with_invitation and not user.referral_code:
         raise HTTPException(status_code=400, detail="Your account has no invitation to attach")
@@ -823,6 +851,22 @@ def _preview_for(link: models.ShareLink, destination: str) -> tuple[str, str, st
                     image = picture
             else:
                 title, description = "A community on Kinjy", "You have been invited to a community on Kinjy."
+        elif _DEAL_PATH.match(path):
+            # The deal's public card: title, a line of description, its first
+            # picture. Nothing about who shared it.
+            deal = _deal(path)
+            if deal:
+                title = f"{deal.get('title')} on Kinjy"
+                # An ebook's description is rich text: the preview takes its words only.
+                text = html_lib.unescape(re.sub(r"<[^>]+>", " ", deal.get("description") or ""))
+                description = " ".join(text.split())[:200] or "A deal on the Kinjy marketplace."
+                picture = (deal.get("images") or [None])[0]
+                if picture and picture.startswith("/"):
+                    picture = f"{site}{picture}"
+                if picture and picture.startswith("http"):
+                    image = picture
+            else:
+                title, description = "A deal on Kinjy", "This deal is no longer available on the Kinjy marketplace."
         elif link.kind == "chat":
             title = "Join a conversation on Kinjy"
             description = "You have been invited to a group conversation on Kinjy."
