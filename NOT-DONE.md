@@ -1824,3 +1824,25 @@ Not done / to decide:
   see lib/share); phones and tablets get the native share sheet.
 - **Members without an invitation code** (none known) get the server's
   message instead of a link.
+
+## Online events: host, presenters, joining (29/10)
+
+Found: the event card offered "Get a ticket" to every member not registered -
+the host included - and the server sold them one; the only way in was a small
+"Join link" with no sign of the time; presenters were a line of free text.
+Fixed: the host and the presenters they name (event_presenters, by @handle,
+community members only, host or moderators) take part without a ticket and
+get the joining link; tickets are refused to them; "Open the room and start" /
+"Join the event" with "Live now" from the start time (a 30 s clock, instants
+compared, so no time-zone shift).
+
+Not done / needs a decision:
+- **Kinjy has no video room of its own.** "Open the room" opens the meeting
+  link the host set (Zoom, Meet, ...). Live audio/video inside Kinjy, with
+  microphone/camera controls, and recording need a media server: LiveKit
+  self-hosted on the VPS (free, open source; needs ports and TURN) or a paid
+  provider (Daily, 100ms, LiveKit Cloud), plus storage for recordings. Your
+  choice; nothing simulated was built.
+- **recording_url** exists but nothing sets it; recordings stay with the
+  meeting tool the host uses.
+- **Presenters are told in-app** (notification), not by e-mail.

@@ -557,6 +557,20 @@ class EventRegistration(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
 
+class EventPresenter(Base):
+    """A member the host named to present at one event: they join it without a
+    ticket. Nothing else - not the event's editing, its money or its community."""
+
+    __tablename__ = "event_presenters"
+    __table_args__ = (UniqueConstraint("event_id", "user_id", name="uq_event_presenter"), {"schema": SCHEMA})
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    event_id: Mapped[str] = mapped_column(String(40), index=True)
+    user_id: Mapped[str] = mapped_column(String(40), index=True)
+    added_by: Mapped[str] = mapped_column(String(40))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
 class CommunityListing(Base):
     """A member's marketplace product shown in a community's marketplace space."""
 

@@ -1109,6 +1109,13 @@ export interface CommunityQuote {
   credited?: { payment_id: string }
 }
 
+export interface EventPresenter {
+  user_id: string
+  handle: string | null
+  display_name: string | null
+  added_at: string
+}
+
 export interface CommunityEvent {
   id: string
   community_id: string
@@ -1134,6 +1141,8 @@ export interface CommunityEvent {
   /** What a member pays for a ticket (owner's price + Kinjy's fee). */
   ticket_price: string | null
   my_status: 'registered' | 'waitlisted' | 'cancelled' | null
+  /** The viewer runs it: the host, or a presenter the host named. No ticket for them. */
+  my_role?: 'host' | 'presenter' | null
   /** The community it happens in, for its page and its link. */
   community?: { id: string; slug: string; name: string } | null
   /** The host, or the community's owner and moderators. */
@@ -3632,6 +3641,12 @@ export const kaluta = {
     register: (eventId: string) => api.post<CommunityEvent>(`/events/${eventId}/register`, {}),
     unregister: (eventId: string) => api.post<CommunityEvent>(`/events/${eventId}/unregister`, {}),
     cancelEvent: (eventId: string) => api.post<{ cancelled: boolean; told: number }>(`/events/${eventId}/cancel`, {}),
+    /** The members presenting at an event (host and moderators only). */
+    presenters: (eventId: string) => api.get<{ items: EventPresenter[] }>(`/events/${eventId}/presenters`),
+    addPresenter: (eventId: string, handle: string) =>
+      api.post<{ items: EventPresenter[] }>(`/events/${eventId}/presenters`, { handle }),
+    removePresenter: (eventId: string, userId: string) =>
+      api.delete<{ items: EventPresenter[] }>(`/events/${eventId}/presenters/${userId}`),
     attendees: (eventId: string) =>
       api.get<{ items: Array<{ user_id: string; status: string; paid: boolean; created_at: string }> }>(`/events/${eventId}/attendees`),
     listings: (id: string) =>

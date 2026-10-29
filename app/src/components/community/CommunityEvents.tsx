@@ -1,8 +1,8 @@
-import { useState, type FormEvent } from 'react'
+import { useEffect, useState, type FormEvent } from 'react'
 import { Link } from 'react-router'
-import { CalendarDays, Check, Link2, MapPin, Pencil, Users, Video } from 'lucide-react'
+import { CalendarDays, Check, Link2, MapPin, Mic, Pencil, Users, Video, X } from 'lucide-react'
 import { useApi } from '@/hooks/useApi'
-import { ApiError, kaluta, type CommunityEvent, type CommunityQuote, type EventInput } from '@/lib/api'
+import { ApiError, kaluta, type CommunityEvent, type CommunityQuote, type EventInput, type EventPresenter } from '@/lib/api'
 import { copyLink, siteOrigin } from '@/lib/share'
 import { cn } from '@/lib/utils'
 import QuotePayment from './QuotePayment'
@@ -46,6 +46,112 @@ function CopyEventLink({ id }: { id: string }) {
   )
 }
 
+/** The clock, ticking once every 30 s: what turns "Starts at 18:00" into "Live now" without a reload. */
+function useNow(): number {
+  const [now, setNow] = useState(() => Date.now())
+  useEffect(() => {
+    const timer = window.setInterval(() => setNow(Date.now()), 30_000)
+    return () => window.clearInterval(timer)
+  }, [])
+  return now
+}
+
+/**
+ * The way into an online event, for everybody who may join it: the host, the
+ * presenters and the registered attendees (the server only sends the joining
+ * link to them). The link opens the meeting room the host set up - Kinjy has
+ * no video room of its own. Times are compared as instants, so the reader's
+ * time zone cannot shift when it says "now".
+ */
+function JoinRoom({ e }: { e: CommunityEvent }) {
+  const now = useNow()
+  if (e.status !== 'scheduled' || e.mode === 'in_person') return null
+  const start = new Date(e.starts_at).getTime()
+  const end = e.ends_at ? new Date(e.ends_at).getTime() : start + 6 * 3600_000
+  const runs = e.my_role === 'host' || e.my_role === 'presenter'
+  if (!e.online_url) {
+    return runs ? (
+      <p className="mt-2 text-sm text-amber-300">
+        {e.my_role === 'host'
+          ? 'Add the joining link (Edit event) so you and your attendees can enter the room.'
+          : 'The host has not added the joining link yet.'}
+      </p>
+    ) : null
+  }
+  const live = now >= start && now < end
+  const over = now >= end
+  const label = e.my_role === 'host' ? 'Open the room and start' : runs ? 'Open the room' : 'Join the event'
+  return (
+    <div className="mt-3 flex flex-wrap items-center gap-2">
+      <a
+        href={e.online_url}
+        target="_blank"
+        rel="noopener noreferrer"
+        className={cn(
+          'inline-flex min-h-[40px] items-center gap-1.5 rounded-full px-4 text-sm font-bold',
+          live ? 'bg-gradient-to-br from-gold-soft to-gold text-ink' : 'border border-gold/50 text-gold-soft hover:bg-gold/10',
+        )}
+      >
+        <Video size={14} aria-hidden="true" />
+        {label}
+      </a>
+      <span role="status" className={cn('text-xs', live ? 'font-semibold text-emerald-300' : 'text-text-low')}>
+        {live ? 'Live now' : over ? 'This event has ended' : `Starts ${new Date(start).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' })}`}
+      </span>
+    </div>
+  )
+}
+
+/** The host's (and moderators') list of presenters: added by their @handle, removed with a tap. */
+function Presenters({ eventId }: { eventId: string }) {
+  const list = useApi<{ items: EventPresenter[] }>(() => kaluta.communityPaid.presenters(eventId), [eventId])
+  const [handle, setHandle] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const run = async (fn: () => Promise<unknown>) => {
+    setBusy(true)
+    setError(null)
+    try {
+      await fn()
+      list.reload()
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'That did not go through')
+    } finally {
+      setBusy(false)
+    }
+  }
+  return (
+    <div className="mt-3 rounded-xl border border-[var(--cloud-border)] p-3">
+      <p className="flex items-center gap-1.5 text-sm font-semibold text-text-hi">
+        <Mic size={13} aria-hidden="true" /> Presenters
+      </p>
+      <p className="caption mt-0.5">They join this event without a ticket. They cannot edit it or see its money.</p>
+      {(list.data?.items.length ?? 0) > 0 && (
+        <ul className="mt-2 space-y-1">
+          {list.data!.items.map((p) => (
+            <li key={p.user_id} className="flex items-center justify-between gap-2 text-sm text-text-mid">
+              <span className="truncate">{p.display_name || p.handle || 'A member'}{p.handle ? ` · @${p.handle}` : ''}</span>
+              <button type="button" disabled={busy} aria-label={`Remove ${p.display_name || p.handle || 'this presenter'}`}
+                className="text-text-low hover:text-red-300" onClick={() => void run(() => kaluta.communityPaid.removePresenter(eventId, p.user_id))}>
+                <X size={14} aria-hidden="true" />
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+      <form className="mt-2 flex gap-2" onSubmit={(ev) => {
+        ev.preventDefault()
+        if (handle.trim()) void run(async () => { await kaluta.communityPaid.addPresenter(eventId, handle.trim()); setHandle('') })
+      }}>
+        <input value={handle} onChange={(ev) => setHandle(ev.target.value)} placeholder="@handle of a member"
+          aria-label="Handle of the member to add as a presenter" className={cn(FIELD, 'py-1.5')} />
+        <button type="submit" className={BTN} disabled={busy || !handle.trim()}>Add</button>
+      </form>
+      {error && <p role="alert" className="mt-1 text-xs text-red-300">{error}</p>}
+    </div>
+  )
+}
+
 /**
  * One event: when, where, places, and what the reader can do - register, get a
  * ticket, copy its link, and (host or moderators) edit or cancel it. Used in
@@ -69,6 +175,7 @@ export function EventCard({
   const [note, setNote] = useState<{ ok: boolean; text: string } | null>(null)
   const [busy, setBusy] = useState(false)
   const [editing, setEditing] = useState(false)
+  const [presenting, setPresenting] = useState(false)
 
   const act = async (fn: () => Promise<unknown>, ok?: string) => {
     setBusy(true)
@@ -129,11 +236,7 @@ export function EventCard({
       </div>
       {e.description && <p className="mt-2 whitespace-pre-wrap text-sm text-text-mid">{e.description}</p>}
       {e.speakers.length > 0 && <p className="mt-2 text-sm text-text-mid">With {e.speakers.join(', ')}</p>}
-      {e.online_url && (
-        <a href={e.online_url} target="_blank" rel="noopener noreferrer" className="mt-2 inline-block text-sm font-semibold text-gold-soft hover:underline">
-          Join link
-        </a>
-      )}
+      <JoinRoom e={e} />
       {e.recording_consent && <p className="caption mt-1">This event may be recorded.</p>}
       {note && <p role={note.ok ? 'status' : 'alert'} className={cn('mt-2 text-sm', note.ok ? 'text-emerald-300' : 'text-red-300')}>{note.text}</p>}
       {quote ? (
@@ -144,7 +247,11 @@ export function EventCard({
       ) : (
         <div className="mt-3 flex flex-wrap gap-2">
           {e.status === 'scheduled' && member && (
-            e.my_status === 'registered' ? (
+            e.my_role ? (
+              <span className="rounded-full bg-sky/15 px-3 py-1.5 text-xs font-bold text-sky">
+                {e.my_role === 'host' ? 'You are hosting - no ticket needed' : 'You are presenting - no ticket needed'}
+              </span>
+            ) : e.my_status === 'registered' ? (
               <>
                 <span className="rounded-full bg-emerald-400/15 px-3 py-1.5 text-xs font-bold text-emerald-300">You are registered</span>
                 {!e.ticket_price && (
@@ -190,8 +297,15 @@ export function EventCard({
               Cancel event
             </button>
           )}
+          {e.status === 'scheduled' && e.can_edit && (
+            <button type="button" className={BTN} aria-expanded={presenting} onClick={() => setPresenting((v) => !v)}>
+              <Mic size={12} className="me-1 inline" aria-hidden="true" />
+              Presenters
+            </button>
+          )}
         </div>
       )}
+      {presenting && e.status === 'scheduled' && e.can_edit && <Presenters eventId={e.id} />}
     </div>
   )
 }

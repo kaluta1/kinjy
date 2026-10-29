@@ -16,9 +16,11 @@ import logging
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+import httpx
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
-from sqlalchemy import select, update
+from sqlalchemy import delete, select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session as OrmSession
 
 from common import notify
@@ -56,10 +58,28 @@ def _steward(db: OrmSession, community_id: str, user_id: str) -> bool:
     return paid._role(db, community_id, user_id) in ("owner", "moderator")
 
 
+def _presenter(db: OrmSession, event_id: str, user_id: str | None) -> bool:
+    return bool(user_id and db.scalar(select(models.EventPresenter.id).where(
+        models.EventPresenter.event_id == event_id, models.EventPresenter.user_id == user_id)))
+
+
+def _own_role(db: OrmSession, e: models.CommunityEvent, user_id: str | None) -> str | None:
+    """'host' or 'presenter' when this member runs the event - they take part
+    without a ticket or a registration - else None. Read from the stored event
+    and the signed-in account, never from the request."""
+    if not user_id:
+        return None
+    if user_id == e.host_id and paid._role(db, e.community_id, user_id):
+        return "host"
+    return "presenter" if _presenter(db, e.id, user_id) else None
+
+
 def _event_out(db: OrmSession, e: models.CommunityEvent, viewer: str | None) -> dict:
     mine = db.scalar(select(models.EventRegistration).where(
         models.EventRegistration.event_id == e.id, models.EventRegistration.user_id == viewer)) if viewer else None
-    registered = bool(mine and mine.status == "registered")
+    role = _own_role(db, e, viewer)
+    # The host and presenters take part as if registered, without paying.
+    registered = bool(mine and mine.status == "registered") or role is not None
     steward = bool(viewer and _steward(db, e.community_id, viewer))
     price = paid.money(e.ticket_price) if e.ticket_price else None
     community = db.get(models.Community, e.community_id)
@@ -78,6 +98,8 @@ def _event_out(db: OrmSession, e: models.CommunityEvent, viewer: str | None) -> 
         "ticket_owner_price": str(price) if price else None,
         "ticket_price": str(price + paid.money(price * paid.markup_pct(db) / 100)) if price else None,
         "my_status": mine.status if mine else None,
+        # host | presenter | None: what the page offers instead of a ticket.
+        "my_role": role,
         # Only ever returned to someone allowed to read the event, so the
         # community's name tells them nothing new.
         "community": {"id": community.id, "slug": community.slug, "name": community.name} if community else None,
@@ -176,6 +198,9 @@ def register(event_id: str, principal: CurrentUser, db: OrmSession = Depends(get
     event, community = _event(db, event_id, principal.user_id)
     if paid._role(db, community.id, principal.user_id) is None:
         raise HTTPException(status_code=403, detail="Join the community to register")
+    if _own_role(db, event, principal.user_id):
+        # Running it is taking part: no ticket, and no place taken from attendees.
+        return _event_out(db, event, principal.user_id)
     if event.ticket_price:
         raise HTTPException(status_code=402, detail="This event needs a ticket")
     event = db.scalar(select(models.CommunityEvent).where(models.CommunityEvent.id == event_id).with_for_update().execution_options(populate_existing=True))
@@ -281,6 +306,87 @@ def attendees(event_id: str, principal: CurrentUser, db: OrmSession = Depends(ge
                        "created_at": r.created_at} for r in rows]}
 
 
+# --- presenters -----------------------------------------------------------------
+# The host names the members who present with them. A presenter joins without a
+# ticket and gets the joining link; they do not edit, cancel or see the money,
+# and it is for this one event only.
+
+def _may_manage(db: OrmSession, event: models.CommunityEvent, user_id: str) -> bool:
+    return _own_role(db, event, user_id) == "host" or _steward(db, event.community_id, user_id)
+
+
+def _presenters_out(db: OrmSession, event_id: str) -> list[dict]:
+    rows = db.scalars(select(models.EventPresenter).where(models.EventPresenter.event_id == event_id)
+                      .order_by(models.EventPresenter.created_at)).all()
+    names: dict[str, dict] = {}
+    if rows:
+        try:
+            response = httpx.post("http://user-service:8000/internal/profiles",
+                                  json={"ids": [r.user_id for r in rows]}, timeout=5)
+            if response.status_code == 200:
+                names = response.json().get("profiles", {})
+        except httpx.HTTPError:
+            pass
+    return [{"user_id": r.user_id, "handle": names.get(r.user_id, {}).get("handle"),
+             "display_name": names.get(r.user_id, {}).get("display_name"), "added_at": r.created_at} for r in rows]
+
+
+@router.get("/events/{event_id}/presenters", tags=["events"])
+def list_presenters(event_id: str, principal: CurrentUser, db: OrmSession = Depends(get_db)):
+    event, _ = _event(db, event_id, principal.user_id)
+    if not _may_manage(db, event, principal.user_id):
+        raise HTTPException(status_code=403, detail="Only the host and the community's moderators see this")
+    return {"items": _presenters_out(db, event.id)}
+
+
+class PresenterIn(BaseModel):
+    handle: str = Field(min_length=2, max_length=60)
+
+
+@router.post("/events/{event_id}/presenters", status_code=201, tags=["events"])
+def add_presenter(event_id: str, payload: PresenterIn, principal: CurrentUser, db: OrmSession = Depends(get_db)):
+    """Name a member of the community as a presenter of this event (host or moderators)."""
+    event, community = _event(db, event_id, principal.user_id)
+    if not _may_manage(db, event, principal.user_id):
+        raise HTTPException(status_code=403, detail="Only the host and the community's moderators name presenters")
+    if event.status != "scheduled":
+        raise HTTPException(status_code=409, detail="This event is cancelled")
+    handle = payload.handle.strip().lstrip("@").lower()
+    try:
+        response = httpx.post("http://user-service:8000/internal/profiles/by-handle",
+                              json={"handles": [handle]}, timeout=5)
+        response.raise_for_status()
+    except httpx.HTTPError:
+        raise HTTPException(status_code=503, detail="Members cannot be looked up right now. Try again.")
+    person = response.json().get("profiles", {}).get(handle)
+    # Somebody who is not an active member could not even read the event.
+    if person is None or paid._role(db, community.id, person["user_id"]) is None:
+        raise HTTPException(status_code=404, detail="No member of this community has that handle")
+    if person["user_id"] == event.host_id:
+        raise HTTPException(status_code=409, detail="The host already runs this event")
+    if not _presenter(db, event.id, person["user_id"]):
+        db.add(models.EventPresenter(event_id=event.id, user_id=person["user_id"], added_by=principal.user_id))
+        try:
+            db.commit()
+        except IntegrityError:
+            db.rollback()  # named twice at the same moment: one row
+        else:
+            notify.notify(person["user_id"], kind="event_presenter", title=f"You are a presenter at {event.title}",
+                          body="You join it without a ticket.", link=f"/events/{event.id}")
+    return {"items": _presenters_out(db, event.id)}
+
+
+@router.delete("/events/{event_id}/presenters/{user_id}", tags=["events"])
+def remove_presenter(event_id: str, user_id: str, principal: CurrentUser, db: OrmSession = Depends(get_db)):
+    event, _ = _event(db, event_id, principal.user_id)
+    if not _may_manage(db, event, principal.user_id):
+        raise HTTPException(status_code=403, detail="Only the host and the community's moderators remove presenters")
+    db.execute(delete(models.EventPresenter).where(
+        models.EventPresenter.event_id == event.id, models.EventPresenter.user_id == user_id))
+    db.commit()
+    return {"items": _presenters_out(db, event.id)}
+
+
 # --- paid tickets (called from paid.py) ---------------------------------------
 
 def ticketed_event(db: OrmSession, community: models.Community, event_id: str, user_id: str) -> models.CommunityEvent:
@@ -292,6 +398,10 @@ def ticketed_event(db: OrmSession, community: models.Community, event_id: str, u
         raise HTTPException(status_code=400, detail="This event is free: register instead")
     if paid._role(db, community.id, user_id) is None:
         raise HTTPException(status_code=403, detail="Join the community to buy a ticket")
+    own = _own_role(db, event, user_id)
+    if own:
+        raise HTTPException(status_code=409, detail=f"You are {'hosting' if own == 'host' else 'presenting at'} "
+                                                   "this event: you take part without a ticket")
     if event.status != "scheduled" or _aware(event.starts_at) < _now():
         raise HTTPException(status_code=409, detail="Ticket sales are closed")
     mine = db.scalar(select(models.EventRegistration).where(
