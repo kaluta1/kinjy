@@ -35,6 +35,7 @@ from common.ids import new_id
 from common.service import create_app
 
 import acceptance
+import listing_removal
 import models
 
 log = logging.getLogger("commerce-service")
@@ -112,8 +113,9 @@ app = create_app(
     schema=models.SCHEMA,
     description="Agency marketplace (held payments, final acceptance, settlement), advertising.",
     migrations=MIGRATIONS,
-    on_startup=[acceptance.start_worker],
+    on_startup=[acceptance.start_worker, listing_removal.start_worker],
 )
+app.include_router(listing_removal.router)
 
 
 EBOOK_CATEGORIES = (

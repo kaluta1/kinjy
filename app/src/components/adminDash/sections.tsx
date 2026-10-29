@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useRef, useState } from 'react'
 import { Link } from 'react-router'
 import { ExternalLink, RefreshCw, Search } from 'lucide-react'
 import { Badge, Panel, PanelState, Stat } from '@/components/dashboard/primitives'
@@ -6,9 +6,11 @@ import { useApi } from '@/hooks/useApi'
 import {
   ApiError,
   kaluta,
+  type AdminDeal,
   type AdminJournal,
   type AdminMemberBrief,
   type AdminPaymentBrief,
+  type DealRemoval,
   type MessageReportItem,
   type Order,
   type SupportCase,
@@ -690,12 +692,13 @@ function Refunds() {
  * operational support.
  */
 export function Marketplace() {
-  const [tab, setTab] = useState<'attention' | 'support' | 'funds' | 'disputes'>('attention')
+  const [tab, setTab] = useState<'attention' | 'deals' | 'support' | 'funds' | 'disputes'>('attention')
   return (
     <div className="space-y-4">
       <Chips
         options={[
           { id: 'attention', label: 'Orders needing attention' },
+          { id: 'deals', label: 'Deals' },
           { id: 'support', label: 'Support requests' },
           { id: 'funds', label: 'Order funds' },
           { id: 'disputes', label: 'Dispute history' },
@@ -704,9 +707,109 @@ export function Marketplace() {
         onChange={setTab}
       />
       {tab === 'attention' && <OrdersNeedingAttention />}
+      {tab === 'deals' && <Deals />}
       {tab === 'support' && <SupportRequests />}
       {tab === 'funds' && <OrderFunds />}
       {tab === 'disputes' && <Disputes />}
+    </div>
+  )
+}
+
+/** Deals that exist, and the one admin action on them added here: delete, with the reason its seller is sent. */
+function Deals() {
+  const [q, setQ] = useState('')
+  const [search, setSearch] = useState('')
+  const rows = useApi(() => kaluta.adminConsole.adminDeals(search), [search])
+  const [msg, setMsg] = useState<Msg>(null)
+  const [target, setTarget] = useState<AdminDeal | null>(null)
+  const items = rows.data?.items ?? []
+  return (
+    <Panel title="Deals" subtitle="Every listing that has not been deleted. Search by title, deal id or seller id.">
+      <form className="mb-3 flex gap-2" onSubmit={(e) => { e.preventDefault(); setSearch(q) }}>
+        <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Title, prd_… or usr_…"
+          aria-label="Search deals" className={cn(INPUT, 'min-w-0 flex-1')} />
+        <button type="submit" className={BTN}><Search size={13} aria-hidden="true" /> Search</button>
+      </form>
+      <Message msg={msg} />
+      <PanelState loading={rows.loading} error={rows.error} empty={items.length === 0} emptyLabel="No deal matches.">
+        <ul className="space-y-2">
+          {items.map((d) => (
+            <Row key={d.id}>
+              <div className="flex flex-wrap items-start justify-between gap-2">
+                <div className="min-w-0">
+                  <p className="font-semibold text-text-hi">{d.title}</p>
+                  <p className="caption mt-1 break-all">
+                    {d.id} · {d.kind} · {d.status} · {when(d.created_at)} · {d.vendor_name || 'seller'}{d.vendor_handle ? ` @${d.vendor_handle}` : ''}
+                  </p>
+                </div>
+                <button type="button" className={cn(BTN, 'text-red-300')} onClick={() => setTarget(d)}>Delete deal</button>
+              </div>
+            </Row>
+          ))}
+        </ul>
+      </PanelState>
+      {target && (
+        <DeleteDealDialog deal={target} onClose={() => setTarget(null)}
+          onDeleted={(r) => {
+            setTarget(null)
+            setMsg({ ok: true, text: `Deleted “${r.title}”. Seller ${r.seller_notified_in_app ? 'notified in the app' : 'notification queued (retried until it lands)'}; e-mail ${r.email === 'sent' ? 'handed to the mail server' : r.email === 'skipped' ? 'not sent (no mail configured or no address)' : 'queued for retry'}.${r.open_orders ? ' Orders already placed carry on under their own rules.' : ''}` })
+            rows.reload()
+          }} />
+      )}
+    </Panel>
+  )
+}
+
+const REASON_MIN = 10
+const REASON_MAX = 1000
+
+function DeleteDealDialog({ deal, onClose, onDeleted }: { deal: AdminDeal; onClose: () => void; onDeleted: (r: DealRemoval) => void }) {
+  const [reason, setReason] = useState('')
+  const [busy, setBusy] = useState(false)
+  // Set on the click itself: two clicks in one moment both saw busy as false.
+  const sending = useRef(false)
+  const [error, setError] = useState<string | null>(null)
+  const trimmed = reason.trim()
+  const valid = trimmed.length >= REASON_MIN && trimmed.length <= REASON_MAX
+  const submit = async () => {
+    if (!valid || sending.current) return
+    sending.current = true
+    setBusy(true)
+    setError(null)
+    try {
+      onDeleted(await kaluta.adminConsole.deleteDeal(deal.id, trimmed))
+    } catch (err) {
+      setError(errorText(err))
+      sending.current = false
+      setBusy(false)
+    }
+  }
+  return (
+    <div className="fixed inset-0 z-50 grid place-items-center bg-black/60 p-4" onClick={busy ? undefined : onClose}>
+      <div role="dialog" aria-modal="true" aria-labelledby="delete-deal-title" onClick={(e) => e.stopPropagation()}
+        className="w-full max-w-md rounded-2xl border border-[var(--cloud-border)] bg-ink-2 p-5">
+        <h3 id="delete-deal-title" className="text-lg font-bold text-text-hi">Delete deal</h3>
+        <p className="mt-1 break-words text-sm font-semibold text-text-hi">{deal.title}</p>
+        <p className="caption mt-0.5 break-all">{deal.id}</p>
+        <p className="mt-3 text-sm text-text-mid">
+          Confirming removes this deal from the marketplace for good and sends the reason below to its seller,
+          in the app and by e-mail. Orders already placed are not changed.
+        </p>
+        <label htmlFor="delete-deal-reason" className="caption mt-3 block">Reason for deletion (required)</label>
+        <textarea id="delete-deal-reason" value={reason} onChange={(e) => setReason(e.target.value)} rows={4}
+          maxLength={REASON_MAX} className={cn(INPUT, 'mt-1 w-full')} />
+        <p className="caption mt-1">
+          {trimmed.length < REASON_MIN ? `At least ${REASON_MIN} characters (${trimmed.length} so far).` : `${trimmed.length}/${REASON_MAX}`}
+        </p>
+        {error && <p role="alert" className="mt-2 text-sm text-red-300">{error}</p>}
+        <div className="mt-4 flex justify-end gap-2">
+          <button type="button" className={BTN} disabled={busy} onClick={onClose}>Cancel</button>
+          <button type="button" disabled={!valid || busy} onClick={() => void submit()}
+            className="rounded-full bg-red-500/80 px-4 py-1.5 text-xs font-bold text-white disabled:opacity-40">
+            {busy ? 'Deleting…' : 'Delete deal'}
+          </button>
+        </div>
+      </div>
     </div>
   )
 }

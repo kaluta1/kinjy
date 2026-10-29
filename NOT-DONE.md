@@ -1888,3 +1888,21 @@ Not done:
 - **Video post regression** not re-run (no sample clip locally); the video
   path is unchanged.
 - **iPhone Safari** not tested on a device; the player is the browser's own.
+
+## Admins delete a deal, with the reason sent to its seller (29/10)
+
+Admin console > Marketplace > Deals: search, "Delete deal", a dialog with the
+title and a required reason (10-1000 characters, checked on both sides).
+Soft delete (status "removed", the seller's own delete): out of listings,
+search, the deal page, ordering and deal links; orders, escrow, payments,
+commissions and ledger untouched, buyers keep what they bought. A
+listing_removals row (seller, title, admin, reason, time) is written with
+the deletion and is the outbox: in-app notification and plain-text e-mail,
+retried every minute (20 attempts) until each lands, once; plus the commerce
+audit row. Repeating the request changes nothing.
+
+Not done:
+- **E-mail "sent" means handed to the mail server**, not delivered or read.
+- **No admin screen to read past deletions** (the records are in
+  commerce.listing_removals and commerce_audit); no "undo".
+- **Moderators cannot delete deals**: admin permission, as for suspending.

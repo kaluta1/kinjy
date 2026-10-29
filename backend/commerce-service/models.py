@@ -121,6 +121,32 @@ class EbookDownload(Base):
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
+class ListingRemoval(Base):
+    """A deal an administrator deleted, and the message its seller is owed.
+
+    Written with the deletion, in one transaction, so the seller and the reason
+    are kept whatever happens to the listing afterwards; also the outbox the
+    notification and e-mail are delivered (and retried) from.
+    """
+
+    __tablename__ = "listing_removals"
+    __table_args__ = {"schema": SCHEMA}
+
+    product_id: Mapped[str] = mapped_column(String(40), primary_key=True)
+    title: Mapped[str] = mapped_column(String(200))
+    vendor_id: Mapped[str] = mapped_column(String(40), index=True)
+    admin_id: Mapped[str] = mapped_column(String(40))
+    reason: Mapped[str] = mapped_column(Text)
+    previous_status: Mapped[str | None] = mapped_column(String(20))
+    removed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    notified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # None (not tried yet) | sent (handed to the mail server) | failed (retried) | skipped
+    email_status: Mapped[str | None] = mapped_column(String(10))
+    email_sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    last_error: Mapped[str | None] = mapped_column(String(300))
+
+
 class CommerceAudit(Base):
     """Sensitive administrative actions on listings and ebook access."""
 

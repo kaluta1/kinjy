@@ -2295,6 +2295,29 @@ export interface SupportCase {
   closed_at: string | null
 }
 
+export interface AdminDeal {
+  id: string
+  title: string
+  status: string
+  kind: string
+  created_at: string
+  vendor_id: string
+  vendor_name: string | null
+  vendor_handle: string | null
+}
+
+export interface DealRemoval {
+  product_id: string
+  title: string
+  reason: string
+  removed_at: string
+  seller_notified_in_app: boolean
+  /** sent = handed to the mail server; skipped = no mail configured or no address; pending/failed = retried. */
+  email: 'sent' | 'skipped' | 'failed' | 'pending'
+  already: boolean
+  open_orders?: boolean
+}
+
 export interface OrderPayment {
   payment_id: string
   rail: string
@@ -4746,6 +4769,12 @@ export const kaluta = {
     marketOrders: (attention = false) =>
       api.get<{ items: Order[] }>(`/admin/commerce/orders${attention ? '?attention=true' : ''}`),
     retryMarketOrder: (orderId: string) => api.post<Order>(`/admin/commerce/orders/${orderId}/retry`, {}),
+    /** Deals that exist (any status but deleted), to find one to act on. */
+    adminDeals: (q = '') =>
+      api.get<{ items: AdminDeal[] }>(`/admin/commerce/products${q.trim() ? `?q=${encodeURIComponent(q.trim())}` : ''}`),
+    /** Delete a deal (soft) with the reason its seller is told. Repeating it changes nothing. */
+    deleteDeal: (productId: string, reason: string) =>
+      api.post<DealRemoval>(`/admin/commerce/products/${productId}/delete`, { reason }),
     cancelMarketOrder: (orderId: string, note: string) =>
       api.post<Order>(`/admin/commerce/orders/${orderId}/cancel`, { note }),
     supportCases: (status: 'open' | 'closed' | '' = 'open') =>
