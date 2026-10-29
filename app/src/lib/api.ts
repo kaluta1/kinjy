@@ -3175,6 +3175,8 @@ export const kaluta = {
      * "uploading…" spinner on a 40 MB clip tells the member nothing for a
      * minute. XHR can, and a video upload is exactly where that matters.
      */
+    /** Delete one of my own uploads (a file picked, then removed before posting). */
+    discard: (id: string) => api.delete<void>(`/media/${id}`),
     uploadWithProgress(
       file: File,
       onProgress: (fraction: number) => void,

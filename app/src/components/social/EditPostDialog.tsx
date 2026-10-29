@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
-import { ImagePlus, Loader2, Play, X } from 'lucide-react'
+import { ImagePlus, Loader2, Music, Play, X } from 'lucide-react'
 import RichTextEditor from '@/components/social/RichTextEditor'
 import { ApiError, kaluta, type Post, type PostMedia, type UploadedMedia } from '@/lib/api'
 import { articleMediaIds, htmlToText } from '@/lib/richtext'
@@ -255,7 +255,13 @@ export default function EditPostDialog({
               <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
                 {attached.map((item) => (
                   <div key={item.media_id} className="relative aspect-square overflow-hidden rounded-xl bg-black/40">
-                    {item.kind === 'video' ? (
+                    {item.kind === 'audio' ? (
+                      // A post's audio keeps its player here too, not a broken picture.
+                      <div className="grid h-full w-full place-items-center p-2">
+                        <Music size={22} className="text-amber-400" aria-hidden="true" />
+                        <audio src={item.preview} controls preload="metadata" aria-label="Audio of this post" className="w-full" />
+                      </div>
+                    ) : item.kind === 'video' ? (
                       item.poster ? (
                         <img src={item.poster} alt="" className="h-full w-full object-cover" />
                       ) : (

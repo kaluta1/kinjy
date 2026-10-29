@@ -8,6 +8,7 @@ import {
   Loader2,
   Lock,
   MapPin,
+  Music,
   UserRound,
   Tag,
   Sparkles,
@@ -84,7 +85,7 @@ const VISIBILITY = [
   { id: 'private', label: 'Only me', icon: UserRound },
 ] as const
 
-type Kind = 'text' | 'image' | 'video' | 'article'
+type Kind = 'text' | 'image' | 'video' | 'audio' | 'article'
 
 /**
  * The types the server actually stores, named one by one rather than as
@@ -98,10 +99,16 @@ type Kind = 'text' | 'image' | 'video' | 'article'
  */
 const IMAGE_ACCEPT = 'image/jpeg,image/png,image/webp,image/gif'
 const VIDEO_ACCEPT = 'video/mp4,video/webm'
+// What media-service takes for a post's audio (checked again there, by the
+// file's first bytes) and its limit for any post file.
+const AUDIO_TYPES = ['audio/mpeg', 'audio/ogg', 'audio/wav', 'audio/mp4', 'audio/x-m4a']
+const AUDIO_ACCEPT = `${AUDIO_TYPES.join(',')},.mp3,.ogg,.wav,.m4a`
+const AUDIO_MAX_MB = 200
 
 const KINDS: Array<{ id: Kind; label: string; icon: typeof ImageIcon; accept?: string; tint: string }> = [
   { id: 'image', label: 'Photo', icon: ImageIcon, accept: IMAGE_ACCEPT, tint: 'text-emerald-400' },
   { id: 'video', label: 'Video', icon: Video, accept: VIDEO_ACCEPT, tint: 'text-red-400' },
+  { id: 'audio', label: 'Audio', icon: Music, accept: AUDIO_ACCEPT, tint: 'text-amber-400' },
   { id: 'article', label: 'Article', icon: FileText, tint: 'text-sky' },
 ]
 
@@ -264,6 +271,9 @@ export default function Composer({
     }
   }, [open, lang])
   const [busy, setBusy] = useState(false)
+  // Set the instant Post is pressed. `busy` is state, so a second press in the
+  // same moment still read it as false and published the post twice.
+  const publishing = useRef(false)
   const [error, setError] = useState<string | null>(null)
   // Separate from `error`: the post succeeded, and only the extra formats have
   // something to report. Showing that as an error would misrepresent it.
@@ -334,8 +344,63 @@ export default function Composer({
     }
   }
 
+  /**
+   * Delete an audio file the member took off a draft. Only one stored for
+   * this draft: the same bytes uploaded again come back as the *existing*
+   * file (deduplicated), which may be the sound of a post already published -
+   * deleting that would silence the old post.
+   */
+  const discardDraftAudio = (item: UploadedMedia) => {
+    if (!item.deduplicated) void kaluta.media.discard(item.id).catch(() => undefined)
+  }
+
+  // How far an audio file has got, 0..1; null when none is uploading.
+  const [audioProgress, setAudioProgress] = useState<number | null>(null)
+
+  /** One audio file per post: checked here first (media-service checks again), then uploaded with progress. */
+  const uploadAudio = async (file: File) => {
+    const known = AUDIO_TYPES.includes(file.type) || /\.(mp3|ogg|wav|m4a)$/i.test(file.name)
+    if (!known || !file.type) {
+      setError(`${file.name || 'That file'} is not an MP3, M4A, OGG or WAV audio file.`)
+      return
+    }
+    if (file.size > AUDIO_MAX_MB * 1024 * 1024) {
+      setError(`${file.name || 'That file'} is over ${AUDIO_MAX_MB} MB.`)
+      return
+    }
+    setUploading(true)
+    setAudioProgress(0)
+    setError(null)
+    try {
+      const asset = await kaluta.media.uploadWithProgress(file, setAudioProgress, { provenance })
+      // Replacing the audio: the one it replaces goes, if it was stored for
+      // this draft (see discardDraftAudio).
+      for (const old of media.filter((m) => m.kind === 'audio')) {
+        if (old.previewUrl) URL.revokeObjectURL(old.previewUrl)
+        if (old.id !== asset.id) discardDraftAudio(old)
+      }
+      setMedia((current) => [
+        ...current.filter((m) => m.kind !== 'audio'),
+        { ...asset, previewUrl: URL.createObjectURL(file) },
+      ].slice(0, 4))
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'The audio could not be uploaded. Try again.')
+    } finally {
+      setUploading(false)
+      setAudioProgress(null)
+      if (fileRef.current) fileRef.current.value = ''
+    }
+  }
+
   const upload = async (files: FileList | null) => {
     if (!files?.length) return
+    const first = files[0]
+    // In Audio, whatever was picked is checked as audio (and refused with the
+    // formats when it is not); elsewhere an audio file is still recognised.
+    if (kind === 'audio' || first.type.startsWith('audio/') || /\.(mp3|ogg|wav|m4a)$/i.test(first.name)) {
+      await uploadAudio(first)
+      return
+    }
     setUploading(true)
     setError(null)
     try {
@@ -382,7 +447,7 @@ export default function Composer({
 
   const submit = async (event: React.FormEvent) => {
     event.preventDefault()
-    if (!canPost) return
+    if (!canPost || publishing.current) return
     if (!community && visibility === 'circle' && audienceIsEmpty(audience)) {
       setError('Pick at least one circle or person.')
       return
@@ -401,6 +466,7 @@ export default function Composer({
       publishAt = when.toISOString()
     }
 
+    publishing.current = true
     setBusy(true)
     setError(null)
     try {
@@ -492,6 +558,7 @@ export default function Composer({
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'Could not publish — is social-service up?')
     } finally {
+      publishing.current = false
       setBusy(false)
     }
   }
@@ -687,7 +754,13 @@ export default function Composer({
               <ul className={cn('grid gap-2', media.length === 1 ? 'grid-cols-1' : 'grid-cols-2')}>
                 {media.map((item) => (
                   <li key={item.id} className="relative overflow-hidden rounded-card-sm border border-white/10">
-                    {item.kind === 'video' ? (
+                    {item.kind === 'audio' ? (
+                      // Played here before posting; never on its own.
+                      <div className="flex items-center gap-2 p-3 pe-10">
+                        <Music size={16} className="shrink-0 text-amber-400" aria-hidden="true" />
+                        <audio src={item.previewUrl ?? item.url} controls preload="metadata" aria-label="Preview of your audio" className="h-10 min-w-0 flex-1" />
+                      </div>
+                    ) : item.kind === 'video' ? (
                       <video src={item.previewUrl ?? item.url} className="h-36 w-full object-cover" muted playsInline />
                     ) : (
                       <img src={item.previewUrl ?? item.url} alt="" className="h-36 w-full object-cover" />
@@ -697,6 +770,8 @@ export default function Composer({
                       onClick={() => {
                         if (item.previewUrl) URL.revokeObjectURL(item.previewUrl)
                         setMedia((c) => c.filter((m) => m.id !== item.id))
+                        // An audio file is large; one stored for this draft only goes.
+                        if (item.kind === 'audio') discardDraftAudio(item)
                       }}
                       aria-label="Remove"
                       className="absolute end-1.5 top-1.5 rounded-full bg-ink/80 p-1 text-text-hi"
@@ -748,10 +823,13 @@ export default function Composer({
             </div>
 
             {uploading && (
-              <p className={cn('mt-2 inline-flex items-center gap-1.5 text-xs', tok.low)}>
+              <p className={cn('mt-2 inline-flex items-center gap-1.5 text-xs', tok.low)} role="status">
                 <Loader2 size={12} className="animate-spin" aria-hidden="true" />
-                Uploading…
+                {audioProgress !== null ? `Uploading the audio… ${Math.round(audioProgress * 100)}%` : 'Uploading…'}
               </p>
+            )}
+            {kind === 'audio' && !uploading && !media.some((m) => m.kind === 'audio') && (
+              <p className={cn('mt-2 text-xs', tok.low)}>Audio: MP3, M4A, OGG or WAV, up to {AUDIO_MAX_MB} MB.</p>
             )}
 
             {showDetails && (

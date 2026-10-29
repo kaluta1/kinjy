@@ -32,6 +32,9 @@ _CHECKS = {
     "image/gif": lambda h: h[:6] in (b"GIF87a", b"GIF89a"),
     "image/webp": lambda h: _riff(h, b"WEBP"),
     "video/mp4": lambda h: h[4:8] in _MP4_FIRST_BOXES,
+    # M4A is the same container as MP4, holding only sound.
+    "audio/mp4": lambda h: h[4:8] in _MP4_FIRST_BOXES,
+    "audio/x-m4a": lambda h: h[4:8] in _MP4_FIRST_BOXES,
     "video/webm": lambda h: h[:4] == b"\x1a\x45\xdf\xa3",
     # An MP3 starts with an ID3 tag, or straight with a frame (11 set sync bits).
     "audio/mpeg": lambda h: h[:3] == b"ID3" or (len(h) > 1 and h[0] == 0xFF and h[1] & 0xE0 == 0xE0),

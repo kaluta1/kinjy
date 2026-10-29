@@ -23,6 +23,7 @@ import KnownActors from './KnownActors'
 import Expandable from './Expandable'
 import LinkPreview, { firstLink } from './LinkPreview'
 import MediaGrid from './MediaGrid'
+import AudioPost from './AudioPost'
 import MediaLightbox from './MediaLightbox'
 import Reactions from './Reactions'
 import {
@@ -360,7 +361,7 @@ export default function PostCard({
     Date.now() - new Date(target.created_at).getTime() < 24 * 60 * 60 * 1000
 
   const openDetail = () => {
-    if (media.length > 0 && media[0]?.url) {
+    if (visualMedia.length > 0 && visualMedia[0]?.url) {
       // Asked for the conversation, so the viewer opens with it showing. On a
       // phone that is the difference between tapping "comments" and getting a
       // photo on a black screen, and tapping it and reading the comments.
@@ -612,6 +613,11 @@ export default function PostCard({
   // so nothing appears twice.
   const inlineIds = isRichArticle ? new Set(articleMediaIds(sourceBody)) : new Set<string>()
   const gridMedia = inlineIds.size ? media.filter((m) => !m.media_id || !inlineIds.has(m.media_id)) : media
+  // Audio is listened to, not looked at: it has its own player under the
+  // text, and the picture grid and viewer carry only what can be seen.
+  const visualMedia = media.filter((m) => m.kind !== 'audio')
+  const gridVisual = gridMedia.filter((m) => m.kind !== 'audio')
+  const gridAudio = gridMedia.filter((m) => m.kind === 'audio')
   const articleHtml = isRichArticle
     ? hydrateArticle(sanitizeHtml(body), (id) => media.find((m) => m.media_id === id) ?? null, {
         mountVideos: true,
@@ -845,20 +851,23 @@ export default function PostCard({
 
       {/* Attached media. The layout follows the count - see MediaGrid: a
           single picture is never cropped, a grid is. */}
-      {gridMedia.length > 0 && (
+      {gridVisual.length > 0 && (
         <MediaGrid
-          media={gridMedia}
+          media={gridVisual}
           onOpen={(at) => {
             setWantsComments(false)
             // The grid may leave out the article's inline media; the viewer
             // shows them all, so its index is the one in the full list.
-            setPreview(Math.max(0, media.indexOf(gridMedia[at])))
+            setPreview(Math.max(0, visualMedia.indexOf(gridVisual[at])))
           }}
           onLoadDeferred={loadMedia}
           loadingDeferred={loadingMedia}
           autoplay={post.autoplay !== false}
         />
       )}
+      {gridAudio.map((item, index) => (
+        <AudioPost key={item.url ?? `audio-${index}`} item={item} onLoadDeferred={loadMedia} loadingDeferred={loadingMedia} />
+      ))}
 
       {translation && (
         <p className="caption mt-1.5 text-sky">
@@ -1348,7 +1357,7 @@ export default function PostCard({
 
       {preview !== null && (
         <MediaLightbox
-          media={media}
+          media={visualMedia}
           index={preview}
           onClose={() => setPreview(null)}
           asideOpen={wantsComments}

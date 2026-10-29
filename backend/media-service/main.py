@@ -47,6 +47,8 @@ ALLOWED = {
     "image/jpeg": "image", "image/png": "image", "image/webp": "image", "image/gif": "image",
     "video/mp4": "video", "video/webm": "video",
     "audio/mpeg": "audio", "audio/ogg": "audio", "audio/wav": "audio",
+    # M4A: what phones record and export; every current browser plays it.
+    "audio/mp4": "audio", "audio/x-m4a": "audio",
     "application/pdf": "document",
 }
 

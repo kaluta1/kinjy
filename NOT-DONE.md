@@ -1869,3 +1869,22 @@ Not done:
   Product Developped" (29/10, your account) has no photo stored; if one was
   added in the form and not saved, the video would show where.
 - **The member import itself** still does not handle listings; it has run.
+
+## Audio posts (29/10)
+
+Found: the server already took audio posts (format "audio", MP3/OGG/WAV
+checked by their first bytes, an "Audio only" feed), but the composer had no
+Audio option and the feed drew any non-video file as a picture ("This image
+could not be loaded"). Added: Audio in the composer (pick, preview, replace,
+remove, progress, formats and 200 MB limit shown, checked before upload), a
+player on the post (browser controls, no autoplay, data-saver aware), audio
+kept out of the picture grid and viewer, M4A accepted (phones), and Post
+pressed twice publishes once (it published twice before, for every kind).
+
+Not done:
+- **A file uploaded and then abandoned** (composer closed without posting)
+  stays stored, as for photos today; removing or replacing an audio in the
+  draft deletes it, unless it is a file already used by another post.
+- **Video post regression** not re-run (no sample clip locally); the video
+  path is unchanged.
+- **iPhone Safari** not tested on a device; the player is the browser's own.
