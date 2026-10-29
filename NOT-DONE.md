@@ -1846,3 +1846,26 @@ Not done / needs a decision:
 - **recording_url** exists but nothing sets it; recordings stay with the
   meeting tool the host uses.
 - **Presenters are told in-app** (notification), not by e-mail.
+
+## Marketplace listings without a seller (29/10)
+
+Found (public API, production): "Panier" (25/09) and "Sweep item" (19/08)
+have no photo and no description stored - nothing was ever uploaded - and
+their sellers' accounts no longer exist: the 26/10 member rebuild
+(scripts/import_members.py) deleted those accounts but its table list never
+included commerce.products, so the listings stayed active, showing "Seller"
+with no picture, and orderable. Listings that do have photos serve them
+correctly (checked: 200, image/png, 2.2 MB).
+Added: commerce-service/suspend_orphan_listings.py - dry run by default;
+--apply suspends (existing admin take-down, audit row, reversible) only the
+active listings whose seller auth-service reports gone; data kept.
+
+Not done:
+- **Run on production**: needs your go (deploy commerce, dry run, then apply).
+- **Photos and descriptions of those two listings**: none stored; nothing to
+  recover. Their sellers cannot be identified beyond the old account id.
+- **The video "Product Upload.mp4" was not available** to me (not attached,
+  not on this machine): its narration is not covered. "Have you Digital
+  Product Developped" (29/10, your account) has no photo stored; if one was
+  added in the form and not saved, the video would show where.
+- **The member import itself** still does not handle listings; it has run.
