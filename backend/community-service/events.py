@@ -64,13 +64,20 @@ def _presenter(db: OrmSession, event_id: str, user_id: str | None) -> bool:
 
 
 def _own_role(db: OrmSession, e: models.CommunityEvent, user_id: str | None) -> str | None:
-    """'host' or 'presenter' when this member runs the event - they take part
-    without a ticket or a registration - else None. Read from the stored event
-    and the signed-in account, never from the request."""
+    """'host', 'moderator' or 'presenter' when this member runs the event - they
+    take part without a ticket or a registration - else None. Read from the
+    stored event and the signed-in account, never from the request.
+
+    'moderator' is the owner or a moderator of the event's own community: the
+    people who already edit, cancel and see the attendees of its events. Read
+    live, so a moderator who is removed loses it at once, and moderating
+    another community gives nothing here."""
     if not user_id:
         return None
     if user_id == e.host_id and paid._role(db, e.community_id, user_id):
         return "host"
+    if _steward(db, e.community_id, user_id):
+        return "moderator"
     return "presenter" if _presenter(db, e.id, user_id) else None
 
 

@@ -1142,7 +1142,7 @@ export interface CommunityEvent {
   ticket_price: string | null
   my_status: 'registered' | 'waitlisted' | 'cancelled' | null
   /** The viewer runs it: the host, or a presenter the host named. No ticket for them. */
-  my_role?: 'host' | 'presenter' | null
+  my_role?: 'host' | 'moderator' | 'presenter' | null
   /** The community it happens in, for its page and its link. */
   community?: { id: string; slug: string; name: string } | null
   /** The host, or the community's owner and moderators. */

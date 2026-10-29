@@ -1906,3 +1906,24 @@ Not done:
 - **No admin screen to read past deletions** (the records are in
   commerce.listing_removals and commerce_audit); no "undo".
 - **Moderators cannot delete deals**: admin permission, as for suspending.
+
+## 29/10 afternoon: moderators join paid events free; "Most followed" counts every follow
+
+Events: the owner and moderators of an event's community (who already edit and
+cancel its events) take part without a ticket, like the host and presenters;
+read live, so a moderator removed loses it.
+People to follow: the ranking required each follower to have a profile row,
+which imported members who had not opened their profile yet did not have -
+so their follows did not count. Every follow row counts now (the follow
+button's rule). Blocking now lowers the stored counts as unfollowing does;
+user-service/recount_follow_counters.py (dry run first) repairs the stored
+counts that drifted, so a profile and the rail give the same number.
+
+Not done / to know:
+- **Run the recount on production** (dry run, then --apply): needs your go.
+- **Still left out of the rail, by the existing rules**: people the viewer
+  already follows, members without an uploaded photo, members who turned
+  "discoverable" off, and - for an adult viewer - members whose age is
+  unknown (the 26/10 import gave thousands no date of birth; they are treated
+  as minors until they give one). Production data not read: I could not
+  check which of these applies to a given member.

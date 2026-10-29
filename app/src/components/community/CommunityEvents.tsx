@@ -68,7 +68,7 @@ function JoinRoom({ e }: { e: CommunityEvent }) {
   if (e.status !== 'scheduled' || e.mode === 'in_person') return null
   const start = new Date(e.starts_at).getTime()
   const end = e.ends_at ? new Date(e.ends_at).getTime() : start + 6 * 3600_000
-  const runs = e.my_role === 'host' || e.my_role === 'presenter'
+  const runs = Boolean(e.my_role)
   if (!e.online_url) {
     return runs ? (
       <p className="mt-2 text-sm text-amber-300">
@@ -80,7 +80,7 @@ function JoinRoom({ e }: { e: CommunityEvent }) {
   }
   const live = now >= start && now < end
   const over = now >= end
-  const label = e.my_role === 'host' ? 'Open the room and start' : runs ? 'Open the room' : 'Join the event'
+  const label = e.my_role === 'host' ? 'Open the room and start' : 'Join the event'
   return (
     <div className="mt-3 flex flex-wrap items-center gap-2">
       <a
@@ -249,7 +249,11 @@ export function EventCard({
           {e.status === 'scheduled' && member && (
             e.my_role ? (
               <span className="rounded-full bg-sky/15 px-3 py-1.5 text-xs font-bold text-sky">
-                {e.my_role === 'host' ? 'You are hosting - no ticket needed' : 'You are presenting - no ticket needed'}
+                {e.my_role === 'host'
+                  ? 'You are hosting - no ticket needed'
+                  : e.my_role === 'moderator'
+                    ? 'You moderate this event - no ticket needed'
+                    : 'You are presenting - no ticket needed'}
               </span>
             ) : e.my_status === 'registered' ? (
               <>

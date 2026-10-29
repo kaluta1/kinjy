@@ -122,6 +122,29 @@ try:
     check("removed: no link any more", ev(member, paid_ev["id"])["online_url"] is None)
     check("a stranger cannot read the presenter list", c.get(f"/events/{paid_ev['id']}/presenters", headers=stranger["h"]).status_code == 403)
 
+    print("== the community's moderators ==")
+    e = ev(mod, paid_ev["id"])
+    check("a moderator of the event's community joins without a ticket", e["my_role"] == "moderator" and e["online_url"] == URL, e)
+    check("no ticket is sold to them", quote(mod, cid, paid_ev["id"]).status_code == 409)
+    r = c.post(f"/events/{paid_ev['id']}/register", headers=mod["h"])
+    check("'registering': no charge, no place, no payment", r.status_code == 200 and psql(
+        f"select count(*) from community.event_registrations where event_id='{paid_ev['id']}' and user_id='{mod['id']}'") == "0"
+          and psql(f"select count(*) from community.community_payments where user_id='{mod['id']}'") == "0", r.text)
+    other_owner = register("Demo Other Owner")
+    oc = c.post("/communities", headers=other_owner["h"], json={"name": f"Demo Elsewhere {other_owner['handle']}", "kind": "public"}).json()
+    c.patch(f"/communities/{oc['id']}/spaces", headers=other_owner["h"], json={"spaces": {"events": True}})
+    c.post(f"/communities/{oc['id']}/events", headers=other_owner["h"], json={
+        "title": "Demo event elsewhere", "starts_at": later(30), "timezone": "UTC", "online_url": URL})
+    c.post(f"/communities/{cid}/join", headers=other_owner["h"])
+    e = ev(other_owner, paid_ev["id"])
+    check("owning a community and hosting an event elsewhere gives nothing here",
+          e["my_role"] is None and e["online_url"] is None and quote(other_owner, cid, paid_ev["id"]).status_code == 200, e)
+    psql(f"update community.memberships set role='member' where community_id='{cid}' and user_id='{mod['id']}'")
+    e = ev(mod, paid_ev["id"])
+    check("a moderator removed from the role loses it at once", e["my_role"] is None and e["online_url"] is None, e)
+    check("and is asked for a ticket like anyone", quote(mod, cid, paid_ev["id"]).status_code == 200)
+    psql(f"update community.memberships set role='moderator' where community_id='{cid}' and user_id='{mod['id']}'")
+
     print("== attendees ==")
     e = ev(member, paid_ev["id"])
     check("an unpaid member gets no joining link", e["online_url"] is None and e["my_role"] is None, e)

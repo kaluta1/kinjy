@@ -1,4 +1,4 @@
-"""People to follow: ranked by real followers, only members with a photo (28/10).
+"""People to follow: ranked by real followers, only members with a photo (28/10, 29/10).
 
     python backend/tests/e2e_people_to_follow.py
 
@@ -80,11 +80,14 @@ try:
     followers(nophoto, 90)
     followers(blank, 80)
     followers(minor, 70)
-    # Echo: a stale counter far above the truth, and follows from members who no longer exist.
-    sql(f"update users.profiles set followers_count=100000 where user_id='{e['id']}'")
+    # Stale counters both ways; and Echo's 60 more followers are members whose
+    # profile row was never made (imported, not yet opened) - they still count.
+    sql(f"update users.profiles set followers_count=100000 where user_id='{b['id']}'")
     sql(f"update users.profiles set followers_count=0 where user_id='{a['id']}'")
     sql("insert into users.follows (follower_id, followee_id, created_at) select 'usr_ghost' || g, "
         f"'{e['id']}', now() from generate_series(1, 60) g")
+    # Echo is the oldest of them, so the default order (newest first) puts it last.
+    sql(f"update users.profiles set created_at = now() - interval '400 days' where user_id='{e['id']}'")
 
     print("== ranking ==")
     got = suggested(viewer)
@@ -93,10 +96,12 @@ try:
     mine = [i for i in order if i in {m["id"] for m in tests}]
     ties = [b2["id"], b["id"]]  # equal totals: the newer member first, as before
     check("most real followers first, whatever the stored counter says",
-          mine == [a["id"], *ties, e["id"]], [(i["display_name"], i["followers_count"]) for i in items[:8]])
-    check("the totals shown are the real ones (40, 30, 30, 20)",
-          [next(i["followers_count"] for i in items if i["user_id"] == x) for x in mine] == [40, 30, 30, 20])
-    check("follows from members who no longer exist do not count", next(i for i in items if i["user_id"] == e["id"])["followers_count"] == 20)
+          mine == [e["id"], a["id"], *ties], [(i["display_name"], i["followers_count"]) for i in items[:8]])
+    check("the totals shown are the follows that exist (80, 40, 30, 30)",
+          [next(i["followers_count"] for i in items if i["user_id"] == x) for x in mine] == [80, 40, 30, 30])
+    check("followers without a profile row yet count (the rule of the follow button)",
+          next(i for i in items if i["user_id"] == e["id"])["followers_count"] == 80)
+    check("the oldest member, last in the default order, is still found first", order[0] == e["id"] or mine[0] == e["id"])
     check("the whole list is in descending order", all(x["followers_count"] >= y["followers_count"] for x, y in zip(items, items[1:])))
     check("the reason shown is unchanged", got["reason"] == "most_followed")
 
@@ -108,7 +113,10 @@ try:
     check("...from the upload logic, not a placeholder", without == "0", without)
 
     print("== limits and ties ==")
-    check("limit 1: the top member, not the first of an arbitrary set", [i["user_id"] for i in suggested(viewer, 1)["items"]] == [a["id"]])
+    check("limit 1: the top member, not the first of an arbitrary set", [i["user_id"] for i in suggested(viewer, 1)["items"]] == [e["id"]])
+    two = [i["user_id"] for i in suggested(viewer, 2)["items"]]
+    check("a member with two followers cannot take a slot from those with more",
+          all(next(i["followers_count"] for i in items if i["user_id"] == x) >= 40 for x in two), two)
     three = [i["user_id"] for i in suggested(viewer, 3)["items"]]
     check("limit 3 is the head of the full list", three == order[:3], (three, order[:3]))
     runs = {tuple(i["user_id"] for i in suggested(viewer)["items"]) for _ in range(4)}
@@ -153,8 +161,10 @@ try:
     for t in teens:
         photo(t)
         followers(t, 50)
+    for t in teens:
+        followers(t, 90)  # above Echo now: the whole first batch is teenagers
     check("a page trimmed empty reads on: the most-followed adult still comes back",
-          [i["user_id"] for i in suggested(viewer, 1)["items"]] == [a["id"]])
+          [i["user_id"] for i in suggested(viewer, 1)["items"]] == [e["id"]])
     teen_view = [i["user_id"] for i in suggested(minor)["items"]]
     check("a minor still sees everybody eligible", a["id"] in teen_view and minor["id"] not in teen_view)
     r = c.post(f"/users/{a['id']}/follow", headers=viewer["h"])
@@ -164,6 +174,31 @@ try:
     check("somebody blocked leaves the list", r.status_code in (200, 201) and b["id"] not in [i["user_id"] for i in suggested(viewer)["items"]])
     c.post(f"/users/{viewer['id']}/block", headers=e["h"])
     check("somebody who blocked you leaves the list", e["id"] not in [i["user_id"] for i in suggested(viewer)["items"]])
+
+    print("== the profile's count agrees ==")
+    fan2 = register("Demo Follower")
+    tests.append(fan2)
+    ids = ",".join(f"'{m['id']}'" for m in tests)
+    c.post(f"/users/{b2['id']}/follow", headers=fan2["h"])
+    before = sql(f"select followers_count from users.profiles where user_id='{b2['id']}'")
+    c.post(f"/users/{fan2['id']}/block", headers=b2["h"])
+    after = sql(f"select followers_count from users.profiles where user_id='{b2['id']}'")
+    check("a block that severs a follow now lowers the stored count too", int(after) == int(before) - 1, (before, after))
+    import json as _json
+    dry = _json.loads(subprocess.run(["docker", "exec", "-w", "/app", "kaluta-user", "python", "recount_follow_counters.py"],
+                                     capture_output=True, text=True, env={**__import__("os").environ, "MSYS_NO_PATHCONV": "1"}).stdout)
+    drifted = {d["user_id"] for d in dry["drifted"]}
+    check("the recount's dry run finds the stale counts, and changes nothing",
+          {a["id"], b["id"]} <= drifted and sql(f"select followers_count from users.profiles where user_id='{b['id']}'") == "100000", dry["count"])
+    subprocess.run(["docker", "exec", "-w", "/app", "kaluta-user", "python", "recount_follow_counters.py", "--apply"],
+                   capture_output=True, text=True, env={**__import__("os").environ, "MSYS_NO_PATHCONV": "1"})
+    rail = {i["user_id"]: i["followers_count"] for i in suggested(stranger)["items"]}
+
+    check("after it, the profile and the rail give the same number",
+          all(int(sql(f"select followers_count from users.profiles where user_id='{x}'")) == n for x, n in rail.items()), rail)
+    again = _json.loads(subprocess.run(["docker", "exec", "-w", "/app", "kaluta-user", "python", "recount_follow_counters.py"],
+                                       capture_output=True, text=True, env={**__import__("os").environ, "MSYS_NO_PATHCONV": "1"}).stdout)
+    check("a second run finds nothing", again["count"] == 0, again["count"])
     r = c.post(f"/connections/{b2['id']}", headers=viewer["h"], json={})
     check("Connect still works", r.status_code in (200, 201), r.text)
     row = next((i for i in suggested(viewer)["items"] if i["user_id"] == b2["id"]), None)

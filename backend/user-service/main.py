@@ -10,7 +10,7 @@ from fastapi import Depends, HTTPException
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import and_, case, delete, func, or_, select
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.orm import Session as OrmSession, aliased
+from sqlalchemy.orm import Session as OrmSession
 
 from common import ageclient, notify
 from common.agesafety import engine
@@ -517,8 +517,12 @@ def people_suggestions(principal: CurrentUser, limit: int = 5, db: OrmSession = 
     # That column is only moved by the follow and unfollow buttons; a block
     # deletes follows in both directions and an erased member's follows are
     # deleted with them, neither touching it, so it drifted upwards and the
-    # rail put members with fewer real followers above members with more. A
-    # follow counts while its follower still has a profile.
+    # rail put members with fewer real followers above members with more.
+    # Every follow row counts - the rule the follow button applies. (It used
+    # to need the follower to have a profile row too; profiles are made on
+    # first use and the imported members' were never made, so followers who
+    # had not opened a profile yet did not count, and somebody with two
+    # followers outranked people with more.)
     # Turning `discoverable` off keeps a member out of this rail, as the privacy
     # screen promises - the same rule as /users/search: hidden from strangers,
     # not from the people they already know. Known means connected either way
@@ -528,10 +532,8 @@ def people_suggestions(principal: CurrentUser, limit: int = 5, db: OrmSession = 
         db.scalars(select(models.Follow.follower_id).where(models.Follow.followee_id == principal.user_id)).all()
     )
 
-    follower = aliased(models.Profile)
     counts = (
         select(models.Follow.followee_id.label("user_id"), func.count().label("total"))
-        .join(follower, follower.user_id == models.Follow.follower_id)
         .group_by(models.Follow.followee_id)
         .subquery()
     )
@@ -562,12 +564,13 @@ def people_suggestions(principal: CurrentUser, limit: int = 5, db: OrmSession = 
     # Minors are trimmed out for adult viewers after the query, so the next
     # batch is read whenever trimming left the page short: the rail shows the
     # most-followed members this viewer may see, not the survivors of the
-    # first sixty. Bounded, because each candidate costs an age lookup.
+    # first sixty. Bounded, because each candidate costs an age lookup (cached),
+    # but far enough down that a page of trimmed candidates does not stop it.
     wanted = min(limit, 20)
     batch = agediscovery.widened(wanted, 60)
     rows: list = []
     followers: dict[str, int] = {}
-    for page in range(5):
+    for page in range(max(5, 600 // batch)):
         found = db.execute(query.offset(page * batch).limit(batch)).all()
         followers.update({p.user_id: n for p, n in found})
         rows += agediscovery.filter_profiles(principal.user_id, [p for p, _ in found], wanted - len(rows))
@@ -1840,13 +1843,20 @@ def block(user_id: str, principal: CurrentUser, db: OrmSession = Depends(get_db)
         )
     ):
         db.add(models.Block(user_id=principal.user_id, blocked_id=user_id))
-    # Blocking severs the follow relation in both directions.
-    db.execute(
-        delete(models.Follow).where(
-            ((models.Follow.follower_id == principal.user_id) & (models.Follow.followee_id == user_id))
-            | ((models.Follow.follower_id == user_id) & (models.Follow.followee_id == principal.user_id))
-        )
-    )
+    # Blocking severs the follow relation in both directions - and the stored
+    # counts follow, as they do on unfollow. They did not, and the followers
+    # shown on a profile drifted above the follows that exist.
+    for follower_id, followee_id in ((principal.user_id, user_id), (user_id, principal.user_id)):
+        severed = db.execute(
+            delete(models.Follow).where(
+                models.Follow.follower_id == follower_id, models.Follow.followee_id == followee_id
+            )
+        ).rowcount
+        if severed:
+            for uid, column in ((followee_id, "followers_count"), (follower_id, "following_count")):
+                profile = db.get(models.Profile, uid)
+                if profile is not None:
+                    setattr(profile, column, max(0, getattr(profile, column) - 1))
     db.commit()
     return {"blocked": True}
 
