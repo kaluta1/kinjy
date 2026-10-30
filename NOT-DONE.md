@@ -1927,3 +1927,18 @@ Not done / to know:
   unknown (the 26/10 import gave thousands no date of birth; they are treated
   as minors until they give one). Production data not read: I could not
   check which of these applies to a given member.
+
+## 30/10: old DSM community deleted; long articles failed to post
+
+- "Digital Shopping Mall (DSM)" (cmy_01M2520VPWXCRT6DTAFCWTW56T, created
+  10/09, secret by then, 18 members, 4 posts) was deleted at your request,
+  with its posts, comments, reactions, memberships and spaces, in one
+  transaction. Every row is backed up on the server in
+  backups/dsm-old-community-20261030.tgz (CSV). Kept: its community audit
+  rows and moderation records. While it was public it was suggested first
+  because "Places to join" ranks by member count (18 > 16).
+- **Kinjy has no "delete community" function** (owner or admin): this was a
+  one-off by hand. To build if it should happen again.
+- Posting: hashtags were read from an article's HTML, so "&#39;", "#links"
+  and colours counted as tags and a long article overflowed posts.topics
+  (VARCHAR 255): "Internal server error". Fixed in 22e12fc; **not deployed yet**.
