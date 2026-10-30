@@ -4700,7 +4700,15 @@ export const kaluta = {
     users: (q = '', offset = 0) =>
       api.get<{
         total: number
-        items: Array<AuthUser & { country: string | null; created_at: string; invited_by: string | null }>
+        items: Array<
+          AuthUser & {
+            country: string | null
+            created_at: string
+            invited_by: string | null
+            /** The sponsor's name and handle; null when there is none (or the account is gone). */
+            sponsor: { id: string; display_name: string; handle: string } | null
+          }
+        >
       }>(
         `/admin/users?limit=50&offset=${offset}${q ? `&q=${encodeURIComponent(q)}` : ''}`,
       ),

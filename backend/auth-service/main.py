@@ -2400,7 +2400,16 @@ def admin_users(
         )
     total = db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
     rows = db.scalars(stmt.limit(min(limit, 200)).offset(offset)).all()
-    return {"total": total, "items": [schemas.UserOut.model_validate(r) for r in rows]}
+    # Who each sponsor is, by name and handle, in one query for the page: an id
+    # alone told the admin nothing.
+    sponsor_ids = {r.invited_by for r in rows if r.invited_by}
+    sponsors = {
+        s.id: {"id": s.id, "display_name": s.display_name, "handle": s.handle}
+        for s in db.scalars(select(models.User).where(models.User.id.in_(sponsor_ids))).all()
+    } if sponsor_ids else {}
+    return {"total": total, "items": [
+        {**schemas.UserOut.model_validate(r).model_dump(), "sponsor": sponsors.get(r.invited_by)} for r in rows
+    ]}
 
 
 app.include_router(attribution.router)

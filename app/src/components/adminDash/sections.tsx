@@ -176,8 +176,17 @@ export function Members() {
                     </Link>
                   </p>
                   <p className="caption mt-1 break-all">
-                    {u.email} · {u.country ?? '—'} · joined {when(u.created_at)}
-                    {u.invited_by ? ` · sponsor ${u.invited_by}` : ' · no sponsor'}
+                    {u.email} · {u.country ?? '—'} · joined {when(u.created_at)} ·{' '}
+                    {u.sponsor ? (
+                      <>
+                        sponsor {u.sponsor.display_name}{' '}
+                        <Link to={`/u/${u.sponsor.handle}`} className="hover:underline">@{u.sponsor.handle}</Link>
+                      </>
+                    ) : u.invited_by ? (
+                      `sponsor ${u.invited_by} (account no longer exists)`
+                    ) : (
+                      'no sponsor'
+                    )}
                   </p>
                 </div>
                 <div className="flex shrink-0 flex-wrap gap-1.5">
