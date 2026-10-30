@@ -986,12 +986,28 @@ def _reposted_by(db: OrmSession, viewer: str | None, posts: list[models.Post]) -
     )
 
 
+TOPICS_MAX = 255  # posts.topics is VARCHAR(255)
+
+
 def _merge_topics(topics: list[str], body: str) -> str | None:
-    """Explicit topics plus the hashtags found in the body, de-duplicated."""
+    """Explicit topics plus the hashtags found in the body, de-duplicated.
+
+    Hashtags are read from the text a reader sees, not from an article's HTML:
+    there "&#39;" (an apostrophe), "#section" links and "#ffffff" colours all
+    looked like tags, and a long article collected enough of them to overflow
+    the column - the post then failed with "Internal server error". Kept to
+    what the column holds, whole tags only, the author's own topics first.
+    """
+    text = html_module.unescape(re.sub(r"<[^>]+>", " ", body or "")) if "<" in (body or "") or "&" in (body or "") else body
     seen: list[str] = []
-    for value in [t.strip().lower() for t in topics if t.strip()] + extract_hashtags(body):
-        if value not in seen:
-            seen.append(value)
+    size = 0
+    for value in [t.strip().lower() for t in topics if t.strip()] + extract_hashtags(text):
+        if value in seen or "," in value:
+            continue
+        if size + len(value) + (1 if seen else 0) > TOPICS_MAX:
+            continue
+        seen.append(value)
+        size += len(value) + (1 if len(seen) > 1 else 0)
     return ",".join(seen) or None
 
 
